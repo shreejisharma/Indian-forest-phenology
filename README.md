@@ -58,8 +58,8 @@ The app covers **11 forest types** defined by the Champion & Seth (1968) classif
 
 ## 🚀 Live Demo
 
-> **[▶ Open App on Streamlit Cloud](https://your-username-phenology.streamlit.app)**  
-> *(Replace with your actual deployment URL after publishing)*
+> > **[▶ Open App on Streamlit Cloud](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**  
+> 
 
 ---
 
