@@ -1,4 +1,4 @@
-# 🌲 Indian Forest Phenology Predictor
+# Indian Forest Phenology Predictor
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white" />
@@ -7,236 +7,201 @@
   <img src="https://img.shields.io/badge/MODIS-MOD13Q1%20250m-green" />
   <img src="https://img.shields.io/badge/Sentinel--2-SR%2010m-blue" />
   <img src="https://img.shields.io/badge/Forest%20Types-11-brightgreen" />
-  <img src="https://img.shields.io/badge/Sites-12-orange" />
+  <img src="https://img.shields.io/badge/Sites-20%2B-orange" />
   <img src="https://img.shields.io/badge/License-MIT-lightgrey" />
 </p>
 
-<p align="center">
-  A machine learning web application for extracting and predicting phenological events
-  (Start of Season, Peak of Season, End of Season) across 11 Indian forest types using
-  MODIS / Sentinel-2 NDVI and NASA POWER meteorological data.
-</p>
+A Streamlit web application for extracting and predicting phenological events — Start of Season (SOS), Peak of Season (POS), and End of Season (EOS) — across 11 Indian forest types, using MODIS and Sentinel-2 NDVI time series paired with NASA POWER meteorological data.
+
+**[▶ Open Live App](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**
 
 ---
 
-## 📋 Table of Contents
+## Overview
 
-- [Overview](#-overview)
-- [Live Demo](#-live-demo)
-- [Features](#-features)
-- [Forest Types Supported](#-forest-types-supported)
-- [Dataset](#-dataset)
-- [How It Works](#-how-it-works)
-- [Repository Structure](#-repository-structure)
-- [Installation & Local Setup](#-installation--local-setup)
-- [Deploy on Streamlit Cloud](#-deploy-on-streamlit-cloud)
-- [Deploy on Hugging Face Spaces](#-deploy-on-hugging-face-spaces)
-- [Data Format Guide](#-data-format-guide)
-- [Recommended NASA POWER Parameters](#-recommended-nasa-power-parameters)
-- [App Settings Quick Reference](#-app-settings-quick-reference)
-- [Model Architecture](#-model-architecture)
-- [Results Summary](#-results-summary)
-- [Known Limitations](#-known-limitations)
-- [Citation](#-citation)
+Indian forest phenology is strongly driven by the southwest monsoon, yet the relationship between climate variables and phenological timing varies significantly across forest types — from teak-dominated dry deciduous forests of the Deccan Plateau to alpine meadows in Spiti Valley. Existing phenology tools are largely designed for temperate ecosystems and do not accommodate India's diverse monsoon-driven vegetation cycles.
+
+This project addresses that gap by building a **universal phenology predictor** that:
+
+- Extracts SOS, POS, and EOS dates from 8–10 years of NDVI time series (2016–2025) using ecologically appropriate methods for each forest type
+- Fits Ridge Regression models with Leave-One-Out cross-validation to relate phenological events to lagged meteorological predictors
+- Provides a web interface for uploading site data, inspecting model outputs, and generating predictions for future years
+
+The tool covers **11 forest types** from the Champion & Seth (1968) classification, validated at **20+ sites** across the Western Ghats, Eastern Ghats, Himalayas, NE India, and the Thar Desert.
 
 ---
 
-## 🌿 Overview
+## Live Demo
 
-This project builds a **universal phenology predictor** for Indian forests using:
+**[https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**
 
-- **NDVI time series** from MODIS MOD13Q1 (250m, 16-day) and Sentinel-2 SR (10m, monthly)
-- **Meteorological drivers** from NASA POWER (MERRA-2 reanalysis, daily)
-- **Ridge Regression** with Leave-One-Out cross-validation for honest small-sample R²
-- **Three detection methods** for SOS: NDVI threshold, first sustained rainfall, or max NDVI rate-of-change
-
-Phenological events — **SOS** (Start of Season), **POS** (Peak of Season), **EOS** (End of Season), and **LOS** (Length of Season) — are extracted for each year, then modelled against lagged climate variables to enable **future-year prediction**.
-
-The app covers **11 forest types** defined by the Champion & Seth (1968) classification of Indian forests, validated across **20+ sites** spanning the Western Ghats, Eastern Ghats, Himalayas, NE India, and Thar Desert.
+Upload any NDVI CSV and NASA POWER met file to run the full pipeline in your browser — no local installation required.
 
 ---
 
-## 🚀 Live Demo
+## Table of Contents
 
-> > **[▶ Open App on Streamlit Cloud](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**  
-> 
+- [Features](#features)
+- [Forest Types](#forest-types)
+- [Dataset](#dataset)
+- [Methodology](#methodology)
+- [Repository Structure](#repository-structure)
+- [Installation](#installation)
+- [Deployment](#deployment)
+- [Data Format](#data-format)
+- [Results](#results)
+- [Limitations](#limitations)
+- [Citation](#citation)
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| 📤 **Universal CSV parser** | Auto-detects date + NDVI columns in any format; auto-skips NASA POWER header block |
-| 🌱 **11 Forest types** | Pre-configured season windows, thresholds, and ecological drivers per type |
-| 🌧️ **3 SOS methods** | NDVI threshold / First sustained rainfall (monsoon) / Max NDVI rate (alpine) |
-| 📉 **3 EOS methods** | NDVI threshold / Max decline rate / Dry season onset |
-| 📊 **Savitzky-Golay smoother** | Removes cloud-contamination spikes before event extraction |
-| 🔗 **Pearson feature filter** | Only features with \|r\| ≥ 0.40 enter the model |
-| 🤖 **Ridge Regression** | L2 regularisation with auto-tuned α (RidgeCV) |
-| ✅ **LOO cross-validation** | Leave-One-Out gives unbiased R² for small n (8–10 seasons) |
-| 📈 **Correlation explorer** | Interactive heatmap of all met–phenology correlations |
-| 🔮 **Predict tab** | Enter any year's weather → get SOS/POS/EOS predictions with uncertainty |
-| 🌡️ **Met visualiser** | Dual-axis temperature + rainfall + soil moisture timeline |
-| 📋 **Methods tab** | Full technical documentation, R² guide, and improvement tips |
+| Universal CSV parser | Detects date and NDVI columns automatically; skips NASA POWER header block |
+| 11 forest type configurations | Season windows, NDVI thresholds, and ecological driver priorities pre-set per type |
+| Three SOS detection methods | NDVI threshold / first sustained rainfall (monsoon forests) / maximum rate-of-change (alpine) |
+| Three EOS detection methods | NDVI threshold / maximum decline rate / dry season onset |
+| Savitzky-Golay smoothing | Removes cloud-contamination spikes prior to event extraction |
+| Feature selection | Pearson \|r\| ≥ 0.40 filter with ecological priority ordering and collinearity check |
+| Ridge Regression | L2 regularisation with RidgeCV alpha tuning on log-spaced grid |
+| Leave-One-Out cross-validation | Unbiased R² and MAE estimates for small sample sizes (n = 8–10 seasons) |
+| Correlation explorer | Feature–event correlation tables for all meteorological predictors |
+| Prediction interface | Enter climate values for any future year to obtain SOS/POS/EOS date estimates |
 
 ---
 
-## 🌳 Forest Types Supported
+## Forest Types
 
-| # | Forest Type | Season Window | Key Sites | NDVI Amplitude |
-|---|-------------|--------------|-----------|---------------|
-| 1 | 🍂 Tropical Dry Deciduous — Monsoon | Jun–May | Tirupati, Mudumalai | 0.45–0.55 |
-| 2 | 🌿 Tropical Moist Deciduous — Monsoon | Jun–May | Simlipal, Bastar | 0.45–0.52 |
-| 3 | 🌲 Tropical Wet Evergreen / Semi-Evergreen | Jan–Dec | Agumbe | 0.25–0.35 |
-| 4 | 🌴 Tropical Dry Evergreen | Jan–Dec | Coromandel Coast | 0.20–0.35 |
-| 5 | 🌵 Tropical Thorn Forest / Scrub | Jun–May | Jaisalmer | 0.10–0.20 |
-| 6 | 🌳 Subtropical Broadleaved Hill Forest | Apr–Mar | Shiwaliks | 0.30–0.45 |
-| 7 | 🏔️ Montane Temperate Forest | Apr–Nov | W Himalayas | 0.35–0.55 |
-| 8 | ⛰️ Alpine / Subalpine Forest & Meadow | May–Oct | Spiti, Valley of Flowers | 0.15–0.85 |
-| 9 | 🌫️ Shola Forest — Southern Montane | Jan–Dec | Mukurthi NP | 0.25–0.35 |
-| 10 | 🌊 Mangrove Forest | Jan–Dec | Bhitarkanika | 0.20–0.30 |
-| 11 | 🌿 NE India Moist Evergreen | Jan–Dec | Kaziranga region | 0.30–0.45 |
+| # | Forest Type | Season Window | Key Sites | Typical NDVI Amplitude |
+|---|-------------|--------------|-----------|------------------------|
+| 1 | Tropical Dry Deciduous | Jun–May | Tirupati, Mudumalai | 0.45–0.55 |
+| 2 | Tropical Moist Deciduous | Jun–May | Simlipal, Bastar | 0.45–0.52 |
+| 3 | Tropical Wet Evergreen / Semi-Evergreen | Jan–Dec | Agumbe, Silent Valley | 0.25–0.35 |
+| 4 | Tropical Dry Evergreen | Jan–Dec | Pichavaram, Point Calimere | 0.20–0.35 |
+| 5 | Tropical Thorn Forest / Scrub | Jun–May | Jaisalmer, Ranthambore | 0.10–0.20 |
+| 6 | Subtropical Broadleaved Hill Forest | Apr–Mar | Rajaji NP, Manas NP | 0.30–0.45 |
+| 7 | Montane Temperate Forest | Apr–Nov | Kedarnath, Great Himalayan NP | 0.35–0.55 |
+| 8 | Alpine / Subalpine | May–Oct | Spiti Valley, Valley of Flowers | 0.15–0.85 |
+| 9 | Shola Forest — Southern Montane | Jan–Dec | Mukurthi NP, Eravikulam | 0.25–0.35 |
+| 10 | Mangrove Forest | Jan–Dec | Bhitarkanika, Sundarbans | 0.20–0.30 |
+| 11 | NE India Moist Evergreen | Jan–Dec | Kaziranga NP, Cherrapunji | 0.30–0.45 |
 
 ---
 
-## 📁 Dataset
+## Dataset
 
-### NDVI Files (20+ sites, 2016–2025) — 32 files
+### NDVI Files — 32 files, 20+ sites, 2016–2025
 
-**MODIS files (15 files):**
+**MODIS MOD13Q1 250m (15 files)**
 
-| File | Site | Seasons |
-|------|------|---------|
-| `MODIS_NDVI_TDD_Tirupati_2016_2025.csv` | Tirupati, AP | 10/10 ✅ |
-| `MODIS_NDVI_TDD_Mudumalai_2016_2025.csv` | Mudumalai, TN | 10/10 ✅ |
-| `MODIS_NDVI_TMD_Simlipal_2016_2025.csv` | Simlipal, Odisha | 10/10 ✅ |
-| `MODIS_NDVI_TMD_Bastar_2016_2025.csv` | Bastar, CG | 10/10 ✅ |
-| `MODIS_NDVI_TWE_Agumbe_2016_2025.csv` | Agumbe, Karnataka | 10/10 ✅ |
-| `MODIS_NDVI_TWE_SilentValley_2016_2025.csv` | Silent Valley NP, Kerala | 10/10 ✅ |
-| `MODIS_NDVI_SHO_Mukurthi_2016_2025.csv` | Mukurthi NP, TN | 10/10 ✅ |
-| `MODIS_NDVI_SHO_Eravikulam_2016_2025.csv` | Eravikulam NP, Kerala | 10/10 ✅ |
-| `MODIS_NDVI_MNG_Bhitarkanika_2016_2025.csv` | Bhitarkanika, Odisha | 10/10 ✅ |
-| `MODIS_NDVI_MNG_Sundarbans_2016_2025.csv` | Sundarbans, WB | 10/10 ✅ |
-| `MODIS_NDVI_NEE_Kaziranga_2016_2025.csv` | Kaziranga NP, Assam | 10/10 ✅ |
-| `MODIS_NDVI_NEE_Cherrapunji_2016_2025.csv` | Cherrapunji, Meghalaya | 10/10 ✅ |
-| `MODIS_NDVI_KHF_Warangal_2016_2025.csv` | Warangal, Telangana | 10/10 ✅ |
-| `MODIS_NDVI_KHF_Cuttack_2016_2025.csv` | Cuttack, Odisha | 10/10 ✅ |
-| `IIT_TIRUPATI_NDVI_2017-2025.csv` | IIT Tirupati Campus | 9/10 ✅ |
+| File | Site | Usable Seasons |
+|------|------|---------------|
+| `MODIS_NDVI_TDD_Tirupati_2016_2025.csv` | Tirupati, AP | 10/10 |
+| `MODIS_NDVI_TDD_Mudumalai_2016_2025.csv` | Mudumalai, TN | 10/10 |
+| `MODIS_NDVI_TMD_Simlipal_2016_2025.csv` | Simlipal, Odisha | 10/10 |
+| `MODIS_NDVI_TMD_Bastar_2016_2025.csv` | Bastar, CG | 10/10 |
+| `MODIS_NDVI_TWE_Agumbe_2016_2025.csv` | Agumbe, Karnataka | 10/10 |
+| `MODIS_NDVI_TWE_SilentValley_2016_2025.csv` | Silent Valley NP, Kerala | 10/10 |
+| `MODIS_NDVI_SHO_Mukurthi_2016_2025.csv` | Mukurthi NP, TN | 10/10 |
+| `MODIS_NDVI_SHO_Eravikulam_2016_2025.csv` | Eravikulam NP, Kerala | 10/10 |
+| `MODIS_NDVI_MNG_Bhitarkanika_2016_2025.csv` | Bhitarkanika NP, Odisha | 10/10 |
+| `MODIS_NDVI_MNG_Sundarbans_2016_2025.csv` | Sundarbans, WB | 10/10 |
+| `MODIS_NDVI_NEE_Kaziranga_2016_2025.csv` | Kaziranga NP, Assam | 10/10 |
+| `MODIS_NDVI_NEE_Cherrapunji_2016_2025.csv` | Cherrapunji, Meghalaya | 10/10 |
+| `MODIS_NDVI_KHF_Warangal_2016_2025.csv` | Warangal, Telangana | 10/10 |
+| `MODIS_NDVI_KHF_Cuttack_2016_2025.csv` | Cuttack, Odisha | 10/10 |
+| `IIT_TIRUPATI_NDVI_2017-2025.csv` | IIT Tirupati Campus | 9/10 |
 
-**Sentinel-2 monthly files (10 sites):**
+**Sentinel-2 SR Harmonized 10m — monthly composites (10 files)**
 
 | File | Site | Notes |
 |------|------|-------|
-| `S2_monthly_ALP_Spiti_2016_2025.csv` | Spiti Valley, HP | ⚠️ Filter NDVI < 0.01 |
-| `S2_monthly_ALP_ValleyFlowers_2016_2025.csv` | Valley of Flowers, UK | ⚠️ Filter NDVI < 0.05 |
-| `S2_monthly_TTF_Jaisalmer_2016_2025.csv` | Desert NP, Rajasthan | ⚠️ Use 10–12% threshold |
-| `S2_monthly_TTF_Ranthambore_2016_2025.csv` | Ranthambore NP, Rajasthan | ✅ Ready |
-| `S2_monthly_TDE_Pichavaram_2016_2025.csv` | Pichavaram, TN | ✅ Ready |
-| `S2_monthly_TDE_PointCalimere_2016_2025.csv` | Point Calimere, TN | ✅ Ready |
-| `S2_monthly_SBH_Rajaji_2016_2025.csv` | Rajaji NP, Uttarakhand | ✅ Ready |
-| `S2_monthly_SBH_Manas_2016_2025.csv` | Manas NP, Assam | ✅ Ready |
-| `S2_monthly_RBC_Hisar_2016_2025.csv` | Hisar, Haryana | ✅ Ready |
-| `S2_monthly_RBC_Ludhiana_2016_2025.csv` | Ludhiana, Punjab | ✅ Ready |
+| `S2_monthly_ALP_Spiti_2016_2025.csv` | Spiti Valley, HP | Remove NDVI < 0.01 (snow) before loading |
+| `S2_monthly_ALP_ValleyFlowers_2016_2025.csv` | Valley of Flowers, UK | Remove NDVI < 0.05; use 2018–2025 only |
+| `S2_monthly_TTF_Jaisalmer_2016_2025.csv` | Desert NP, Rajasthan | Set SOS threshold 10–12% (low amplitude site) |
+| `S2_monthly_TTF_Ranthambore_2016_2025.csv` | Ranthambore NP, Rajasthan | Load directly |
+| `S2_monthly_TDE_Pichavaram_2016_2025.csv` | Pichavaram, TN | Load directly |
+| `S2_monthly_TDE_PointCalimere_2016_2025.csv` | Point Calimere, TN | Load directly |
+| `S2_monthly_SBH_Rajaji_2016_2025.csv` | Rajaji NP, Uttarakhand | Load directly |
+| `S2_monthly_SBH_Manas_2016_2025.csv` | Manas NP, Assam | Load directly |
+| `S2_monthly_RBC_Hisar_2016_2025.csv` | Hisar, Haryana | Load directly |
+| `S2_monthly_RBC_Ludhiana_2016_2025.csv` | Ludhiana, Punjab | Load directly |
 
-**Fusion files — MODIS + Sentinel-2 combined (4 sites, best quality):**
+**MODIS + Sentinel-2 Fused — monthly (4 files, recommended for cloud-prone sites)**
 
-| File | Site | Notes |
-|------|------|-------|
-| `FUSION_fused_MNG_Bhitarkanika_2016_2025.csv` | Bhitarkanika NP, Odisha | ✅ Better than MODIS-only |
-| `FUSION_fused_MNG_Sundarbans_2016_2025.csv` | Sundarbans, WB | ✅ Better than MODIS-only |
-| `FUSION_fused_MTF_Kedarnath_2016_2025.csv` | Kedarnath WS, Uttarakhand | ✅ Ready |
-| `FUSION_fused_MTF_GreatHimal_2016_2025.csv` | Great Himalayan NP, HP | ✅ Ready |
+| File | Site |
+|------|------|
+| `FUSION_fused_MNG_Bhitarkanika_2016_2025.csv` | Bhitarkanika NP, Odisha |
+| `FUSION_fused_MNG_Sundarbans_2016_2025.csv` | Sundarbans, WB |
+| `FUSION_fused_MTF_Kedarnath_2016_2025.csv` | Kedarnath WS, Uttarakhand |
+| `FUSION_fused_MTF_GreatHimal_2016_2025.csv` | Great Himalayan NP, HP |
 
-> ⚠️ Alpine files (Spiti, Valley of Flowers) require pre-filtering to remove snow-covered months (NDVI < 0.01). See [data/ndvi/README.md](data/ndvi/README.md).
+### Meteorological Files
 
-### Meteorology Files
+Daily NASA POWER MERRA-2 reanalysis data. Two site files are included; download links for all remaining sites are in [`data/meteorology/README.md`](data/meteorology/README.md).
 
-| File | Site | Period | Source |
-|------|------|--------|--------|
-| `NASA_POWER_Tirupati_2017_2025.csv` | IIT Tirupati | Apr 2017–Mar 2025 | NASA POWER MERRA-2 |
-| `NASA_POWER_Kaziranga_2017_2025.csv` | Kaziranga NP, Assam | 2017–2025 | NASA POWER MERRA-2 |
+| File | Site | Period |
+|------|------|--------|
+| `NASA_POWER_Tirupati_2017_2025.csv` | IIT Tirupati, AP | 2017–2025 |
+| `NASA_POWER_Kaziranga_2017_2025.csv` | Kaziranga NP, Assam | 2017–2025 |
 
 ---
 
-## ⚙️ How It Works
+## Methodology
 
 ```
-┌──────────────┐     ┌──────────────────┐
-│  NDVI CSV    │     │  NASA POWER      │
-│  (MODIS/S2)  │     │  Met CSV         │
-└──────┬───────┘     └────────┬─────────┘
-       │                      │
-       ▼                      ▼
-┌──────────────────────────────────────────┐
-│  1. PARSE & VALIDATE                     │
-│     Auto-detect columns, skip headers    │
-│     Flag missing years / bad values      │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  2. SMOOTH NDVI                          │
-│     Savitzky-Golay filter (window 5–7,   │
-│     poly order 3) — removes cloud spikes │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  3. EXTRACT PHENOLOGY EVENTS             │
-│     SOS — threshold / rainfall / deriv   │
-│     POS — annual NDVI maximum            │
-│     EOS — threshold / drought / deriv    │
-│     LOS — EOS_DOY − SOS_DOY             │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  4. BUILD TRAINING FEATURES              │
-│     Pre-event windows (15–60 day lags)   │
-│     Derive GDD, VPD, SPEI_proxy, DTR     │
-│     Log-transform precipitation          │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  5. FEATURE SELECTION                    │
-│     Pearson |r| ≥ 0.40 filter            │
-│     Ecological priority order per event  │
-│     Collinearity check (|r| < 0.85)      │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  6. FIT RIDGE REGRESSION                 │
-│     Single feature (n < 10 seasons rule) │
-│     α auto-tuned via RidgeCV             │
-│     Leave-One-Out cross-validation       │
-│     Outputs: R², MAE, equation           │
-└────────────────────┬─────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────┐
-│  7. PREDICT & VISUALISE                  │
-│     Enter new-year climate data          │
-│     Predict SOS / POS / EOS dates        │
-│     Correlation heatmaps, trend plots    │
-└──────────────────────────────────────────┘
+NDVI CSV  +  NASA POWER Met CSV
+         │
+         ▼
+1. Parse & validate
+   — detect date/NDVI columns, skip header blocks, flag missing years
+         │
+         ▼
+2. Smooth NDVI
+   — Savitzky-Golay filter (adaptive window, poly order 3)
+         │
+         ▼
+3. Extract phenological events
+   — SOS: NDVI threshold / first sustained rainfall / max rate-of-change
+   — POS: annual NDVI maximum (constrained by season window)
+   — EOS: NDVI threshold / max decline rate / dry season onset
+         │
+         ▼
+4. Build feature matrix
+   — 15-day pre-event meteorological windows
+   — Derived variables: GDD (base 5°C, 10°C), VPD, SPEI proxy, DTR, log(precip)
+         │
+         ▼
+5. Feature selection
+   — Pearson |r| ≥ 0.40 filter
+   — Ecological priority order per event type
+   — Collinearity removal (|r| > 0.85 between predictors)
+         │
+         ▼
+6. Ridge Regression + LOO cross-validation
+   — Alpha tuned via RidgeCV on [0.01 … 5000]
+   — Leave-One-Out R² and MAE reported
+         │
+         ▼
+7. Predict & visualise
+   — Enter climate values → predict SOS / POS / EOS for any year
 ```
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 
 ```
 Indian-forest-phenology/
 │
 ├── app/
-│   └── universal_Indian_forest_phenology_assesment.py ← Main Streamlit app (1,726 lines)
+│   └── universal_Indian_forest_phenology_assesment.py
 │
 ├── data/
 │   ├── ndvi/
-│   │   ├── README.md               ← Column formats, per-site filter guide
+│   │   ├── README.md
 │   │   ├── MODIS_NDVI_TDD_Tirupati_2016_2025.csv
 │   │   ├── MODIS_NDVI_TDD_Mudumalai_2016_2025.csv
 │   │   ├── MODIS_NDVI_TMD_Simlipal_2016_2025.csv
@@ -268,218 +233,111 @@ Indian-forest-phenology/
 │   │   └── FUSION_fused_MTF_GreatHimal_2016_2025.csv
 │   │
 │   └── meteorology/
-│       ├── README.md               ← Download instructions + parameter guide
+│       ├── README.md
 │       ├── NASA_POWER_Tirupati_2017_2025.csv
 │       └── NASA_POWER_Kaziranga_2017_2025.csv
 │
 ├── scripts/
-│   ├── gee_extract_modis_ndvi.js   ← GEE script for MODIS extraction
-│   └── gee_extract_sentinel2_ndvi.js ← GEE script for Sentinel-2 extraction
+│   ├── gee_extract_modis_ndvi.js
+│   └── gee_extract_sentinel2_ndvi.js
 │
 ├── docs/
-│   └── user_guide.md               ← Full user guide with site-by-site settings
+│   └── user_guide.md
 │
 ├── .streamlit/
-│   └── config.toml                 ← Theme + server config for Streamlit Cloud
+│   └── config.toml
 │
-├── requirements.txt                ← Python dependencies
+├── requirements.txt
 ├── .gitignore
-└── README.md                       ← This file
+└── README.md
 ```
 
 ---
 
-## 💻 Installation & Local Setup
+## Installation
 
-### Prerequisites
-- Python 3.9 or higher
+### Requirements
+- Python 3.9+
 - pip
 
-### Steps
+### Local setup
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/shreejisharma/Indian-forest-phenology.git
 cd Indian-forest-phenology
-
-# 2. Create a virtual environment (recommended)
 python -m venv venv
-source venv/bin/activate        # Linux / Mac
-# venv\Scripts\activate         # Windows
-
-# 3. Install dependencies
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# 4. Run the app
 streamlit run app/universal_Indian_forest_phenology_assesment.py
 ```
 
-The app opens at `http://localhost:8501` in your browser.
+The app will open at `http://localhost:8501`.
 
 ---
 
-## ☁️ Deploy on Streamlit Cloud
+## Deployment
 
-**Free, no credit card required. Takes ~3 minutes.**
+### Streamlit Community Cloud
 
-1. **Fork or push this repo** to your GitHub account.
-
-2. Go to **[share.streamlit.io](https://share.streamlit.io)** and sign in with GitHub.
-
-3. Click **"New app"**:
+1. Fork this repository to your GitHub account.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+3. Click **New app** and set:
    - Repository: `shreejisharma/Indian-forest-phenology`
    - Branch: `main`
    - Main file path: `app/universal_Indian_forest_phenology_assesment.py`
+4. Click **Deploy**.
 
-4. Click **"Deploy"** — Streamlit Cloud installs `requirements.txt` automatically.
+### Hugging Face Spaces
 
-5. Your app is live at:  
-   `https://shreejisharma-indian-forest-phenology.streamlit.app`
-
-> **Tip:** Rename the URL in Streamlit Cloud dashboard to something like  
-> `https://india-forest-phenology.streamlit.app`
-
----
-
-## 🤗 Deploy on Hugging Face Spaces
-
-**Alternative free hosting with more compute.**
-
-1. Go to [huggingface.co/spaces](https://huggingface.co/spaces) → **"Create new Space"**
-
-2. Settings:
-   - SDK: **Streamlit**
-   - Hardware: **CPU Basic (free)**
-   - Visibility: **Public**
-
-3. In the Space's **Files** tab, upload:
-   - `app/universal_Indian_forest_phenology_assesment.py` → rename to `app.py` when using Hugging Face (it requires app.py at root)
-   - `requirements.txt`
-   - All files from `data/ndvi/` and `data/meteorology/`
-
-4. Add a `README.md` at the root with:
-   ```yaml
-   ---
-   title: Indian Forest Phenology Predictor
-   emoji: 🌲
-   colorFrom: green
-   colorTo: blue
-   sdk: streamlit
-   sdk_version: 1.32.0
-   app_file: app.py
-   pinned: false
-   ---
-   ```
-
-5. The Space builds automatically. Live in ~2 minutes.
+1. Create a new Space (SDK: Streamlit, CPU Basic).
+2. Upload `app/universal_Indian_forest_phenology_assesment.py` renamed to `app.py`, `requirements.txt`, and the `data/` folder.
+3. Add the standard Hugging Face `README.md` YAML header with `sdk: streamlit` and `app_file: app.py`.
 
 ---
 
-## 📄 Data Format Guide
+## Data Format
 
-### NDVI CSV (required)
+### NDVI CSV
 
-The app auto-detects the date and NDVI columns — column names do not need to match exactly.
+The app detects date and NDVI columns by name — extra columns are ignored.
 
-```csv
+```
 date,NDVI
 2016-01-01,0.423
 2016-01-17,0.448
 2016-02-02,0.461
 ```
 
-**Accepted date column names:** `date`, `dates`, `time`, `datetime`, `Date`, `DATE`  
-**Accepted NDVI column names:** `ndvi`, `NDVI`, `ndvi_value`, `value`, `evi`  
-**Accepted date formats:** `YYYY-MM-DD`, `DD-MM-YYYY`, `MM/DD/YYYY`, `YYYYMMDD`
+Accepted date column names: `date`, `dates`, `time`, `datetime`  
+Accepted NDVI column names: `ndvi`, `NDVI`, `ndvi_value`, `evi`
 
-### NASA POWER Met CSV (required)
+### NASA POWER Meteorological CSV
 
-Download from [power.larc.nasa.gov/data-access-viewer/](https://power.larc.nasa.gov/data-access-viewer/).  
-The app **automatically skips** the multi-line header block — upload the raw downloaded file.
+Download from [power.larc.nasa.gov/data-access-viewer/](https://power.larc.nasa.gov/data-access-viewer/) — the multi-line header block is skipped automatically.
 
-```
--BEGIN HEADER-
-NASA/POWER Source Native Resolution Daily Data
-...
--END HEADER-
-YEAR,DOY,T2M,T2M_MIN,T2M_MAX,PRECTOTCORR,RH2M,GWETTOP,GWETROOT,WS2M
-2017,1,18.42,12.10,26.80,0.00,62.4,0.31,0.55,2.1
-2017,2,19.10,13.20,27.40,0.00,58.1,0.30,0.54,1.9
-```
+Recommended parameters: `T2M`, `T2M_MIN`, `T2M_MAX`, `PRECTOTCORR`, `RH2M`, `GWETTOP`, `GWETROOT`, `ALLSKY_SFC_SW_DWN`, `WS2M`
 
----
+### App settings by site
 
-## 🌡️ Recommended NASA POWER Parameters
-
-When downloading from NASA POWER, select these parameters for best model performance:
-
-| Parameter | Description | Critical for |
-|-----------|-------------|-------------|
-| `T2M` | Mean temperature at 2m (°C) | All models |
-| `T2M_MIN` | Min temperature at 2m (°C) | SOS (pre-monsoon warmth) |
-| `T2M_MAX` | Max temperature at 2m (°C) | Heat stress, DTR |
-| `PRECTOTCORR` | Precipitation corrected (mm/day) | SOS monsoon trigger |
-| `RH2M` | Relative humidity at 2m (%) | Evergreen SOS |
-| `GWETTOP` | Surface soil wetness (0–1) | SOS confirmation |
-| `GWETROOT` | Root zone soil wetness (0–1) | EOS (drought onset) |
-| `ALLSKY_SFC_SW_DWN` | Solar radiation (MJ/m²/day) | **POS** — very important |
+| Site | Forest Type | Window | SOS Threshold |
+|------|-------------|--------|---------------|
+| Tirupati, Mudumalai | Tropical Dry Deciduous | Jun–May | 20–25% |
+| Simlipal, Bastar | Tropical Moist Deciduous | Jun–May | 20–25% |
+| Agumbe, Silent Valley | Tropical Wet Evergreen | Jan–Dec | 15–18% |
+| Mukurthi, Eravikulam | Shola Forest | Jan–Dec | 15–18% |
+| Bhitarkanika, Sundarbans | Mangrove Forest | Jan–Dec | 15–18% |
+| Kaziranga, Cherrapunji | NE India Moist Evergreen | Jun–May | 20% |
+| Warangal, Cuttack | Kharif / Summer Crop | Jun–Oct | 20–25% |
+| Hisar, Ludhiana | Rabi / Winter Crop | Nov–Apr | 20–25% |
+| Spiti (filtered) | Alpine / Subalpine | May–Oct | 25–30% |
+| Valley of Flowers (filtered) | Alpine / Subalpine | May–Oct | 25–30% |
+| Jaisalmer | Tropical Thorn Scrub | Jun–May | 10–12% |
 
 ---
 
-## ⚙️ App Settings Quick Reference
+## Results
 
-| Site | Forest Type to Select | Window | SOS Threshold | Expected Peak |
-|------|-----------------------|--------|---------------|---------------|
-| Tirupati | Tropical Dry Deciduous — Monsoon | Jun–May | 20–25% | October |
-| Mudumalai | Tropical Dry Deciduous — Monsoon | Jun–May | 20–25% | November |
-| Simlipal | Tropical Moist Deciduous — Monsoon | Jun–May | 20–25% | September |
-| Bastar | Tropical Moist Deciduous — Monsoon | Jun–May | 20–25% | October |
-| Agumbe | Tropical Wet Evergreen / Semi-Evergreen | Jan–Dec | 15–18% | October |
-| Mukurthi | Shola Forest — Southern Montane | Jan–Dec | 15–18% | January |
-| Bhitarkanika | Mangrove Forest | Jan–Dec | 15–18% | September |
-| Warangal | Kharif / Summer Crop | Jun–Oct | 20–25% | September |
-| Spiti *(filtered)* | Alpine / Subalpine | May–Oct | 25–30% | July–Aug |
-| Valley of Flowers *(filtered)* | Alpine / Subalpine | May–Oct | 25–30% | Aug–Sep |
-| Jaisalmer | Tropical Thorn Forest / Scrub | Jun–May | **10–12%** | October |
-
----
-
-## 🤖 Model Architecture
-
-```
-Feature Selection
-─────────────────
-• All met parameters + derived features computed per site-season
-• Pearson |r| ≥ 0.40 threshold (eliminates noise features)
-• Ecological priority order per event (T2M_MIN → PRECTOTCORR for SOS)
-• Collinearity filter: if two features |r| > 0.85, keep higher-priority
-
-Ridge Regression
-────────────────
-• L2 regularisation: prevents overfitting with n = 8–10 seasons
-• α tuned via RidgeCV on log-spaced grid [0.01 … 5000]
-• Single best feature per event (n < 10 rule — avoids spurious multi-variate fits)
-• StandardScaler applied inside Pipeline
-
-Cross-Validation
-────────────────
-• Leave-One-Out (LOO) — gives unbiased R² for small samples
-• Reported R² = LOO R² (not training R²)
-• Also reports MAE in days
-
-R² Interpretation
-─────────────────
-  > 0.70  →  Strong — reliable prediction
-  0.40–0.70  →  Moderate — adequate for trend analysis
-  0.10–0.40  →  Weak — relative comparisons only
-  < 0  →  No valid feature found; prediction = mean DOY
-```
-
----
-
-## 📊 Results Summary
-
-Preliminary results across 12 sites (2016–2025, LOO cross-validated):
+Preliminary LOO cross-validated results across 12 sites (2016–2025):
 
 | Site | Event | Best Predictor | R² (LOO) | MAE (days) |
 |------|-------|---------------|----------|------------|
@@ -494,45 +352,36 @@ Preliminary results across 12 sites (2016–2025, LOO cross-validated):
 | Warangal | SOS | PRECTOTCORR | ~0.78 | ~5 |
 | Valley of Flowers | SOS | T2M_MIN | ~0.62 | ~9 |
 
-> Results are indicative. Actual R² depends on site-specific settings, season window selection, and threshold values. See app → Methods tab for full technical details.
+R² values are LOO cross-validated. Actual performance depends on site-specific settings, season window, and threshold selection. See the app's Methods tab for full details.
 
 ---
 
-## ⚠️ Known Limitations
+## Limitations
 
-1. **Small sample size (n = 8–10 seasons)** — LOO R² is reported, but all models should be interpreted cautiously. 15+ seasons strongly recommended for publication.
-
-2. **Kaziranga** — Now included as `MODIS_NDVI_NEE_Kaziranga_2016_2025.csv` using MODIS MOD13Q1 250m, which can see through monsoon clouds via 16-day compositing. Use forest type **NE India Moist Evergreen** with a **Jun–May** window.
-
-3. **Alpine files (2016–2017)** — Spiti and Valley of Flowers have incomplete Jun–Sep data before 2018. Pre-filter before loading (see [data/ndvi/README.md](data/ndvi/README.md)).
-
-4. **Jaisalmer thorn scrub** — Very low NDVI amplitude (0.19). Standard SOS thresholds will fail. Use 10–12% threshold in app settings.
-
-5. **Missing solar radiation** — The Tirupati met file does not include `ALLSKY_SFC_SW_DWN`. This limits POS model quality. Re-download from NASA POWER with solar radiation included.
+- **Sample size.** With 8–10 seasons per site, LOO R² estimates have wide confidence intervals. Results should be interpreted as exploratory; 15+ seasons are recommended before drawing firm conclusions.
+- **Alpine sites (2016–2017).** Spiti Valley and Valley of Flowers lack usable Jun–Sep Sentinel-2 data before 2018 due to persistent snow cover. These years should be excluded before loading.
+- **Jaisalmer.** NDVI amplitude is only ~0.19 across the season. Standard SOS thresholds will not detect the brief post-monsoon green flush; use 10–12% in the app settings.
+- **Meteorological data coverage.** Only two NASA POWER files are included in this repository. Download links for all remaining sites are provided in [`data/meteorology/README.md`](data/meteorology/README.md).
 
 ---
 
-## 📖 Citation
+## Citation
 
-If you use this code or dataset in your work, please cite:
+If you use this code or dataset in your research, please cite:
 
 ```bibtex
-@software{indian_forest_phenology_2025,
-  title     = {Indian Forest Phenology Predictor},
-  author    = {Shreya Sharma},
-  email     = {shreeji500sharma@gmail.com},
-  year      = {2025},
-  url       = {https://github.com/shreejisharma/Indian-forest-phenology},
-  note      = {Streamlit application for phenology extraction and prediction
-               across 11 Indian forest types using MODIS/Sentinel-2 NDVI
-               and NASA POWER meteorological data}
+@software{sharma2025phenology,
+  author  = {Sharma, Shreya},
+  title   = {Indian Forest Phenology Predictor},
+  year    = {2025},
+  url     = {https://github.com/shreejisharma/Indian-forest-phenology}
 }
 ```
 
-Forest type classification follows:
+Forest type classification:
 > Champion, H.G. & Seth, S.K. (1968). *A Revised Survey of the Forest Types of India*. Manager of Publications, Delhi.
 
-NDVI data sources:
+NDVI data:
 > Didan, K. (2021). MODIS/Terra Vegetation Indices 16-Day L3 Global 250m SIN Grid V061. NASA EOSDIS Land Processes DAAC.
 
 Meteorological data:
@@ -540,13 +389,6 @@ Meteorological data:
 
 ---
 
-## 📜 License
+## License
 
-MIT License — see [LICENSE](LICENSE) for details.  
-Data files are for academic research use only.
-
----
-
-<p align="center">
-  Built with ❤️ using Streamlit · MODIS · NASA POWER · scikit-learn
-</p>
+MIT — see [LICENSE](LICENSE) for details. Data files are for academic research use only.
