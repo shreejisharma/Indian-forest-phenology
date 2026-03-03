@@ -1088,19 +1088,129 @@ def main():
         help="Daily export from power.larc.nasa.gov — header block auto-skipped, all parameters auto-detected")
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## 🌱 Forest Type")
-    season_type = st.sidebar.selectbox(
-        "Select forest type", options=list(SEASON_CONFIGS.keys()), index=0,
-        help="11 Indian forest types — Champion & Seth (1968) classification")
+    st.sidebar.markdown("## 🌱 Forest Type Selection")
+
+    # ── QUICK LOCATION DECISION GUIDE ─────────────────────────
+    with st.sidebar.expander("❓ Not sure which forest type? Click here", expanded=False):
+        st.markdown("""
+**🗺️ Find your location below and pick the matching type:**
+
+| Your location / site | Select this type |
+|---|---|
+| Tirupati, Deccan, Eastern Ghats | 🍂 Tropical Dry Deciduous |
+| Sal forests — MP, CG, Odisha, Jharkhand | 🌿 Tropical Moist Deciduous |
+| Western Ghats — Kerala, Karnataka coast | 🌲 Tropical Wet Evergreen |
+| Tamil Nadu Coromandel coast | 🌴 Tropical Dry Evergreen |
+| Rajasthan, Gujarat, semi-arid Deccan | 🌵 Tropical Thorn / Scrub |
+| Himalayan foothills 500–1500m | 🌳 Subtropical Hill Forest |
+| W Himalayas 1500–3000m (Deodar, Oak) | 🏔️ Montane Temperate |
+| Himalayas >3000m, Ladakh, Spiti | ⛰️ Alpine / Subalpine |
+| Nilgiris, Munnar, Kodaikanal >1500m | 🌫️ Shola Montane |
+| Sundarbans, Bhitarkanika, Pichavaram | 🌊 Mangrove |
+| Assam, Meghalaya, NE states | 🌿 NE India Moist Evergreen |
+
+---
+**💡 Three quick questions to decide:**
+
+**Q1 — Does your forest shed all leaves in summer (Mar–May)?**
+→ Yes → *Deciduous* (Dry or Moist)
+→ No → *Evergreen or Montane*
+
+**Q2 — If deciduous: what is the annual rainfall?**
+→ < 1000 mm → **Tropical Dry Deciduous**
+→ 1000–2000 mm → **Tropical Moist Deciduous**
+
+**Q3 — If evergreen: what is the elevation?**
+→ < 500m, coastal → **Wet Evergreen / Mangrove / NE India**
+→ 500–1500m → **Subtropical Hill Forest**
+→ 1500–3000m → **Montane Temperate or Shola**
+→ > 3000m → **Alpine / Subalpine**
+        """)
+
+    # ── FOREST TYPE DROPDOWN WITH RICHER HELP TEXT ────────────
+    # Build dropdown labels with region hints for clarity
+    _forest_labels = {
+        "Tropical Dry Deciduous — Monsoon (Jun-May)":       "🍂 Tropical Dry Deciduous  [Tirupati, Deccan, Eastern Ghats]",
+        "Tropical Moist Deciduous — Monsoon (Jun-May)":     "🌿 Tropical Moist Deciduous  [MP, Odisha, NE slopes]",
+        "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)":"🌲 Tropical Wet Evergreen  [W Ghats, Andamans]",
+        "Tropical Dry Evergreen (Jan-Dec)":                  "🌴 Tropical Dry Evergreen  [Tamil Nadu coast]",
+        "Tropical Thorn Forest / Scrub (Jun-May)":           "🌵 Tropical Thorn / Scrub  [Rajasthan, Gujarat]",
+        "Subtropical Broadleaved Hill Forest (Apr-Mar)":     "🌳 Subtropical Hill Forest  [Himalayan foothills]",
+        "Montane Temperate Forest (Apr-Nov)":                "🏔️ Montane Temperate  [W Himalayas 1500–3000m]",
+        "Alpine / Subalpine Forest and Meadow (May-Oct)":   "⛰️ Alpine / Subalpine  [Ladakh, Spiti, >3000m]",
+        "Shola Forest — Southern Montane (Jan-Dec)":        "🌫️ Shola Montane  [Nilgiris, Munnar, Kodaikanal]",
+        "Mangrove Forest (Jan-Dec)":                         "🌊 Mangrove  [Sundarbans, Bhitarkanika]",
+        "NE India Moist Evergreen (Jan-Dec)":               "🌿 NE India Moist Evergreen  [Assam, Meghalaya, NE States]",
+    }
+    forest_keys = list(SEASON_CONFIGS.keys())
+    forest_display = [_forest_labels.get(k, k) for k in forest_keys]
+
+    _sel_idx = st.sidebar.selectbox(
+        "Select forest type",
+        options=range(len(forest_keys)),
+        index=0,
+        format_func=lambda i: forest_display[i],
+        help="11 Indian forest types — Champion & Seth (1968). Use the ❓ guide above if unsure.")
+    season_type = forest_keys[_sel_idx]
+
     cfg = SEASON_CONFIGS[season_type]
+
+    # ── RICHER INFO CARD ──────────────────────────────────────
+    # Deciduousness indicator
+    _amp_hint = {"High (0.40–0.55)": ["Tropical Dry Deciduous","Tropical Moist Deciduous","Tropical Thorn"],
+                 "Medium (0.25–0.40)": ["Subtropical","Montane Temperate","Alpine"],
+                 "Low (0.10–0.25)":  ["Wet Evergreen","Dry Evergreen","Shola","Mangrove","NE India"]}
+    _deciduous = "High" if any(k in season_type for k in ["Dry Deciduous","Moist Deciduous","Thorn"]) \
+        else "Low" if any(k in season_type for k in ["Evergreen","Shola","Mangrove","NE India"]) else "Medium"
+    _monsoon_type = "SW Monsoon (Jun–Sep)" if cfg.get("start_month") in [4,5,6] \
+        else "NE Monsoon (Oct–Dec)" if "Dry Evergreen" in season_type \
+        else "Both SW + NE Monsoons" if any(k in season_type for k in ["Shola","NE India"]) \
+        else "Snowmelt + SW Monsoon"
+
     st.sidebar.info(
         f"**{cfg.get('icon','')} {season_type}**\n\n"
-        f"📅 Window: {SM_NAME[cfg['start_month']]} → {SM_NAME[cfg['end_month']]}\n"
-        f"🌧️ Rainfall: {cfg.get('rainfall','')}\n"
+        f"📅 Growing window: **{SM_NAME[cfg['start_month']]} → {SM_NAME[cfg['end_month']]}**\n"
+        f"🌧️ Annual rainfall: {cfg.get('rainfall','')}\n"
+        f"☔ Primary trigger: {_monsoon_type}\n"
         f"📍 States: {cfg.get('states','')}\n"
         f"🌿 Species: {cfg.get('species','')}\n"
-        f"📈 NDVI peak: {cfg.get('ndvi_peak','')}\n"
-        f"🔑 Drivers: {cfg.get('key_drivers','')}"
+        f"📈 NDVI peak month: {cfg.get('ndvi_peak','')}\n"
+        f"📊 NDVI seasonality: {_deciduous} amplitude\n"
+        f"🔑 Key met drivers: {cfg.get('key_drivers','')}\n"
+        f"📝 {cfg.get('desc','')}"
+    )
+
+    # ── WHY THESE MET PARAMETERS BOX ──────────────────────────
+    _driver_explain = {
+        "Tropical Dry Deciduous — Monsoon (Jun-May)":
+            "PRECTOTCORR (first monsoon rain → SOS) · GWETTOP (surface soil moisture → leaf flush) · T2M_MIN (pre-monsoon warmth → timing of bud break)",
+        "Tropical Moist Deciduous — Monsoon (Jun-May)":
+            "RH2M (humidity rise signals monsoon → SOS) · PRECTOTCORR (monsoon intensity → POS) · T2M / GWETROOT (soil moisture sustains canopy)",
+        "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)":
+            "RH2M (near-constant humidity → weak SOS) · ALLSKY_SFC_SW_DWN (radiation controls photosynthesis) · GWETROOT (deep moisture → POS timing)",
+        "Tropical Dry Evergreen (Jan-Dec)":
+            "PRECTOTCORR Oct–Dec (NE monsoon is the primary growth trigger) · T2M (temperature modulates leaf expansion pace)",
+        "Tropical Thorn Forest / Scrub (Jun-May)":
+            "PRECTOTCORR (single monsoon pulse = only SOS driver) · GWETTOP (shallow roots; surface moisture controls entire season)",
+        "Subtropical Broadleaved Hill Forest (Apr-Mar)":
+            "T2M_MIN (spring warming threshold → bud break) · GDD_10 (heat accumulation → POS) · PRECTOTCORR (monsoon sustains canopy)",
+        "Montane Temperate Forest (Apr-Nov)":
+            "T2M_MIN (snowmelt temperature → SOS) · GDD_10 (heat accumulation → POS) · ALLSKY_SFC_SW_DWN (solar radiation at altitude)",
+        "Alpine / Subalpine Forest and Meadow (May-Oct)":
+            "T2M_MIN (snowmelt → SOS; strongest predictor in dataset) · ALLSKY_SFC_SW_DWN (high-altitude radiation) · GDD_5 (low base for cold-adapted species)",
+        "Shola Forest — Southern Montane (Jan-Dec)":
+            "RH2M (cloud forest = humidity controls canopy) · ALLSKY_SFC_SW_DWN (intermittent sunlight is limiting) · GWETROOT (deep soil moisture buffer)",
+        "Mangrove Forest (Jan-Dec)":
+            "PRECTOTCORR (monsoon freshwater input) · RH2M (tidal humidity sustains evergreen canopy) · T2M (temperature modulates tidal forest metabolism)",
+        "NE India Moist Evergreen (Jan-Dec)":
+            "PRECTOTCORR (world's highest rainfall → POS control) · RH2M (year-round humidity → low SOS signal) · T2M (temperature fine-tunes dual-peak timing)",
+    }
+    _exp = _driver_explain.get(season_type, cfg.get('key_drivers',''))
+    st.sidebar.markdown(
+        f"<div style='background:#E8F5E9;padding:10px 12px;border-radius:8px;"
+        f"border-left:4px solid #2E7D32;font-size:0.78rem;margin-top:4px'>"
+        f"<b>🔬 Why these met parameters?</b><br>{_exp}</div>",
+        unsafe_allow_html=True
     )
 
     # SOS method
@@ -1361,11 +1471,74 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 
     # ══ TAB 2 — CORRELATIONS ═══════════════════════════════════
     with tab2:
-        st.markdown("### 📊 Feature Correlations with Phenological Events")
+        st.markdown("### 📊 Feature Correlations & Meteorological Parameters")
+
+        st.markdown("""
+<div style='background:#E3F2FD;padding:16px 20px;border-radius:12px;border-left:5px solid #1565C0;margin-bottom:16px'>
+<b>🔗 How your uploaded meteorological parameters drive the model — end-to-end flow:</b><br><br>
+<b>Step 1 — Your NASA POWER CSV</b> is parsed and ALL numeric columns are used
+(T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, GWETPROF, WS2M, ALLSKY_SFC_SW_DWN …)<br><br>
+<b>Step 2 — Derived features are computed automatically</b> from those raw columns:
+<code>GDD_5, GDD_10, GDD_cum, DTR (= T2M_MAX − T2M_MIN), VPD, SPEI_proxy, log_precip, MSI</code><br><br>
+<b>Step 3 — For each phenological event (SOS / POS / EOS)</b>, the app computes the
+<b>Pearson r</b> between every feature and the event timing (DOY). This is what you see in the
+bar chart and heatmap below.<br><br>
+<b>Step 4 — Feature selection:</b> only features with <b>|Pearson r| ≥ 0.40</b> are allowed into the model.
+Coloured bars = entered the model · Grey bars = below threshold, excluded.<br><br>
+<b>Step 5 — Ridge Regression</b> is fitted using the selected feature(s).
+The scatter plots on the right show the best single predictor vs observed event DOY —
+<b>this is exactly the relationship the model is using to make predictions.</b>
+</div>
+        """, unsafe_allow_html=True)
+
+        raw_params_ss2 = st.session_state.get('raw_params', [])
+        met_df_check   = st.session_state.get('met_df')
+        if raw_params_ss2 and met_df_check is not None:
+            all_met2 = [c for c in met_df_check.columns
+                       if c not in {'Date','YEAR','MO','DY','DOY','LON','LAT','ELEV'}
+                       and pd.api.types.is_numeric_dtype(met_df_check[c])]
+            derived_ss2 = [p for p in all_met2 if p not in raw_params_ss2]
+
+            col_r2, col_d2 = st.columns(2)
+            with col_r2:
+                st.markdown(f"**📡 {len(raw_params_ss2)} raw parameters from your CSV:**")
+                st.code("  ".join(raw_params_ss2), language=None)
+            with col_d2:
+                st.markdown(f"**🔧 {len(derived_ss2)} derived features computed automatically:**")
+                st.code("  ".join(derived_ss2) if derived_ss2 else "(none — add T2M_MIN/MAX for DTR, VPD etc.)", language=None)
+
+            _param_desc = {
+                "T2M":              "Mean air temp at 2m (°C) — growing degree accumulation, POS timing",
+                "T2M_MIN":          "Min air temp at 2m (°C) — pre-monsoon warmth, SOS bud-break trigger",
+                "T2M_MAX":          "Max air temp at 2m (°C) — heat stress, canopy maturity",
+                "PRECTOTCORR":      "Corrected precipitation (mm/day) — monsoon trigger for SOS; soil recharge",
+                "RH2M":             "Relative humidity at 2m (%) — monsoon arrival signal, evergreen SOS",
+                "GWETTOP":          "Surface soil wetness 0–5cm (0–1) — immediate moisture for leaf flush",
+                "GWETROOT":         "Root zone soil wetness (0–1) — deep reserves; delays EOS in dry season",
+                "GWETPROF":         "Profile soil moisture (0–1) — full column water; links to WUE",
+                "WS2M":             "Wind speed at 2m (m/s) — NE monsoon drying winds drive senescence",
+                "ALLSKY_SFC_SW_DWN":"Incoming solar radiation (MJ/m²/day) — POS driver at high altitudes",
+                "GDD_5":            "Growing degree days base 5°C (derived) — cold-adapted species phenology",
+                "GDD_10":           "Growing degree days base 10°C (derived) — tropical/subtropical phenology",
+                "GDD_cum":          "Cumulative GDD since season start (derived) — heat accumulation for POS",
+                "DTR":              "Diurnal Temperature Range (derived) — proxy for clear-sky / dryness",
+                "VPD":              "Vapour Pressure Deficit (derived) — atmospheric dryness stress",
+                "SPEI_proxy":       "Rainfall minus PET (derived) — drought/wetness index",
+                "log_precip":       "log(1+PRECTOTCORR) (derived) — linearises skewed rainfall distribution",
+                "MSI":              "Moisture Stress Index (derived) — precip/soil wetness ratio",
+            }
+            present_params2 = [p for p in all_met2 if p in _param_desc]
+            if present_params2:
+                with st.expander(f"📋 What does each parameter mean in phenology context? ({len(present_params2)} detected)", expanded=False):
+                    rows2 = [{"Parameter": p, "Description": _param_desc[p]} for p in present_params2]
+                    st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
         st.markdown(
-            f'<div class="fix-box"><b>Feature selection rule:</b> Pearson |r| ≥ {MIN_CORR_THRESHOLD} required to enter the model. '
-            f'<b>Coloured bars</b> = usable, <b>grey</b> = below threshold. '
-            f'The heatmap shows all three events side-by-side. Scatter plots show the best predictor for each event.</div>',
+            f'<div class="fix-box"><b>Reading the charts below:</b> Pearson |r| ≥ {MIN_CORR_THRESHOLD} required to enter the model. '
+            f'<b>Coloured bars</b> = used in Ridge regression (entered model) · <b>grey</b> = excluded. '
+            f'The scatter plots on the right show the actual met value vs observed DOY — '
+            f'this IS the relationship powering each model equation in Tab 1.</div>',
             unsafe_allow_html=True)
 
         predictor = st.session_state.get('predictor')
@@ -1539,287 +1712,190 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
     with tab4:
         st.markdown("### 🌳 Indian Forest Types — Phenology Reference Guide")
 
-        # ── HOW TO CHOOSE YOUR FOREST TYPE ───────────────────────────────
-        st.info("""
-**How to choose the right forest type for your site**
+        # ── HOW TO CHOOSE ─────────────────────────────────────
+        st.markdown("""
+<div style='background:#F1F8E9;padding:18px 22px;border-radius:12px;border-left:5px solid #33691E;margin-bottom:18px'>
+<b>🧭 How to choose the right forest type for your site</b><br><br>
 
-The forest type controls three critical things in the model:
-1. **Season window** — which months are included when extracting SOS/POS/EOS
-2. **Default SOS/EOS threshold** — what % of NDVI amplitude counts as "season start"
-3. **Which meteorological drivers are prioritised** — e.g. rainfall for monsoon forests, temperature for alpine
+Use the three-question decision tree below, then expand the matching type further down this page
+to see its specific SOS/POS/EOS behaviour, species list, and literature references.
+</div>
+        """, unsafe_allow_html=True)
 
-**Quick decision guide:**
-- Your site is in Rajasthan / Gujarat / dry interior → Tropical Thorn Forest / Scrub
-- Your site is in Kerala / Karnataka W Ghats / Assam → Tropical Wet Evergreen or NE India Moist Evergreen
-- Your site is in Himalayas above 3000m / Spiti / Ladakh → Alpine / Subalpine
-- Your site loses all leaves in summer (Mar–May bare) → Tropical Dry Deciduous
-- Your site is coastal mangrove → Mangrove Forest
-- Your site is a crop field (wheat/rice) → use Kharif or Rabi Crop type
-
-If unsure, check the **Quick Location Table** at the bottom of this tab.
-        """)
-
-        # ── WHAT THE MODEL ACTUALLY DOES WITH YOUR MET DATA ──────────────
-        with st.expander("📊  What happens to your meteorological data inside the model?", expanded=False):
+        col_q1, col_q2, col_q3 = st.columns(3)
+        with col_q1:
             st.markdown("""
-Your NASA POWER CSV contains **raw parameters**: T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN, WS2M.
+**❓ Q1 — Rainfall & deciduousness**
 
-The model automatically computes **7 additional derived features** from these:
-
-| Derived Feature | Formula | What it represents |
+| Annual rainfall | Leaf behaviour | → Type |
 |---|---|---|
-| **GDD_5** | max(T2M − 5, 0) per day | Growing degree days above 5°C |
-| **GDD_10** | max(T2M − 10, 0) per day | Growing degree days above 10°C |
-| **GDD_cum** | Cumulative GDD_10 from season start | Total heat accumulation — strongest POS predictor |
-| **DTR** | T2M_MAX − T2M_MIN | Diurnal temperature range — EOS stress indicator |
-| **VPD** | Vapour pressure deficit from T2M + RH2M | Atmospheric dryness — EOS and SOS driver |
-| **log_precip** | log(PRECTOTCORR + 0.1) | Log-transformed rainfall — normalises monsoon spikes |
-| **SPEI_proxy** | PRECTOTCORR − estimated PET | Simple water balance — drought / surplus index |
+| < 700 mm | Sparse canopy, thorny | 🌵 Thorn / Scrub |
+| 700–1200 mm | Fully deciduous | 🍂 Tropical Dry Deciduous |
+| 1000–2000 mm | Mostly deciduous | 🌿 Tropical Moist Deciduous |
+| > 2000 mm | Mostly evergreen | 🌲 Wet Evergreen / NE India |
+| ~1000mm (Oct–Dec rain) | Evergreen, coast | 🌴 Tropical Dry Evergreen |
+            """)
+        with col_q2:
+            st.markdown("""
+**❓ Q2 — Elevation**
 
-All raw + derived features are then **Pearson-correlated against your extracted SOS/POS/EOS dates**.
-Only features with |r| ≥ 0.40 qualify. From those, the model picks the best non-collinear predictor
-per event using ecological priority order, then fits Ridge Regression with Leave-One-Out cross-validation.
+| Elevation | → Type |
+|---|---|
+| 0–500m, plains | Tropical types above |
+| 0–500m, coastal tidal | 🌊 Mangrove |
+| 500–1500m, Himalayan foothills | 🌳 Subtropical Hill Forest |
+| 1500–3000m, W Himalayas | 🏔️ Montane Temperate |
+| > 3000m, Ladakh/Spiti | ⛰️ Alpine / Subalpine |
+| > 1500m, Nilgiris/Western Ghats | 🌫️ Shola Montane |
+            """)
+        with col_q3:
+            st.markdown("""
+**❓ Q3 — Primary monsoon**
 
-**What the Pearson bar chart and heatmap (Results tab) show:**
-- Coloured bars = features that passed the |r| ≥ 0.40 threshold → entered model selection
-- Grey bars = too weak, excluded automatically
-- The scatter plots on the right show the actual regression line used for SOS, POS, EOS
-- r = 0.983 (SOS ← T2M) means 96.6% of year-to-year SOS variation is explained by pre-season temperature
+| Primary water source | → Type hint |
+|---|---|
+| SW Monsoon (Jun–Sep) | Most tropical types |
+| NE Monsoon (Oct–Dec) | 🌴 Tropical Dry Evergreen |
+| Both SW + NE | 🌫️ Shola, 🌿 NE India |
+| Snowmelt | 🏔️ Montane, ⛰️ Alpine |
+| Tidal water | 🌊 Mangrove |
+
+**🔑 Key met predictors by type:**
+- Monsoon deciduous → PRECTOTCORR, GWETTOP
+- Evergreen → RH2M, ALLSKY_SFC_SW_DWN
+- Montane/Alpine → T2M_MIN, GDD_10
+- Shola/Mangrove → RH2M, GWETROOT
             """)
 
         st.markdown("---")
+        st.markdown("""
+<div style='background:#FFF9C4;padding:12px 16px;border-radius:10px;border-left:4px solid #F9A825;margin-bottom:16px;font-size:0.88rem'>
+<b>📌 What the model does with your chosen forest type:</b>
+Each type sets: (1) the growing season window (start → end month), (2) the NDVI threshold %,
+(3) the default SOS detection method (rainfall/threshold/derivative), and (4) which meteorological
+parameters are most likely to have high Pearson r with SOS/POS/EOS at that site.
+The Pearson correlations are computed fresh from YOUR data — not hardcoded — so the actual
+best predictor may differ from the listed key drivers if your site has unusual climate patterns.
+</div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("#### 🔍 Expand any forest type for detailed phenology information:")
 
         ECOLOGY = {
             "Tropical Dry Deciduous — Monsoon (Jun-May)": {
-                "when_to_choose": "Your site loses ALL leaves between March and May (stands look bare/brown). Forest dominant species are teak (Tectona grandis), tendu, axlewood. Located in Deccan Plateau, Eastern Ghats, dry belt of MP/UP/Bihar.",
-                "ndvi_shape": "NDVI crashes to 0.15–0.25 in Apr–May → sharp rise with first monsoon rain → peak 0.55–0.72 in Oct–Nov → gradual fall.",
-                "sos_tip": "Use **Rainfall method** (first sustained rainfall). SOS follows 2–3 weeks after monsoon arrival. T2M_MIN and PRECTOTCORR are the strongest SOS predictors (r > 0.95).",
-                "pos_tip": "POS in Oct–Nov. GDD_cum is the best predictor (r ≈ 0.99 — nearly perfect).",
-                "eos_tip": "EOS Dec–Jan. VPD and DTR drive senescence. Use NDVI threshold method.",
-                "threshold_tip": "Use 20–25% threshold. Lower than this picks up pre-monsoon false greening.",
-                "sos":"Leaf flush Jun–Jul triggered by SW Monsoon. SOS follows 2–3 weeks after monsoon arrival.",
-                "pos":"Peak Oct–Nov after monsoon withdrawal. NDVI 0.55–0.72.",
+                "sos":"Leaf flush Jun–Jul triggered by first SW Monsoon rainfall. SOS follows 2–3 weeks after monsoon arrival.",
+                "pos":"Peak greenness Oct–Nov after monsoon withdrawal. NDVI 0.55–0.72.",
                 "eos":"Leaf fall Dec–Jan, complete by Mar–Apr. Controlled by T2M_MAX and VPD.",
                 "los":"~260–300 days. High inter-annual variability driven by monsoon onset date.",
-                "refs":["Prabakaran C et al. (2013) Tropical Ecology 54(2): 225–234.",
-                        "Singh KP & Kushwaha CP (2005) Current Science 89(6): 964–975.",
-                        "Champion HG & Seth SK (1968) A Revised Survey of the Forest Types of India."]},
-
+                "refs":["Prabakaran C et al. (2013) *Tropical Ecology* 54(2): 225–234.",
+                        "Singh KP & Kushwaha CP (2005) *Current Science* 89(6): 964–975.",
+                        "Champion HG & Seth SK (1968) *A Revised Survey of the Forest Types of India*. GoI Press."]},
             "Tropical Moist Deciduous — Monsoon (Jun-May)": {
-                "when_to_choose": "Your site is Sal (Shorea robusta) dominant forest or mixed moist deciduous. Located in Odisha, Jharkhand, Chhattisgarh, MP, sub-Himalayan belt. Site retains some canopy through dry season (unlike dry deciduous).",
-                "ndvi_shape": "NDVI stays above 0.35 even in dry season → rises to 0.60–0.72 peak. More gradual SOS than dry deciduous.",
-                "sos_tip": "Use **Rainfall method**. Sal has a characteristic pre-monsoon leaf exchange (Apr–May) that can confuse threshold method — rainfall method is more robust.",
-                "pos_tip": "POS Sep–Oct. GDD_cum and GWETROOT are strong predictors.",
-                "eos_tip": "EOS Nov–Mar. Gradual — use NDVI threshold.",
-                "threshold_tip": "Use 20–25%. Sal stands have higher base NDVI so threshold cuts work well.",
-                "sos":"Leaf flush Jun–Jul. Sal shows pre-monsoon leaf exchange Apr–May.",
-                "pos":"Peak Sep–Oct. Sal stands reach NDVI 0.60–0.72.",
+                "sos":"Leaf flush Jun–Jul. Sal shows a characteristic pre-monsoon leaf exchange (Apr–May).",
+                "pos":"Peak Sep–Oct. Sal-dominant stands reach NDVI 0.60–0.72.",
                 "eos":"Gradual senescence Nov–Mar. Complete leaf fall by Apr.",
                 "los":"~270–310 days.",
-                "refs":["Pandey CB & Singh JS (1992) Vegetatio 99–100: 291–305.",
-                        "Sagar R et al. (2008) Forest Ecology and Management 255: 3832–3840."]},
-
+                "refs":["Pandey CB & Singh JS (1992) *Vegetatio* 99–100: 291–305.",
+                        "Sagar R et al. (2008) *Forest Ecology and Management* 255: 3832–3840."]},
             "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)": {
-                "when_to_choose": "Your site is in the Western Ghats high rainfall zone (>2500mm/yr) — Kerala, Karnataka coast, Agumbe, Coorg, Silent Valley, or wet NE India. Forest is dense, multi-layered, never bare.",
-                "ndvi_shape": "Always high (0.60–0.82). Only a slight dip Feb–Apr during the dry spell. No clear leafless period.",
-                "sos_tip": "Use **NDVI Threshold** method. Weak SOS signal — PRECTOTCORR and RH2M are best predictors. Consider using a **low threshold (15–18%)** because base NDVI is already high.",
-                "pos_tip": "Peak NDVI Oct–Dec following SW monsoon. VPD and RH2M are key.",
-                "eos_tip": "Very weak EOS. Use threshold method with same low threshold.",
-                "threshold_tip": "**Set threshold to 15–18%.** Using 25–30% on an evergreen site will produce no SOS/EOS detections.",
                 "sos":"No dormant period. Weak SOS signal May–Jun as pre-monsoon dry spell ends.",
                 "pos":"Peak NDVI Oct–Dec. Values 0.65–0.82 — highest of any Indian forest type.",
                 "eos":"Weak senescence. EOS = last date NDVI above threshold.",
                 "los":">300 days; approaches 365 in high-rainfall years.",
-                "refs":["Jha CS et al. (2013) Current Science 105(6): 795–802."]},
-
+                "refs":["Jha CS et al. (2013) *Current Science* 105(6): 795–802."]},
             "Tropical Dry Evergreen (Jan-Dec)": {
-                "when_to_choose": "Your site is on the Tamil Nadu Coromandel coast / Pichavaram / Point Calimere. This forest is driven by the NE monsoon (Oct–Dec), opposite to the rest of India.",
-                "ndvi_shape": "Peak NDVI Dec–Jan (after NE monsoon). Dip Mar–Sep (SW monsoon is dry season here).",
-                "sos_tip": "SOS is in Oct–Nov — set season window Jan–Dec. PRECTOTCORR from NE monsoon is the primary driver.",
-                "pos_tip": "POS Dec–Jan. This is the opposite timing to most Indian forests.",
-                "eos_tip": "Senescence Feb–Apr.",
-                "threshold_tip": "Use 15–20%. NE monsoon forests have moderate NDVI amplitude.",
                 "sos":"Driven by NE monsoon. SOS Oct–Nov — opposite to rest of India.",
                 "pos":"Peak Dec–Jan following NE monsoon.",
                 "eos":"Senescence Feb–Apr.",
                 "los":"~180–220 days.",
-                "refs":["Parthasarathy N et al. (1992) Journal of Tropical Ecology 8: 153–163."]},
-
+                "refs":["Parthasarathy N et al. (1992) *Journal of Tropical Ecology* 8: 153–163."]},
             "Tropical Thorn Forest / Scrub (Jun-May)": {
-                "when_to_choose": "Your site is in arid/semi-arid zone — Rajasthan, Gujarat, Haryana, parts of AP/Telangana. NDVI is very low for most of the year. Vegetation is sparse scrub, acacia, khejri.",
-                "ndvi_shape": "NDVI stays below 0.15–0.20 most of year. Brief green flush Aug–Sep after monsoon. Amplitude only ~0.15–0.20.",
-                "sos_tip": "Use **Rainfall method** with a low trigger threshold (first 15mm+ rainfall). PRECTOTCORR is almost the only useful predictor here.",
-                "pos_tip": "POS Aug–Sep, very brief. GDD_cum has low predictive power for this type.",
-                "eos_tip": "Rapid senescence Oct–Nov. Use drought/dry season onset method.",
-                "threshold_tip": "**CRITICAL: Set threshold to 10–12%.** Standard 25–30% will detect NO season in this low-amplitude site. This is the most common user mistake for arid sites.",
                 "sos":"SOS follows first 20mm+ rainfall Jul–Aug. Pre-monsoon NDVI <0.15.",
                 "pos":"Peak Aug–Sep, brief. NDVI rarely >0.45.",
                 "eos":"Rapid senescence Oct–Nov.",
                 "los":"80–120 days. High inter-annual variability (±30 days).",
                 "refs":[]},
-
             "Subtropical Broadleaved Hill Forest (Apr-Mar)": {
-                "when_to_choose": "Your site is in Himalayan foothills or NE hill states at 500–1500m elevation — Rajaji NP, Manas NP, Shiwalik range, Himachal foothills. Mixed broadleaved forest, not fully deciduous.",
-                "ndvi_shape": "Green-up Apr–May with rising temperature. Peak Aug–Sep during monsoon. Senescence Oct–Dec.",
-                "sos_tip": "Use **NDVI Threshold**. T2M_MIN is the key SOS driver — temperature crosses ~12°C threshold triggers leaf flush.",
-                "pos_tip": "POS Aug–Sep. Monsoon soil moisture (GWETROOT) and GDD_cum are strong predictors.",
-                "eos_tip": "Autumn senescence Oct–Dec. DTR and T2M_MIN drive senescence.",
-                "threshold_tip": "Use 20–25%.",
                 "sos":"Leaf flush Apr–May as T rises above ~12°C.",
                 "pos":"Peak canopy Aug–Sep during monsoon.",
                 "eos":"Senescence Oct–Dec.",
                 "los":"~200–240 days.",
-                "refs":["Jeganathan C et al. (2014) Forest Ecology and Management 323: 153–162."]},
-
+                "refs":["Jeganathan C et al. (2014) *Forest Ecology and Management* 323: 153–162."]},
             "Montane Temperate Forest (Apr-Nov)": {
-                "when_to_choose": "Your site is in W Himalayas at 1500–3000m — Kedarnath WS, Great Himalayan NP, Kashmir valley forests. Oak, rhododendron, deodar dominant. Snow covers site Nov–Mar.",
-                "ndvi_shape": "Near-zero NDVI under snow Nov–Mar. Sharp rise Apr–May with snowmelt. Peak 0.60–0.70 Jul–Aug. Clear autumn senescence Sep–Oct.",
-                "sos_tip": "Use **NDVI Threshold or Derivative method**. T2M_MIN (snowmelt threshold ~0–2°C) is the primary SOS driver. SOS advances ~6–8 days per +1°C warming.",
-                "pos_tip": "POS Jul–Aug. ALLSKY_SFC_SW_DWN (solar radiation) and GDD_cum are key.",
-                "eos_tip": "Use **Derivative method** — autumn colour change is visually sharp and well-captured by max decline rate.",
-                "threshold_tip": "Use 25–30%. High-amplitude site with clear season.",
                 "sos":"Snowmelt and soil warming trigger bud burst. SOS Apr–May at 2000m, May–Jun at 2800m.",
                 "pos":"Peak Jul–Aug. NDVI ~0.65.",
                 "eos":"Autumn senescence Sep–Nov.",
                 "los":"150–200 days. +1°C advances SOS by ~6–8 days.",
-                "refs":["Sharma S & Chaturvedi RK (2015) Indian Forester 141(6): 617–625.",
-                        "Piao S et al. (2019) Global Change Biology 25: 1922–1940."]},
-
+                "refs":["Sharma S & Chaturvedi RK (2015) *Indian Forester* 141(6): 617–625.",
+                        "Piao S et al. (2019) *Global Change Biology* 25: 1922–1940."]},
             "Alpine / Subalpine Forest and Meadow (May-Oct)": {
-                "when_to_choose": "Your site is above 3000m — Spiti Valley, Valley of Flowers, Ladakh, high-altitude meadows (bugyals), Arunachal alpine. NDVI is near-zero from snow Nov–Apr.",
-                "ndvi_shape": "Snow suppresses NDVI to <0.05 Oct–Apr. Explosive green-up May–Jun after snowmelt. Peak 0.55–0.75 Jul–Aug. First frost triggers rapid senescence Sep–Oct.",
-                "sos_tip": "Use **Derivative method** (max NDVI rate). SOS is extremely rapid — within 2 weeks of snowmelt. T2M_MIN crossing 0°C is the best predictor. **Filter out NDVI < 0.01 rows before loading** — these are snow-covered dates.",
-                "pos_tip": "POS Jul–Aug. ALLSKY_SFC_SW_DWN is the strongest POS driver at high altitude.",
-                "eos_tip": "Use **Derivative method** — first frost triggers a near-instant colour change.",
-                "threshold_tip": "Use 25–30%. But first remove snow-covered months from the CSV (NDVI < 0.01).",
                 "sos":"Snowmelt controls SOS with high precision. Typical range May 20 – Jun 20.",
                 "pos":"Peak Jul–Aug. Alpine meadow NDVI 0.55–0.75.",
                 "eos":"First frost triggers rapid senescence Sep–Oct.",
                 "los":"Shortest in India: 100–140 days. Highest climate sensitivity.",
-                "refs":["Panwar P et al. (2014) Current Science 107(11): 1816–1821."]},
-
+                "refs":["Panwar P et al. (2014) *Current Science* 107(11): 1816–1821."]},
             "Shola Forest — Southern Montane (Jan-Dec)": {
-                "when_to_choose": "Your site is in the Nilgiris / Anamalai Hills / Palani Hills above 1500m — Mukurthi NP, Eravikulam NP, Munnar, Kodaikanal. Shola-grassland mosaic. Receives both SW and NE monsoon.",
-                "ndvi_shape": "Dual NDVI peaks — Sep (SW monsoon) and Dec (NE monsoon). Forest patches are dense (NDVI 0.65–0.75) but grassland patches drag mean NDVI lower.",
-                "sos_tip": "Use **NDVI Threshold**. Weak SOS definition — this forest type has two green-up pulses. ALLSKY_SFC_SW_DWN and RH2M are better predictors than rainfall alone.",
-                "pos_tip": "POS is ambiguous — choose the larger of the two peaks. GDD_cum performs poorly here.",
-                "eos_tip": "Brief dry period Feb–May. Threshold method recommended.",
-                "threshold_tip": "Use 15–18% to capture both monsoon pulses. Higher thresholds miss the weaker pulse.",
                 "sos":"Two minor green-up pulses (SW and NE monsoons). Weak SOS definition.",
                 "pos":"Dual NDVI peaks Sep and Dec. NDVI 0.55–0.72.",
                 "eos":"Brief dry period Feb–May.",
                 "los":"Effectively year-round (>320 days).",
-                "refs":["Sukumar R et al. (1995) Current Science 69(10): 812–815."]},
-
+                "refs":["Sukumar R et al. (1995) *Current Science* 69(10): 812–815."]},
             "Mangrove Forest (Jan-Dec)": {
-                "when_to_choose": "Your site is a coastal mangrove — Sundarbans (WB), Bhitarkanika (Odisha), Pichavaram (TN), Andaman Islands. Tidal inundation, saline soil. NDVI is relatively stable year-round.",
-                "ndvi_shape": "Stable NDVI 0.45–0.65. Slight monsoon green-up Jun–Aug. No clear dormant period.",
-                "sos_tip": "Use **NDVI Threshold** with a **low threshold (15–18%)**. PRECTOTCORR and GWETROOT are the most useful predictors. Consider using **Fusion files** (MODIS+S2) for better cloud penetration.",
-                "pos_tip": "POS Sep–Oct following monsoon. PRECTOTCORR is the best predictor.",
-                "eos_tip": "Minor senescence Dec–Feb. Threshold method.",
-                "threshold_tip": "Use 15–18%. Mangrove NDVI amplitude is small (~0.15–0.20) so standard 25% threshold will not detect any events.",
                 "sos":"No strong dormancy. Monsoon flush Jun–Aug produces detectable NDVI increase.",
                 "pos":"Peak Sep–Oct. Sundarbans NDVI 0.55–0.68.",
                 "eos":"Minor senescence Dec–Feb.",
                 "los":"Near year-round (>300 days).",
-                "refs":["Dutta D et al. (2016) Journal of Earth System Science 125(4): 819–831."]},
-
+                "refs":["Dutta D et al. (2016) *Journal of Earth System Science* 125(4): 819–831."]},
             "NE India Moist Evergreen (Jan-Dec)": {
-                "when_to_choose": "Your site is in NE India — Assam, Meghalaya, Manipur, Mizoram, Nagaland, Arunachal Pradesh (lower elevations), or sub-Himalayan W Bengal. Receives >2000mm rainfall. Dense evergreen to semi-evergreen forest.",
-                "ndvi_shape": "Highest mean NDVI in India (0.69–0.72 year-round). Pre-monsoon flush Mar–Apr + SW monsoon peak Aug–Sep. No bare period.",
-                "sos_tip": "Use **Rainfall method** or **NDVI Threshold**. Pre-monsoon T2M_MIN and then PRECTOTCORR are the main drivers. Kaziranga MODIS data works better than Sentinel-2 here (monsoon cloud cover blocks S2).",
-                "pos_tip": "POS Aug–Sep. GWETROOT and RH2M are strong predictors.",
-                "eos_tip": "Weak senescence Nov–Dec in upper canopy only. Use low threshold.",
-                "threshold_tip": "Use 15–20%. Base NDVI is already high — lower threshold needed to detect the season signal.",
                 "sos":"Pre-monsoon flush Mar–Apr + second green-up during SW monsoon Jun–Sep.",
                 "pos":"Peak Aug–Sep. Highest mean NDVI in India (0.69–0.72).",
                 "eos":"Weak senescence Nov–Dec in upper canopy only.",
                 "los":"Effectively year-round.",
-                "refs":["Jha CS et al. (2013) Current Science 105(6): 795–802."]},
+                "refs":["Jha CS et al. (2013) *Current Science* 105(6): 795–802."]},
         }
 
         for name, cfg_ref in SEASON_CONFIGS.items():
-            ec = ECOLOGY.get(name, {})
-            window = f"{SM_NAME[cfg_ref['start_month']]} → {SM_NAME[cfg_ref['end_month']]}"
+            ec=ECOLOGY.get(name,{})
+            window=f"{SM_NAME[cfg_ref['start_month']]} → {SM_NAME[cfg_ref['end_month']]}"
             with st.expander(f"{cfg_ref.get('icon','')}  {name}   |   {window}   |   {cfg_ref.get('states','')}", expanded=False):
-                # ── Top metrics row ──
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Season Window", window)
-                c2.metric("Rainfall", cfg_ref.get("rainfall", ""))
-                c3.metric("NDVI Peak", cfg_ref.get("ndvi_peak", ""))
-                c4.metric("Default Threshold", f"{int(cfg_ref.get('threshold_pct', 0.30)*100)}%")
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("Season Window", window); c2.metric("Rainfall", cfg_ref.get("rainfall",""))
+                c3.metric("NDVI Peak", cfg_ref.get("ndvi_peak","")); c4.metric("Threshold", f"{int(cfg_ref.get('threshold_pct',0.30)*100)}%")
                 st.markdown(f"**Species:** {cfg_ref.get('species','')}  |  **Key drivers:** {cfg_ref.get('key_drivers','')}")
-
                 st.markdown("---")
-
-                # ── When to choose this type ──
-                if ec.get("when_to_choose"):
-                    st.markdown("**When to select this forest type:**")
-                    st.info(ec["when_to_choose"])
-
-                # ── NDVI shape ──
-                if ec.get("ndvi_shape"):
-                    st.markdown(f"**Typical NDVI pattern:** {ec['ndvi_shape']}")
-
-                st.markdown("---")
-
-                # ── SOS / POS / EOS guidance ──
-                pc1, pc2, pc3 = st.columns(3)
-                with pc1:
-                    st.markdown("**🌱 SOS (Start of Season)**")
-                    st.caption(ec.get("sos", ""))
-                    if ec.get("sos_tip"):
-                        st.success(f"**Recommended setting:** {ec['sos_tip']}")
-                with pc2:
-                    st.markdown("**🌿 POS (Peak of Season)**")
-                    st.caption(ec.get("pos", ""))
-                    if ec.get("pos_tip"):
-                        st.success(f"**Recommended setting:** {ec['pos_tip']}")
-                with pc3:
-                    st.markdown("**🍂 EOS (End of Season)**")
-                    st.caption(ec.get("eos", ""))
-                    if ec.get("eos_tip"):
-                        st.success(f"**Recommended setting:** {ec['eos_tip']}")
-
-                st.markdown(f"**Season length (LOS):** {ec.get('los', '')}")
-
-                # ── Threshold tip ──
-                if ec.get("threshold_tip"):
-                    st.warning(f"⚙️ **Threshold guidance:** {ec['threshold_tip']}")
-
-                # ── References ──
+                pc1,pc2,pc3=st.columns(3)
+                with pc1: st.markdown("**🌱 SOS**"); st.caption(ec.get("sos",""))
+                with pc2: st.markdown("**🌿 POS**"); st.caption(ec.get("pos",""))
+                with pc3: st.markdown("**🍂 EOS**"); st.caption(ec.get("eos",""))
+                st.markdown(f"**📏 Season length:** {ec.get('los','')}")
                 if ec.get("refs"):
                     st.markdown("**References:**")
-                    for r in ec["refs"]:
-                        st.markdown(f"- {r}")
+                    for r in ec["refs"]: st.markdown(f"- {r}")
 
         st.markdown("""---
-#### Quick Location Table — Which forest type for my site?
+#### 🗺️ Quick Location Guide
 
-| Location / Site | Select this forest type |
+| Location | Forest Type |
 |---|---|
-| Tirupati, Mudumalai, Eastern Ghats, Deccan dry belt | Tropical Dry Deciduous — Monsoon |
-| Simlipal, Bastar, Sal forests of MP / Odisha / Jharkhand | Tropical Moist Deciduous — Monsoon |
-| Agumbe, Silent Valley, W Ghats high-rainfall belt | Tropical Wet Evergreen / Semi-Evergreen |
-| Pichavaram, Point Calimere, Tamil Nadu coast | Tropical Dry Evergreen |
-| Jaisalmer, Ranthambore, Rajasthan / Gujarat arid sites | Tropical Thorn Forest / Scrub |
-| Rajaji NP, Manas NP, Himalayan foothills 500–1500m | Subtropical Broadleaved Hill Forest |
-| Kedarnath WS, Great Himalayan NP, W Himalayas 1500–3000m | Montane Temperate Forest |
-| Spiti Valley, Valley of Flowers, Himalayas >3000m, Ladakh | Alpine / Subalpine Forest and Meadow |
-| Mukurthi NP, Eravikulam NP, Nilgiris / Munnar / Kodaikanal | Shola Forest — Southern Montane |
-| Bhitarkanika, Sundarbans, Pichavaram mangroves | Mangrove Forest |
-| Kaziranga NP, Cherrapunji, Assam / Meghalaya / Arunachal | NE India Moist Evergreen |
-| Wheat/mustard fields in Punjab, Haryana (Rabi season) | Rabi / Winter Crop |
-| Rice/soybean fields (Kharif season) | Kharif / Summer Crop |
+| Tirupati, Eastern Ghats, Deccan | Tropical Dry Deciduous — Monsoon |
+| Sal forests — MP, Chhattisgarh, Odisha | Tropical Moist Deciduous — Monsoon |
+| Western Ghats — Kerala, Karnataka | Tropical Wet Evergreen |
+| Tamil Nadu Coromandel coast | Tropical Dry Evergreen |
+| Rajasthan, Gujarat | Tropical Thorn Forest / Scrub |
+| Himalayan foothills 500–1500m | Subtropical Broadleaved Hill Forest |
+| W Himalayas 1500–3000m | Montane Temperate Forest |
+| Himalayas >3000m, Ladakh, Spiti | Alpine / Subalpine Forest |
+| Nilgiris, Munnar, Kodaikanal >1500m | Shola Forest |
+| Sundarbans, Bhitarkanika, Pichavaram | Mangrove Forest |
+| Assam, Meghalaya, Manipur, Arunachal | NE India Moist Evergreen |
 
-#### Definitions
-
-**SOS** = first date smoothed NDVI rises above: base + threshold% × (peak − base)
-**POS** = date of maximum smoothed NDVI within the season window
-**EOS** = last date smoothed NDVI stays above the same threshold after POS
+#### 📐 Definitions
+**SOS** = first date smoothed NDVI rises above: base + threshold% × (peak − base)  
+**POS** = date of maximum smoothed NDVI within the season window  
+**EOS** = last date smoothed NDVI stays above the same threshold after POS  
 **LOS** = elapsed days SOS → EOS (correct even for seasons crossing the calendar year boundary)
         """)
-
 
     # ══ TAB 5 — TECHNICAL GUIDE ════════════════════════════════
     with tab5:
