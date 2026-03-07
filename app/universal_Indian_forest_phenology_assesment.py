@@ -990,7 +990,13 @@ def plot_correlation_summary(predictor, pheno_df):
     for ev in events:
         ct = predictor.corr_tables.get(ev)
         if ct is None: continue
-        if len(ct): best[ev] = ct.iloc[0]['Feature']
+        # Pick best feature for scatter: skip EVENT_EXCLUDE features
+        # (they are ecologically spurious and excluded from model)
+        _excluded_for_ev = EVENT_EXCLUDE.get(ev, set())
+        for _, _row in ct.iterrows():
+            if _row['Feature'] not in _excluded_for_ev:
+                best[ev] = _row['Feature']
+                break
         for _, row in ct.iterrows():
             f = row['Feature']
             if f not in r_mat.index: continue
