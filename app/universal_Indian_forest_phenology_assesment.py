@@ -741,6 +741,7 @@ class UniversalPredictor:
                 'r2': self.r2[event], 'mae': self.mae[event], 'event': event}
 
     def equation_str(self, event, season_start_month=6):
+        """Returns only the regression equation line — used in Predict tab & short displays."""
         if event not in self._fits: return "Need ≥ 3 seasons"
         fit = self._fits[event]
         sm_name = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
@@ -758,50 +759,43 @@ class UniversalPredictor:
             sign = '+' if coef >= 0 else '-'
             terms.append(f"{sign} {abs(coef):.5f} × {feat}")
 
-        n_feats_in = len(fit['features'])
         eq_str = f"{target_label}  =  " + "  ".join(terms)
-        eq_str += (f"\n    [Ridge α={fit['alpha']}, {n_feats_in} feature(s) in model, "
+        eq_str += (f"\n    [Ridge α={fit['alpha']}, {len(fit['features'])} feature(s), "
                    f"R²(LOO)={fit['r2']:.3f}, MAE=±{fit['mae']:.1f} d]")
-
-        # Show FULL ranked list with clear explanations
-        ct = self.corr_tables.get(event)
-        if ct is not None and len(ct) > 0:
-            in_model  = set(fit['features'])
-            usable    = ct[ct['Usable'] == '✅']
-            not_usable = ct[ct['Usable'] != '✅']
-
-            if len(usable) > 0:
-                eq_str += f"\n\n    📊 ALL features correlated with {event} (|r|≥{MIN_CORR_THRESHOLD}):"
-                eq_str +=  "\n    " + "─" * 62
-                eq_str += f"\n    {'Feature':<22} {'Pearson r':>10}  {'|r|':>6}  {'p':>6}  Status"
-                eq_str +=  "\n    " + "─" * 62
-
-                for _, row in usable.iterrows():
-                    feat = row['Feature']
-                    if feat in in_model:
-                        status = "✅ IN MODEL (drives prediction)"
-                    elif feat in EVENT_EXCLUDE.get(event, set()):
-                        status = "⛔ excluded (ecologically spurious for this event)"
-                    else:
-                        # Check why it was dropped
-                        r_with_target = abs(row['Pearson_r'])
-                        # Check collinearity with in-model features
-                        status = "➖ not added (incremental LOO R² test: adding it did not improve prediction)"
-                    eq_str += (f"\n    {feat:<22} {row['Pearson_r']:>+10.3f}  "
-                               f"{row['|r|']:>6.3f}  {row['p_value']:>6.3f}  {status}")
-
-                eq_str +=  "\n    " + "─" * 62
-                eq_str += (f"\n    ℹ️  Features are added only if each one IMPROVES Leave-One-Out R²."
-                           f"\n    ℹ️  High Pearson r does not always mean a feature helps the model —"
-                           f"\n    ℹ️  collinear or redundant features are excluded to prevent overfitting."
-                           f"\n    ℹ️  The model uses 15-day pre-event means of each selected feature.")
-
-            if len(not_usable) > 0:
-                eq_str += f"\n\n    ⬜ Features below |r|={MIN_CORR_THRESHOLD} threshold (not usable):"
-                low_feats = ', '.join(not_usable['Feature'].tolist())
-                eq_str += f"\n    {low_feats}"
-
         return eq_str
+
+    def corr_table_for_display(self, event):
+        """
+        Returns a clean DataFrame for the Training tab feature table.
+        Columns: Feature | Pearson r | |r| | Role
+        Role values: IN MODEL / Excluded (spurious) / Not selected
+        p-values are intentionally omitted — shown only in the Correlations heatmap.
+        """
+        if event not in self._fits: return pd.DataFrame()
+        fit = self._fits[event]
+        ct  = self.corr_tables.get(event)
+        if ct is None or len(ct) == 0: return pd.DataFrame()
+
+        in_model = set(fit['features'])
+        rows = []
+        for _, row in ct.iterrows():
+            feat = row['Feature']
+            usable = row['Usable'] == '✅'
+            if feat in in_model:
+                role = '✅  In model'
+            elif feat in EVENT_EXCLUDE.get(event, set()):
+                role = '⛔  Excluded — ecologically spurious'
+            elif usable:
+                role = '➖  Correlated but not selected (collinear or did not improve LOO R²)'
+            else:
+                role = '⬜  Below |r| threshold'
+            rows.append({
+                'Feature':   feat,
+                'Pearson r': row['Pearson_r'],
+                '|r|':       row['|r|'],
+                'Role':      role,
+            })
+        return pd.DataFrame(rows)
 
 
 # ─── PLOTS ───────────────────────────────────────────────────
@@ -1747,15 +1741,43 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
             st.markdown('<div class="good-box">✅ Good number of seasons — model estimates are reliable.</div>',
                         unsafe_allow_html=True)
 
-        # Equations
+        # ── Fitted Equations + Feature Tables ────────────────────
         st.markdown("---")
-        st.markdown("### 📐 Fitted Equations  (your data, no hard-coded coefficients)")
-        for ev in ['SOS','POS','EOS']:
-            raw_eq = predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
-            # Convert newlines to <br> for HTML rendering
-            eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
-            st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b><br><br>{eq_html}</div>',
-                        unsafe_allow_html=True)
+        st.markdown("### 📐 Fitted Equations")
+        st.caption("Equations are fitted exclusively to your uploaded data — no hard-coded coefficients.")
+
+        ev_tab_sos, ev_tab_pos, ev_tab_eos = st.tabs(
+            [f"{icons['SOS']} SOS — Green-up",
+             f"{icons['POS']} POS — Peak",
+             f"{icons['EOS']} EOS — Senescence"])
+
+        for ui_tab, ev in zip([ev_tab_sos, ev_tab_pos, ev_tab_eos], ['SOS', 'POS', 'EOS']):
+            with ui_tab:
+                sm_val = SEASON_CONFIGS[season_type]['start_month']
+                raw_eq = predictor.equation_str(ev, season_start_month=sm_val)
+                eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
+                st.markdown(f'<div class="eq-box">{eq_html}</div>', unsafe_allow_html=True)
+
+                ct_display = predictor.corr_table_for_display(ev)
+                if not ct_display.empty:
+                    st.markdown(
+                        f"**Meteorological features ranked by |Pearson r| with {ev} timing**  "
+                        f"· Only |r| ≥ {MIN_CORR_THRESHOLD} features enter the model  "
+                        f"· p-values and significance stars: see the **Correlations** tab")
+
+                    def _style_role(val):
+                        if val.startswith('✅'):  return 'background-color:#C8E6C9;color:#1B5E20;font-weight:600'
+                        if val.startswith('⛔'):  return 'background-color:#FFCCBC;color:#BF360C;font-weight:600'
+                        if val.startswith('➖'):  return 'color:#555'
+                        return 'color:#999'
+
+                    styled = (ct_display.style
+                              .background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
+                              .background_gradient(subset=['|r|'], cmap='Greens', vmin=0, vmax=1)
+                              .applymap(_style_role, subset=['Role'])
+                              .format({'Pearson r': '{:+.3f}', '|r|': '{:.3f}'})
+                              .set_properties(**{'font-size': '0.84rem'}))
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
 
         # Obs vs Pred
         fig_s = plot_obs_vs_pred(predictor, train_df)
@@ -1855,6 +1877,10 @@ The scatter plots on the right show the best single predictor vs observed event 
             # ── Per-event detailed correlation tables ──────────────
             st.markdown("---")
             st.markdown("#### 📋 Detailed Correlation Tables")
+            st.caption(
+                "Pearson r and significance stars are identical to the heatmap above — "
+                "both read from the same computed source.  "
+                "** p < 0.05  ·  * p < 0.10  ·  (blank) p ≥ 0.10")
             icons_ev = {'SOS': '🌱', 'POS': '🌿', 'EOS': '🍂'}
             c1, c2, c3 = st.columns(3)
             for col_st, ev in zip([c1, c2, c3], ['SOS', 'POS', 'EOS']):
@@ -1862,9 +1888,21 @@ The scatter plots on the right show the best single predictor vs observed event 
                     st.markdown(f"**{icons_ev[ev]} {ev}**")
                     ct = predictor.corr_tables.get(ev)
                     if ct is not None and len(ct):
-                        st.dataframe(ct.style.background_gradient(
-                            subset=['Pearson_r'], cmap='RdYlGn', vmin=-1, vmax=1),
-                            use_container_width=True, height=320)
+                        # Build display version: r, |r|, significance (no raw p number)
+                        def _sig(p):
+                            if p < 0.05:  return '**'
+                            if p < 0.10:  return '*'
+                            return ''
+                        disp = ct[['Feature','Pearson_r','|r|']].copy()
+                        disp['Sig'] = ct['p_value'].apply(_sig)
+                        disp = disp.rename(columns={'Pearson_r': 'Pearson r'})
+                        styled_ct = (disp.style
+                                     .background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
+                                     .background_gradient(subset=['|r|'], cmap='Greens', vmin=0, vmax=1)
+                                     .format({'Pearson r': '{:+.3f}', '|r|': '{:.3f}'})
+                                     .set_properties(**{'font-size': '0.82rem'}))
+                        st.dataframe(styled_ct, use_container_width=True,
+                                     hide_index=True, height=320)
                     else:
                         st.info("No correlation data.")
 
@@ -2075,8 +2113,8 @@ Defaults are pre-filled from training data means — change them to forecast fut
                 st.markdown("**Equations used for this prediction:**")
                 for ev in list(results.keys()):
                     raw_eq = predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
-                    eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
-                    st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b><br><br>{eq_html}</div>',
+                    eq_line = raw_eq.split('\n')[0]   # show equation line only — clean, no feature table
+                    st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b>&nbsp;&nbsp;{eq_line}</div>',
                                 unsafe_allow_html=True)
 
     # ══ TAB 4 — FOREST GUIDE ═══════════════════════════════════
