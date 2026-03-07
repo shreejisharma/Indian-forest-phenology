@@ -967,7 +967,6 @@ def plot_correlation_summary(predictor, pheno_df):
       Middle — Clean Pearson-r heatmap with significance stars (** p<0.05, * p<0.10)
       Right  — Scatter plots: best feature vs DOY for each event
     """
-    from scipy.stats import pearsonr as _pearsonr
     events    = ['SOS', 'POS', 'EOS']
     ev_colors = {'SOS': '#2E7D32', 'POS': '#1565C0', 'EOS': '#BF360C'}
     ev_markers= {'SOS': 'o',       'POS': 's',       'EOS': '^'}
@@ -995,13 +994,11 @@ def plot_correlation_summary(predictor, pheno_df):
         for _, row in ct.iterrows():
             f = row['Feature']
             if f not in r_mat.index: continue
+            # Use values DIRECTLY from corr_tables — same source as Training tab equations
+            # (previously p_mat was recomputed from train_df which gave different n and results)
             r_mat.loc[f, ev] = row['Pearson_r']
-            # compute p-value from train_df if available
-            if tdf is not None and f in tdf.columns and 'Target_DOY' in tdf.columns:
-                sub = tdf[tdf['Event']==ev][[f, 'Target_DOY']].dropna()
-                if len(sub) >= 4:
-                    _, pv = _pearsonr(sub[f], sub['Target_DOY'])
-                    p_mat.loc[f, ev] = pv
+            if 'p_value' in row and not pd.isna(row['p_value']):
+                p_mat.loc[f, ev] = row['p_value']
 
     n_feats = len(all_feats)
     n_ev    = 3
