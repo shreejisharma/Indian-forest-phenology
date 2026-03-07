@@ -1326,6 +1326,18 @@ def main():
         "2️⃣  NASA POWER Met CSV", type=['csv'],
         help="Daily export from power.larc.nasa.gov — header block auto-skipped, all parameters auto-detected")
 
+    # ── CACHE-BUST: clear stale predictor/train_df when files change ──
+    # Build a fingerprint from current file names + sizes
+    _ndvi_fp = f"{ndvi_file.name}:{ndvi_file.size}" if ndvi_file else ""
+    _met_fp  = f"{met_file.name}:{met_file.size}"   if met_file  else ""
+    _cur_fp  = f"{_ndvi_fp}|{_met_fp}"
+    if st.session_state.get('_file_fingerprint') != _cur_fp:
+        # New files — wipe all derived state so Predict tab never shows
+        # features from a previous training run
+        for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
+            st.session_state[_k] = None
+        st.session_state['_file_fingerprint'] = _cur_fp
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🌱 Forest Type Selection")
 
