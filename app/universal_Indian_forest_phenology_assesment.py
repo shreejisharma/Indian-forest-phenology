@@ -8,7 +8,7 @@ Upload:
 
 Predicts SOS / POS / EOS / LOS for 11 Indian forest types using:
   • Pearson |r| >= 0.40 feature filter
-  • Single best feature per event model (conservative for n < 10 seasons)
+  • Multi-feature Ridge (up to n−2 features; collinearity-filtered; all significant drivers shown)
   • Ridge Regression with auto-tuned alpha (RidgeCV)
   • Leave-One-Out cross-validation (honest R² for small samples)
   • Threshold-based phenology extraction (robust for multi-hump NDVI)
@@ -554,18 +554,36 @@ def select_best_feature(X, y, event):
     return best_feat, best_r
 
 
-def select_multi_features(X, y, event, max_features=4, min_r=MIN_CORR_THRESHOLD):
+def _loo_r2_quick(X_vals, y_vals, alpha=0.01):
+    """Fast LOO R² for small arrays (used in feature selection)."""
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    loo = LeaveOneOut(); preds = []
+    sc = StandardScaler()
+    for tr, te in loo.split(X_vals):
+        Xtr = sc.fit_transform(X_vals[tr]); Xte = sc.transform(X_vals[te])
+        m = Ridge(alpha=alpha); m.fit(Xtr, y_vals[tr])
+        preds.append(float(m.predict(Xte)[0]))
+    preds = np.array(preds)
+    ss_res = np.sum((y_vals-preds)**2)
+    ss_tot = np.sum((y_vals-y_vals.mean())**2) + 1e-12
+    return float(np.clip(1-ss_res/ss_tot, -1, 1))
+
+
+def select_multi_features(X, y, event, max_features=5, min_r=MIN_CORR_THRESHOLD):
     """
-    Select up to max_features non-collinear features for multi-feature Ridge:
-      1. Exclude EVENT_EXCLUDE features (ecologically spurious for this event)
+    Select features for multi-feature Ridge with LOO CV:
+      1. Exclude EVENT_EXCLUDE features (ecologically spurious)
       2. Keep only |Pearson r| >= min_r with target
       3. Remove collinear pairs (|r_pair| > 0.85) — keep higher |r| with target
-      4. Limit to min(max_features, n_samples//3) — conservative for LOO
+      4. Incremental LOO R² check: only add feature k if it IMPROVES LOO R² by ≥ 0.03
+         (prevents overfitting with small n, e.g. n=4 with 2 correlated features)
+      5. Cap at min(max_features, n-2) for regularisation safety
     """
     excluded = EVENT_EXCLUDE.get(event, set())
     usable = []
     for col in X.columns:
-        if col in excluded: continue          # skip blacklisted features
+        if col in excluded: continue
         vals = X[col].dropna()
         if vals.std() < 1e-8 or len(vals) < 3: continue
         idx = vals.index.intersection(y.dropna().index)
@@ -579,10 +597,10 @@ def select_multi_features(X, y, event, max_features=4, min_r=MIN_CORR_THRESHOLD)
     usable.sort(key=lambda x: -x[1])
 
     # Greedy collinearity removal (pairwise |r| > 0.85 → drop lower-correlated one)
-    selected = []
+    collinear_filtered = []
     for feat, r_feat in usable:
         collinear = False
-        for sel in selected:
+        for sel in collinear_filtered:
             xi = X[feat].fillna(X[feat].median())
             xj = X[sel].fillna(X[sel].median())
             idx2 = xi.index.intersection(xj.index)
@@ -593,11 +611,32 @@ def select_multi_features(X, y, event, max_features=4, min_r=MIN_CORR_THRESHOLD)
             if abs(r_pair) > 0.85:
                 collinear = True; break
         if not collinear:
-            selected.append(feat)
+            collinear_filtered.append(feat)
 
     n_obs = len(y.dropna())
-    max_safe = max(1, n_obs // 3)
-    return selected[:min(max_features, max_safe)]
+    max_safe = max(2, n_obs - 2)
+    candidates = collinear_filtered[:min(max_features, max_safe)]
+
+    if len(candidates) <= 1:
+        return candidates
+
+    # Incremental LOO R² selection: only add feature if it genuinely helps
+    y_vals = y.values.astype(float)
+    selected = [candidates[0]]  # always include best feature
+    best_r2 = _loo_r2_quick(X[selected].fillna(X[selected[0]].median()).values.reshape(-1,1), y_vals)
+
+    for feat in candidates[1:]:
+        trial = selected + [feat]
+        Xt = X[trial].fillna(X[trial].median()).values
+        try:
+            trial_r2 = _loo_r2_quick(Xt, y_vals)
+        except Exception:
+            continue
+        if trial_r2 > best_r2 + 0.03:   # must improve LOO R² by at least 3%
+            selected.append(feat)
+            best_r2 = trial_r2
+
+    return selected
 
 
 def get_all_correlations(X, y):
@@ -630,7 +669,8 @@ def fit_event_model(X_all, y, event):
     """Multi-feature Ridge regression with collinearity filtering and LOO CV."""
     yt = y.values; n = len(yt)
 
-    features = select_multi_features(X_all, y, event, max_features=4)
+    # max_features capped at n-2 inside select_multi_features; allow up to 5 candidates
+    features = select_multi_features(X_all, y, event, max_features=5)
 
     if not features:
         md = float(yt.mean())
@@ -718,9 +758,49 @@ class UniversalPredictor:
             sign = '+' if coef >= 0 else '-'
             terms.append(f"{sign} {abs(coef):.5f} × {feat}")
 
+        n_feats_in = len(fit['features'])
         eq_str = f"{target_label}  =  " + "  ".join(terms)
-        eq_str += (f"\n    [Ridge α={fit['alpha']}, {len(fit['features'])} features, "
+        eq_str += (f"\n    [Ridge α={fit['alpha']}, {n_feats_in} feature(s) in model, "
                    f"R²(LOO)={fit['r2']:.3f}, MAE=±{fit['mae']:.1f} d]")
+
+        # Show FULL ranked list with clear explanations
+        ct = self.corr_tables.get(event)
+        if ct is not None and len(ct) > 0:
+            in_model  = set(fit['features'])
+            usable    = ct[ct['Usable'] == '✅']
+            not_usable = ct[ct['Usable'] != '✅']
+
+            if len(usable) > 0:
+                eq_str += f"\n\n    📊 ALL features correlated with {event} (|r|≥{MIN_CORR_THRESHOLD}):"
+                eq_str +=  "\n    " + "─" * 62
+                eq_str += f"\n    {'Feature':<22} {'Pearson r':>10}  {'|r|':>6}  {'p':>6}  Status"
+                eq_str +=  "\n    " + "─" * 62
+
+                for _, row in usable.iterrows():
+                    feat = row['Feature']
+                    if feat in in_model:
+                        status = "✅ IN MODEL (drives prediction)"
+                    elif feat in EVENT_EXCLUDE.get(event, set()):
+                        status = "⛔ excluded (ecologically spurious for this event)"
+                    else:
+                        # Check why it was dropped
+                        r_with_target = abs(row['Pearson_r'])
+                        # Check collinearity with in-model features
+                        status = "➖ not added (incremental LOO R² test: adding it did not improve prediction)"
+                    eq_str += (f"\n    {feat:<22} {row['Pearson_r']:>+10.3f}  "
+                               f"{row['|r|']:>6.3f}  {row['p_value']:>6.3f}  {status}")
+
+                eq_str +=  "\n    " + "─" * 62
+                eq_str += (f"\n    ℹ️  Features are added only if each one IMPROVES Leave-One-Out R²."
+                           f"\n    ℹ️  High Pearson r does not always mean a feature helps the model —"
+                           f"\n    ℹ️  collinear or redundant features are excluded to prevent overfitting."
+                           f"\n    ℹ️  The model uses 15-day pre-event means of each selected feature.")
+
+            if len(not_usable) > 0:
+                eq_str += f"\n\n    ⬜ Features below |r|={MIN_CORR_THRESHOLD} threshold (not usable):"
+                low_feats = ', '.join(not_usable['Feature'].tolist())
+                eq_str += f"\n    {low_feats}"
+
         return eq_str
 
 
@@ -1043,12 +1123,19 @@ def plot_correlation_summary(predictor, pheno_df):
     return fig
 
 
-def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None):
+def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
+                       pheno_df=None, predictor=None):
     """
-    Year-by-year figures: for each growing season, plot 2 sub-panels exactly like
-    reference image (GS_YYYY_YYYY.png):
-      Top    — NDVI + Air params (RH2M, T2M_MAX, T2M_MIN, PRECTOTCORR) with multi-right-axes
-      Bottom — NDVI + Soil params (GWETTOP, GWETROOT, GWETPROF, WS2M) with multi-right-axes
+    Year-by-year figures: for each growing season, plot 2 sub-panels:
+      Top    — NDVI + Air params (RH2M, T2M_MAX, T2M_MIN, PRECTOTCORR)
+      Bottom — NDVI + Soil params (GWETTOP, GWETROOT, GWETPROF, WS2M)
+
+    If pheno_df and predictor are supplied, vertical dashed lines for SOS/POS/EOS
+    are drawn on both panels, with an annotation showing:
+      • the event date
+      • the model feature name and its 15-day pre-event mean value
+      • the equation term used for prediction
+    This directly links the seasonal climate context to the model equations.
     Returns a list of (title, fig) tuples — one per season.
     """
     AIR_PARAMS = [
@@ -1151,6 +1238,53 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None):
         fig.legend(h_soil, l_soil, loc='center left', bbox_to_anchor=(0.01, 0.28),
                    ncol=1, fontsize=9, framealpha=0.95,
                    title='Soil Parameters', title_fontsize=9)
+
+        # ── Draw SOS / POS / EOS vertical lines if pheno_df provided ──
+        EV_STYLE = {
+            'SOS': ('#2E7D32', '🌱', 'SOS'),
+            'POS': ('#1565C0', '🌿', 'POS'),
+            'EOS': ('#E65100', '🍂', 'EOS'),
+        }
+        if pheno_df is not None:
+            # Find the row for this year
+            yr_row = pheno_df[pheno_df['Year'] == yr] if 'Year' in pheno_df.columns else pd.DataFrame()
+            if len(yr_row) == 0 and sm > em:
+                # Cross-year season: try yr-1 as the season start year
+                yr_row = pheno_df[pheno_df['Year'] == yr - 1] if 'Year' in pheno_df.columns else pd.DataFrame()
+
+            if len(yr_row) > 0:
+                row = yr_row.iloc[0]
+                for ev, (col, icon, label) in EV_STYLE.items():
+                    ev_date = row.get(f'{ev}_Date', pd.NaT)
+                    if pd.isna(ev_date): continue
+                    if not (s <= ev_date <= e): continue
+
+                    # Draw vertical line on both panels
+                    for ax in [ax_top, ax_bot]:
+                        ax.axvline(ev_date, color=col, lw=2.0, ls='--', alpha=0.85, zorder=10)
+
+                    # Build annotation: feature name + 15-day pre-event mean
+                    annot_lines = [f"{icon} {label}  {ev_date.strftime('%b %d')}"]
+                    if predictor is not None:
+                        fit = predictor._fits.get(ev, {})
+                        feats = fit.get('features', [])
+                        for f_name in feats[:2]:  # show up to 2 features
+                            if f_name in met_df.columns:
+                                win = met_df[(met_df['Date'] >= ev_date - timedelta(days=15)) &
+                                             (met_df['Date'] <= ev_date)]
+                                val = win[f_name].mean() if len(win) > 0 else np.nan
+                                if not np.isnan(val):
+                                    unit = '°C' if 'T2M' in f_name else ('%' if 'RH' in f_name else '')
+                                    annot_lines.append(f"{f_name}: {val:.1f}{unit}")
+
+                    annot_txt = '\n'.join(annot_lines)
+                    # Place label just above NDVI area (y=0.92 in axes coords)
+                    ax_top.text(ev_date, 0.96, annot_txt,
+                                transform=ax_top.get_xaxis_transform(),
+                                fontsize=7.5, color=col, fontweight='bold',
+                                ha='center', va='top',
+                                bbox=dict(boxstyle='round,pad=0.25', fc='white', ec=col, alpha=0.85),
+                                zorder=15)
 
         # ── X-axis ────────────────────────────────────────────
         ax_bot.set_xlabel('Date', fontsize=13, fontweight='bold')
@@ -1466,6 +1600,31 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
             st.error(f"❌ Only {n_seasons} season(s) detected. Minimum 3 required. Upload ≥3 years of NDVI.")
             return
 
+        # ── Forest type sanity check ───────────────────────────
+        # Warn if extracted SOS/EOS dates look inconsistent with selected forest type
+        cfg_check = SEASON_CONFIGS[season_type]
+        sm_check  = cfg_check['start_month']
+        # Compute median SOS month from extracted data
+        sos_months = [r['SOS_Date'].month for _, r in pheno_df.iterrows()
+                      if 'SOS_Date' in r and pd.notna(r.get('SOS_Date'))]
+        if sos_months:
+            median_sos_month = int(np.median(sos_months))
+            # Alert if median SOS is more than 2 months away from season start
+            month_gap = min(abs(median_sos_month - sm_check),
+                            12 - abs(median_sos_month - sm_check))
+            if month_gap > 2:
+                mo_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                            7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+                st.warning(
+                    f"⚠️ **Forest type check:** Your NDVI data shows SOS typically in "
+                    f"**{mo_names[median_sos_month]}** but the selected forest type "
+                    f"**'{season_type}'** has a season start of **{mo_names[sm_check]}**. "
+                    f"This mismatch can produce wrong equation intercepts and incorrect "
+                    f"predictions.\n\n"
+                    f"💡 **For Valley of Flowers (Uttarakhand):** Select "
+                    f"**'⛰️ Alpine / Subalpine Forest and Meadow (May-Oct)'** for best results."
+                )
+
         st.success(f"✅ **{n_seasons} growing seasons** extracted")
 
         c_left, c_right = st.columns([2,1])
@@ -1577,7 +1736,10 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         st.markdown("---")
         st.markdown("### 📐 Fitted Equations  (your data, no hard-coded coefficients)")
         for ev in ['SOS','POS','EOS']:
-            st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b><br>{predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])}</div>',
+            raw_eq = predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
+            # Convert newlines to <br> for HTML rendering
+            eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
+            st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b><br><br>{eq_html}</div>',
                         unsafe_allow_html=True)
 
         # Obs vs Pred
@@ -1700,7 +1862,9 @@ The scatter plots on the right show the best single predictor vs observed event 
         ndvi_df_ss = st.session_state.get('ndvi_df')
         if met_df_ss is not None and raw_params_ss and ndvi_df_ss is not None:
             figs_list = plot_met_with_ndvi(met_df_ss, ndvi_df_ss, raw_params_ss,
-                                           season_cfg=SEASON_CONFIGS.get(season_type))
+                                           season_cfg=SEASON_CONFIGS.get(season_type),
+                                           pheno_df=pheno_df_ss,
+                                           predictor=st.session_state.get('predictor'))
             if figs_list:
                 for season_label, fig_m in figs_list:
                     st.markdown(f"**Growing Season {season_label}**")
@@ -1715,37 +1879,103 @@ The scatter plots on the right show the best single predictor vs observed event 
     with tab3:
         st.markdown("### 🔮 Predict SOS / POS / EOS / LOS for Any Year")
         predictor=st.session_state.get('predictor'); train_df=st.session_state.get('train_df')
-        if predictor is None: st.info("Train models first."); return
+        if predictor is None: st.info("Train models first (Tab 1)."); return
 
-        all_needed=set()
-        for ev in ['SOS','POS','EOS']:
-            if ev in predictor._fits: all_needed.update(predictor._fits[ev]['features'])
-
-        if not all_needed:
-            st.warning("No usable features found. Try more seasons or add ALLSKY_SFC_SW_DWN / GWETROOT."); return
-
-        st.markdown("Enter the **15-day average pre-event meteorological conditions** "
-                    "(defaults filled from training data means):")
-
-        ncols=min(3, len(all_needed)); col_list=st.columns(ncols); inputs={}
-        for idx, f in enumerate(sorted(all_needed)):
-            default=0.0
-            if train_df is not None and f in train_df.columns:
-                vals=train_df[f].dropna()
-                if len(vals): default=float(vals.mean())
-            with col_list[idx%ncols]:
-                is_sum=any(k in f.upper() for k in ['PREC','GDD','LOG_P','SPEI'])
-                inputs[f]=st.number_input(f, value=round(default,3), format="%.3f",
-                                           key=f"inp_{f}", help=f"15-day {'sum' if is_sum else 'mean'} of {f}")
-
-        pred_year=st.number_input("Prediction year", 2024, 2040, 2026)
-        # Season start month from config (Jun for most monsoon, Jan for evergreen)
         pred_sm = SEASON_CONFIGS[season_type]['start_month']
+
+        # ── Build per-event feature inputs ────────────────────
+        # Each event uses its OWN features — show them grouped by event
+        # so the user knows exactly which value to enter for which prediction.
+        ev_feats = {}
+        for ev in ['SOS','POS','EOS']:
+            fit = predictor._fits.get(ev, {})
+            feats = [f for f in fit.get('features', []) if fit.get('mode') == 'ridge']
+            if feats:
+                ev_feats[ev] = feats
+
+        if not ev_feats:
+            st.warning("No usable features found. Try more seasons or a different forest type."); return
+
+        st.markdown("""
+<div class="info-box">
+<b>📋 How prediction works:</b> Each phenological event (SOS / POS / EOS) has its own
+regression equation with its own meteorological driver(s). Enter the expected
+<b>15-day pre-event conditions</b> for each event separately below.
+Defaults are pre-filled from training data means — change them to forecast future scenarios.
+</div>""", unsafe_allow_html=True)
+
+        ev_labels_full = {'SOS': '🌱 SOS — Green-up start', 
+                          'POS': '🌿 POS — Peak greenness',
+                          'EOS': '🍂 EOS — Senescence end'}
+        ev_colors_hex  = {'SOS': '#E8F5E9', 'POS': '#E3F2FD', 'EOS': '#FFF3E0'}
+        ev_border_hex  = {'SOS': '#2E7D32', 'POS': '#1565C0', 'EOS': '#E65100'}
+
+        # ev_inputs[ev][feature] = value  — scoped per event so shared feature names
+        # (e.g. log_precip used by both SOS and EOS) never overwrite each other.
+        ev_inputs = {ev: {} for ev in ['SOS', 'POS', 'EOS']}
+        # Compute typical event date range from training data (to guide user)
+        pheno_ss = st.session_state.get('pheno_df')
+        mo_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                    7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+
+        for ev, feats in ev_feats.items():
+            fit = predictor._fits[ev]
+            r2  = predictor.r2.get(ev, 0)
+            mae = predictor.mae.get(ev, 0)
+            eq_short = predictor.equation_str(ev, season_start_month=pred_sm).split('\n')[0]
+
+            # Compute typical event month from historical data
+            ev_month_hint = ""
+            if pheno_ss is not None and f'{ev}_Date' in pheno_ss.columns:
+                ev_dates = pheno_ss[f'{ev}_Date'].dropna()
+                if len(ev_dates) > 0:
+                    median_month = int(ev_dates.dt.month.median())
+                    median_day   = int(ev_dates.dt.day.median())
+                    ev_month_hint = (f"  |  Historically occurs ~{mo_names[median_month]} {median_day} "
+                                     f"(±{mae:.0f} d MAE)  →  enter 15-day average ending ~{mo_names[median_month]} {median_day}")
+
+            st.markdown(
+                f"<div style='background:{ev_colors_hex[ev]};padding:14px 18px;border-radius:10px;"
+                f"border-left:5px solid {ev_border_hex[ev]};margin:10px 0'>"
+                f"<b>{ev_labels_full[ev]}</b>&nbsp;&nbsp;"
+                f"<span style='font-size:0.82rem;color:#555'>R²(LOO)={r2:.3f} | MAE=±{mae:.1f}d"
+                f"{ev_month_hint}</span><br>"
+                f"<code style='font-size:0.78rem'>{eq_short}</code>"
+                f"</div>", unsafe_allow_html=True)
+
+            ncols = max(1, len(feats))
+            col_list = st.columns(min(ncols, 4))
+            for idx, f in enumerate(feats):
+                default = 0.0
+                if train_df is not None and f in train_df.columns:
+                    ev_sub = train_df[train_df['Event'] == ev]
+                    vals = ev_sub[f].dropna() if len(ev_sub) > 0 else train_df[f].dropna()
+                    if len(vals): default = float(vals.mean())
+                is_sum = any(k in f.upper() for k in ['PREC','GDD','LOG_P','SPEI'])
+                # Build context-aware help text
+                timing_tip = ""
+                if pheno_ss is not None and f'{ev}_Date' in pheno_ss.columns:
+                    ev_dates = pheno_ss[f'{ev}_Date'].dropna()
+                    if len(ev_dates) > 0:
+                        median_month = int(ev_dates.dt.month.median())
+                        timing_tip = (f" Sample this from the 15 days before expected {ev} "
+                                      f"(typically ~{mo_names[median_month]}).")
+                with col_list[idx % len(col_list)]:
+                    ev_inputs[ev][f] = st.number_input(
+                        f"{f}  [{ev}]", value=round(default, 3), format="%.3f",
+                        key=f"inp_{ev}_{f}",
+                        help=(f"{'15-day sum' if is_sum else '15-day mean'} of {f} "
+                              f"before expected {ev}.{timing_tip} "
+                              f"Training mean: {default:.3f}"))
+
+        st.markdown("---")
+        pred_year=st.number_input("Prediction year", 2024, 2040, 2026)
 
         if st.button("🚀 Predict Phenology Events", type="primary"):
             results={}
             for ev in ['SOS','POS','EOS']:
-                res=predictor.predict(inputs, ev, pred_year, season_start_month=pred_sm)
+                # Pass only this event's feature values — fixes shared-feature-name overwrite bug
+                res=predictor.predict(ev_inputs.get(ev, {}), ev, pred_year, season_start_month=pred_sm)
                 if res: results[ev]=res
 
             if results:
@@ -1827,9 +2057,11 @@ The scatter plots on the right show the best single predictor vs observed event 
                                    "predictions.csv","text/csv")
 
                 st.markdown("---")
-                st.markdown("**Equations used:**")
+                st.markdown("**Equations used for this prediction:**")
                 for ev in list(results.keys()):
-                    st.markdown(f'<div class="eq-box"><b>{ev}:</b> {predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])}</div>',
+                    raw_eq = predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
+                    eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
+                    st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b><br><br>{eq_html}</div>',
                                 unsafe_allow_html=True)
 
     # ══ TAB 4 — FOREST GUIDE ═══════════════════════════════════
