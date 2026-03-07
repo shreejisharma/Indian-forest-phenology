@@ -225,20 +225,119 @@ def parse_nasa_power(uploaded_file):
         return None, [], str(e)
 
 
+def _parse_date_robust(series, doy_series=None):
+    """
+    Robust date parser. Handles:
+      YYYY-MM-DD  (ISO)
+      DD-MM-YYYY  (GEE S2 monthly export — e.g. 01-02-2018 = Feb 1, NOT Jan 2)
+      MM/DD/YYYY, DD/MM/YYYY, and other common formats.
+
+    Strategy:
+      1. If 'doy_series' is provided (GEE exports include a 'doy' column), validate
+         which parsing matches — 100% reliable disambiguation.
+      2. Without DOY: compare month-spread of dayfirst vs default — pick richer spread.
+      3. Fall through to best-of-formats by count.
+    """
+    if len(series) == 0:
+        return pd.to_datetime(series, errors='coerce')
+
+    parsed_default  = pd.to_datetime(series, errors='coerce')
+    parsed_dayfirst = pd.to_datetime(series, dayfirst=True, errors='coerce')
+
+    # Strategy 1: Use DOY reference column if available
+    if doy_series is not None:
+        doy_ref      = pd.to_numeric(doy_series, errors='coerce')
+        default_doy  = parsed_default.apply(
+            lambda d: d.timetuple().tm_yday if pd.notna(d) else np.nan)
+        dayfirst_doy = parsed_dayfirst.apply(
+            lambda d: d.timetuple().tm_yday if pd.notna(d) else np.nan)
+        if (dayfirst_doy == doy_ref).sum() > (default_doy == doy_ref).sum():
+            return parsed_dayfirst
+        return parsed_default
+
+    # Strategy 2: richer month distribution wins
+    n_m_default  = parsed_default.dropna().dt.month.nunique()
+    n_m_dayfirst = parsed_dayfirst.dropna().dt.month.nunique()
+    if n_m_dayfirst > n_m_default:
+        return parsed_dayfirst
+
+    # Strategy 3: explicit format — best parse-count
+    if parsed_default.notna().sum() / max(len(series), 1) > 0.85:
+        return parsed_default
+    best, best_n = parsed_default, parsed_default.notna().sum()
+    for fmt in ['%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%m-%d-%Y',
+                '%Y/%m/%d', '%d-%b-%Y', '%d %b %Y']:
+        try:
+            attempt = pd.to_datetime(series, format=fmt, errors='coerce')
+            if attempt.notna().sum() > best_n:
+                best, best_n = attempt, attempt.notna().sum()
+        except Exception:
+            continue
+    return best
+
+
 def parse_ndvi(uploaded_file):
+    """
+    Universal NDVI parser. Handles:
+      • Any CSV with a date column and an NDVI column
+      • Multi-site GEE exports — filters by site_key if multiple sites present
+      • DD-MM-YYYY date format (GEE S2 monthly exports)
+      • Low-frequency data (monthly, 16-day) — works even with sparse obs
+    """
     try:
-        df = pd.read_csv(uploaded_file)
+        raw_bytes = uploaded_file.read()
+        uploaded_file.seek(0)
+        df = pd.read_csv(StringIO(raw_bytes.decode('utf-8', errors='replace')))
         df.columns = [c.strip() for c in df.columns]
-        date_col = next((c for c in df.columns if c.lower() in ['date','dates','time','datetime']), None)
-        ndvi_col = next((c for c in df.columns if c.lower() in ['ndvi','ndvi_value','value','index','evi']), None)
-        if not date_col: return None, "No Date column (need: date/dates/time/datetime)"
-        if not ndvi_col: return None, "No NDVI column (need: ndvi/ndvi_value/value/evi)"
-        df = df.rename(columns={date_col:'Date', ndvi_col:'NDVI'})
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+        # ── Find date column ─────────────────────────────────
+        date_col = next((c for c in df.columns
+                         if c.lower() in ['date','dates','time','datetime']), None)
+        if not date_col:
+            return None, "No Date column found. Expected column named: date / dates / time / datetime"
+
+        # ── Find NDVI column ─────────────────────────────────
+        ndvi_col = next((c for c in df.columns
+                         if c.lower() in ['ndvi','ndvi_value','value','index','evi']), None)
+        if not ndvi_col:
+            return None, "No NDVI column found. Expected column named: ndvi / ndvi_value / value / evi"
+
+        # ── Multi-site filter: if site_key column exists and has >1 site, let user pick ──
+        site_info = None
+        if 'site_key' in df.columns and df['site_key'].nunique() > 1:
+            site_info = sorted(df['site_key'].dropna().unique().tolist())
+        elif 'site_label' in df.columns and df['site_label'].nunique() > 1:
+            site_info = sorted(df['site_label'].dropna().unique().tolist())
+
+        if site_info:
+            # Return special tuple so main() can show a selectbox
+            return ('MULTI_SITE', site_info, df, date_col, ndvi_col), None
+
+        # ── Parse dates robustly (use 'doy' column to disambiguate if present) ──
+        doy_col = df['doy'] if 'doy' in df.columns else None
+        df = df.rename(columns={date_col: 'Date', ndvi_col: 'NDVI'})
+        df['Date'] = _parse_date_robust(df['Date'].astype(str), doy_series=doy_col)
         df['NDVI'] = pd.to_numeric(df['NDVI'], errors='coerce')
-        return df.dropna(subset=['Date','NDVI'])[['Date','NDVI']].sort_values('Date').reset_index(drop=True), None
+        result = (df.dropna(subset=['Date', 'NDVI'])[['Date', 'NDVI']]
+                    .sort_values('Date').reset_index(drop=True))
+        if len(result) == 0:
+            return None, "No valid rows after date/NDVI parsing. Check your date format."
+        return result, None
+
     except Exception as e:
         return None, str(e)
+
+
+def _filter_ndvi_site(df, date_col, ndvi_col, site_key):
+    """Filter a multi-site dataframe to one site and return clean NDVI df."""
+    key_col = 'site_key' if 'site_key' in df.columns else 'site_label'
+    sub = df[df[key_col] == site_key].copy()
+    sub = sub.rename(columns={date_col: 'Date', ndvi_col: 'NDVI'})
+    doy_col = sub['doy'] if 'doy' in sub.columns else None
+    sub['Date'] = _parse_date_robust(sub['Date'].astype(str), doy_series=doy_col)
+    sub['NDVI'] = pd.to_numeric(sub['NDVI'], errors='coerce')
+    return (sub.dropna(subset=['Date', 'NDVI'])[['Date', 'NDVI']]
+               .sort_values('Date').reset_index(drop=True))
 
 
 # ─── DERIVED MET FEATURES ────────────────────────────────────
@@ -309,7 +408,7 @@ def make_training_features(pheno_df, met_df, params, window=15, monsoon_onset_do
             mask = ((met_df['Date'] >= evt_dt - timedelta(days=window)) &
                     (met_df['Date'] <= evt_dt))
             wdf = met_df[mask]
-            if len(wdf) < window * 0.4: continue
+            if len(wdf) < max(1, window * 0.15): continue  # relaxed for monthly NDVI
             for p in params:
                 if p not in met_df.columns: continue
                 if p.upper() in SNAPSHOT_FEATURES:
@@ -354,10 +453,15 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         ndvi_s = (ndvi_df[["Date","NDVI"]].copy().set_index("Date")
                   .resample("D").interpolate(method="time"))
         n=len(ndvi_s)
-        # Use window 11 for good smoothing; fall back to 9 or 7 for short series
-        wl = 11 if n >= 11 else (9 if n >= 9 else (7 if n >= 7 else n if n%2 else n-1))
-        if wl < 7: return None, "Too few NDVI points (need ≥ 7)"
-        ndvi_s["Sm"] = savgol_filter(ndvi_s["NDVI"].ffill().bfill(), wl, 3)
+        # Adaptive SG window: larger for dense data, minimal for sparse monthly data.
+        # Rule: ~5% of series length, minimum 7, must be odd, poly_order < window.
+        wl_target = max(7, int(n * 0.05))
+        wl = wl_target if wl_target % 2 == 1 else wl_target + 1
+        wl = min(wl, n - 1 if n > 1 else 1)
+        if wl % 2 == 0: wl = max(7, wl - 1)
+        poly = min(3, wl - 1)  # poly_order must be < window_length
+        if wl < 5: return None, f"Too few interpolated NDVI points ({n}) — check date range"
+        ndvi_s["Sm"] = savgol_filter(ndvi_s["NDVI"].ffill().bfill(), wl, poly)
         ndvi_s["Drv"] = np.gradient(ndvi_s["Sm"])
         resolved_sos = sos_method if sos_method != "auto" else cfg.get("sos_method","threshold")
         thr_pct = threshold_override if threshold_override is not None else cfg.get("threshold_pct",0.30)
@@ -372,7 +476,8 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if len(sub) < min_d: continue
                 if pos_constrain_end:
                     pw = ndvi_s.loc[f"{yr}-{sm:02d}-01":f"{yr}-{pos_constrain_end:02d}-31","Sm"]
-                    pos = pw.idxmax() if len(pw)>30 else sub["Sm"].idxmax()
+                    # Use constrained window if it has reasonable data (>= 2 obs worth of days)
+                    pos = pw.idxmax() if len(pw) >= 14 else sub["Sm"].idxmax()
                 else: pos = sub["Sm"].idxmax()
                 peak_ndvi=sub["Sm"].max(); base_ndvi=sub["Sm"].min()
                 threshold = base_ndvi+thr_pct*(peak_ndvi-base_ndvi)
@@ -1287,8 +1392,27 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 
     # ── PARSE ────────────────────────────────────────────────
     with st.spinner("📂 Parsing files…"):
-        ndvi_df, ndvi_err = parse_ndvi(ndvi_file)
-        if ndvi_df is None: st.error(f"❌ NDVI: {ndvi_err}"); return
+        ndvi_result, ndvi_err = parse_ndvi(ndvi_file)
+        if ndvi_result is None:
+            st.error(f"❌ NDVI: {ndvi_err}"); return
+
+        # ── Handle multi-site CSV ─────────────────────────────
+        if isinstance(ndvi_result, tuple) and ndvi_result[0] == 'MULTI_SITE':
+            _, site_list, raw_df, date_col, ndvi_col = ndvi_result
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("### 🗺️ Multi-Site CSV Detected")
+            st.sidebar.info(
+                f"Your CSV contains **{len(site_list)} sites**. Select one to analyse:")
+            chosen_site = st.sidebar.selectbox(
+                "Select site", site_list, key="site_select",
+                help="Your file has multiple sites — choose one to run analysis on.")
+            ndvi_df = _filter_ndvi_site(raw_df, date_col, ndvi_col, chosen_site)
+            if len(ndvi_df) == 0:
+                st.error(f"❌ No valid NDVI rows for site '{chosen_site}' after parsing."); return
+            st.sidebar.success(f"✅ Site: **{chosen_site}** — {len(ndvi_df)} obs loaded")
+        else:
+            ndvi_df = ndvi_result
+
         met_file.seek(0)
         met_df, raw_params, met_err = parse_nasa_power(met_file)
         if met_df is None: st.error(f"❌ Met: {met_err}"); return
