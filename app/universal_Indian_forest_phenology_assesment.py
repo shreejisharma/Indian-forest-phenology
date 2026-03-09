@@ -610,15 +610,64 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             return pd.DataFrame(rows), None
 
         # ── Step 4: Extract one phenology cycle per trough pair ──
-        # Add sentinel endpoints so the first and last cycles are also captured
-        # (prepend index 0 if not already a trough, append n-1)
-        all_troughs = list(trough_indices)
-        if all_troughs[0] > min_dist:
-            all_troughs = [0] + all_troughs
-        if all_troughs[-1] < n - min_dist:
-            all_troughs = all_troughs + [n - 1]
+        # For the FIRST cycle: if data starts before the first real trough,
+        # use the global minimum of that opening segment as the base anchor.
+        # For all subsequent cycles: base = value at the left trough.
+
+        all_troughs = list(trough_indices)   # real troughs only
 
         rows = []
+
+        # ── Handle the opening segment (data start → first trough) ──
+        # This captures the first growing cycle which may start before any trough is found
+        if all_troughs and all_troughs[0] > max(10, min_d // 5):
+            try:
+                ti0  = 0
+                ti1  = all_troughs[0]
+                seg  = sm_vals[ti0:ti1 + 1]
+                seg_t = t_all[ti0:ti1 + 1]
+                if len(seg) >= max(10, min_d // 5):
+                    # Base = minimum of the opening segment (best proxy for the pre-data trough)
+                    ndvi_min = float(np.min(seg))
+                    ndvi_max = float(np.max(seg))
+                    A = ndvi_max - ndvi_min
+                    if A >= 1e-6:
+                        sos_threshold = ndvi_min + thr_pct     * A
+                        eos_threshold = ndvi_min + eos_thr_pct * A
+                        sos_cands = np.where(seg >= sos_threshold)[0]
+                        eos_cands = np.where(seg >= eos_threshold)[0]
+                        if len(sos_cands) and len(eos_cands):
+                            si = int(sos_cands[0])
+                            ei = int(eos_cands[-1])
+                            if ei > si:
+                                pi = si + int(np.argmax(seg[si:ei + 1]))
+                                sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                                yr = pos.year
+                                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                rows.append({
+                                    "Year": yr,
+                                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                    "SOS_Target": (sos - season_start).days,
+                                    "SOS_Method": "valley_amplitude_threshold",
+                                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                    "POS_Target": (pos - season_start).days,
+                                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                    "EOS_Target": (eos - season_start).days,
+                                    "EOS_Method": "valley_amplitude_threshold",
+                                    "LOS_Days": (eos - sos).days,
+                                    "Season_Start": season_start,
+                                    "Peak_NDVI": float(seg[pi]),
+                                    "Amplitude": float(A),
+                                    "Base_NDVI": float(ndvi_min),
+                                    "Threshold_SOS": float(sos_threshold),
+                                    "Threshold_EOS": float(eos_threshold),
+                                    "Trough_Date": seg_t[int(np.argmin(seg))],
+                                    "Season": season_type,
+                                })
+            except Exception:
+                pass
+
+        # ── Main loop: trough-to-trough cycles ──
         for i in range(len(all_troughs) - 1):
             try:
                 ti  = all_troughs[i]       # index of left  trough (season start valley)
@@ -699,7 +748,50 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             except Exception:
                 continue
 
-        if not rows:
+        # ── Handle the closing segment (last trough → data end) ──
+        if all_troughs and all_troughs[-1] < n - max(10, min_d // 5):
+            try:
+                ti0  = all_troughs[-1]
+                seg  = sm_vals[ti0:]
+                seg_t = t_all[ti0:]
+                if len(seg) >= max(10, min_d // 5):
+                    ndvi_min = float(sm_vals[ti0])   # base = last real trough
+                    ndvi_max = float(np.max(seg))
+                    A = ndvi_max - ndvi_min
+                    if A >= 1e-6:
+                        sos_threshold = ndvi_min + thr_pct     * A
+                        eos_threshold = ndvi_min + eos_thr_pct * A
+                        sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
+                        eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
+                        if len(sos_cands) and len(eos_cands):
+                            si = int(sos_cands[0]); ei = int(eos_cands[-1])
+                            if ei > si:
+                                pi = si + int(np.argmax(seg[si:ei + 1]))
+                                sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                                yr = pos.year
+                                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                rows.append({
+                                    "Year": yr,
+                                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                    "SOS_Target": (sos - season_start).days,
+                                    "SOS_Method": "valley_amplitude_threshold",
+                                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                    "POS_Target": (pos - season_start).days,
+                                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                    "EOS_Target": (eos - season_start).days,
+                                    "EOS_Method": "valley_amplitude_threshold",
+                                    "LOS_Days": (eos - sos).days,
+                                    "Season_Start": season_start,
+                                    "Peak_NDVI": float(seg[pi]),
+                                    "Amplitude": float(A),
+                                    "Base_NDVI": float(ndvi_min),
+                                    "Threshold_SOS": float(sos_threshold),
+                                    "Threshold_EOS": float(eos_threshold),
+                                    "Trough_Date": t_all[ti0],
+                                    "Season": season_type,
+                                })
+            except Exception:
+                pass
             return None, "No complete seasons found — check season window / threshold"
 
         df_out = pd.DataFrame(rows).drop_duplicates(subset="Year", keep="first")
@@ -1054,55 +1146,37 @@ class UniversalPredictor:
 
 # ─── PLOTS ───────────────────────────────────────────────────
 def plot_ndvi_phenology(ndvi_raw, pheno_df):
-    fig, ax = plt.subplots(figsize=(14, 5.2))
+    fig, ax = plt.subplots(figsize=(14, 4.8))
     dates = pd.to_datetime(ndvi_raw['Date'])
     ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
                label='NDVI (raw obs)', zorder=3)
 
-    # Smoothed line (same 5-day grid used in extraction)
-    ndvi_s = (ndvi_raw.set_index('Date')['NDVI']
-              .resample('5D').interpolate(method='time'))
-    n = len(ndvi_s)
+    # ── Smoothed line: EXACTLY the same pipeline as extract_phenology ──
+    # Step 1: same 5-day grid via reindex+interpolate (not resample)
+    ndvi_raw_s = ndvi_raw.copy()
+    ndvi_raw_s['Date'] = pd.to_datetime(ndvi_raw_s['Date'])
+    ndvi_idx = ndvi_raw_s.set_index('Date')['NDVI'].sort_index()
+    ndvi_idx = ndvi_idx[~ndvi_idx.index.duplicated(keep='first')]
+    full_range = pd.date_range(start=ndvi_idx.index.min(),
+                               end=ndvi_idx.index.max(), freq='5D')
+    ndvi_5d = ndvi_idx.reindex(ndvi_idx.index.union(full_range))
+    ndvi_5d = ndvi_5d.interpolate(method='time')
+    ndvi_5d = ndvi_5d.reindex(full_range)
+
+    # Step 2: same adaptive SG window
+    n = len(ndvi_5d)
     wl_target = max(7, int(n * 0.05))
     wl = wl_target if wl_target % 2 == 1 else wl_target + 1
     wl = min(wl, n - 1 if n > 1 else 1)
     if wl % 2 == 0: wl = max(7, wl - 1)
     poly = min(2, wl - 1)
     if wl >= 5:
-        sm_arr = savgol_filter(ndvi_s.ffill().bfill().values, wl, poly)
-        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.2,
+        sm_arr = savgol_filter(ndvi_5d.ffill().bfill().values, wl, poly)
+        ax.plot(ndvi_5d.index, sm_arr, color='#1B5E20', lw=2.2,
                 label=f'Smoothed (SG w={wl})', zorder=5)
 
-    # ── Draw per-cycle threshold band (Base NDVI → threshold) ──
-    # Shown as a horizontal span per season so the valley-anchoring is visible
-    trough_plotted = False
-    for _, row in pheno_df.iterrows():
-        base  = row.get('Base_NDVI',  np.nan)
-        t_sos = row.get('Threshold_SOS', np.nan)
-        t_eos = row.get('Threshold_EOS', np.nan)
-        trough_d = row.get('Trough_Date', pd.NaT)
-        sos_d = row.get('SOS_Date', pd.NaT)
-        eos_d = row.get('EOS_Date', pd.NaT)
-
-        if pd.notna(sos_d) and pd.notna(eos_d):
-            # Shaded band: from base to SOS threshold
-            if not np.isnan(base) and not np.isnan(t_sos):
-                ax.axhspan(base, t_sos,
-                           xmin=max(0, (pd.Timestamp(sos_d) - ndvi_s.index[0]).days /
-                                    max(1, (ndvi_s.index[-1] - ndvi_s.index[0]).days)),
-                           xmax=min(1, (pd.Timestamp(eos_d) - ndvi_s.index[0]).days /
-                                    max(1, (ndvi_s.index[-1] - ndvi_s.index[0]).days)),
-                           alpha=0.07, color='#F9A825',
-                           label='Base→Threshold band' if not trough_plotted else '')
-                trough_plotted = True
-
-        # Trough marker (valley anchor)
-        if pd.notna(trough_d) and not np.isnan(base):
-            ax.plot(trough_d, base, 'v', color='#6A1B9A', ms=7, zorder=6,
-                    label='Valley anchor (base NDVI)' if _ == pheno_df.index[0] else '')
-
-    # SOS / POS / EOS vertical lines
-    ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    # ── SOS / POS / EOS vertical lines only (no purple dots, no bands) ──
+    ev_colors  = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
     ev_labels_map = {
         'SOS': 'SOS — Green-up start',
         'POS': 'POS — Peak greenness',
@@ -1120,18 +1194,16 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
     handles = [
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
         Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl if wl>=5 else "n/a"})'),
-        Line2D([0],[0], color='#6A1B9A', marker='v', ms=7, lw=0, label='Valley anchor (base NDVI)'),
         Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
     ]
-    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events\n'
-                 '(Valley-anchored amplitude threshold — base = previous cycle trough)',
-                 fontsize=11, fontweight='bold', color='#1B5E20')
+    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events',
+                 fontsize=12, fontweight='bold', color='#1B5E20')
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-    ax.legend(handles=handles, ncol=3, fontsize=8.0, loc='upper left', framealpha=0.88)
+    ax.legend(handles=handles, ncol=5, fontsize=8.5, loc='upper left', framealpha=0.88)
     ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
