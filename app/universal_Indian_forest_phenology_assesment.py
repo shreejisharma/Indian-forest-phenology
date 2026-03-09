@@ -1338,41 +1338,199 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🌱 Forest Type Selection")
 
-    # ── QUICK LOCATION DECISION GUIDE ─────────────────────────
-    with st.sidebar.expander("❓ Not sure which forest type? Click here", expanded=False):
-        st.markdown("""
-**🗺️ Find your location below and pick the matching type:**
+    # ══════════════════════════════════════════════════════════
+    # COORDINATE-BASED AUTO-DETECTOR
+    # ══════════════════════════════════════════════════════════
+    # Known reference sites with correct forest type mapping
+    # Source: Champion & Seth (1968), FSI India State of Forest Report 2023,
+    #         Rodgers & Panwar (1988), Pascal (1988), Meher-Homji (1991)
+    KNOWN_SITES = [
+        # ── Tropical Dry Deciduous ────────────────────────────
+        {"name":"Tirupati (Seshachalam)",   "lat":13.63,"lon":79.40,"elev":200,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Mudumalai (TN)",           "lat":11.57,"lon":76.57,"elev":1000, "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Bandipur (Karnataka)",      "lat":11.67,"lon":76.63,"elev":800,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Pench (MP)",               "lat":21.75,"lon":79.28,"elev":450,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Kanha (MP)",               "lat":22.33,"lon":80.61,"elev":520,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Tadoba (Maharashtra)",     "lat":20.22,"lon":79.33,"elev":200,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Nagarahole (Karnataka)",   "lat":12.03,"lon":76.11,"elev":750,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Ranthambore (Rajasthan)",  "lat":26.01,"lon":76.50,"elev":350,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Sariska (Rajasthan)",      "lat":27.33,"lon":76.44,"elev":400,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        {"name":"Warangal (Telangana)",     "lat":18.00,"lon":79.58,"elev":270,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
+        # ── Tropical Moist Deciduous ──────────────────────────
+        {"name":"Kaziranga (Assam)",        "lat":26.58,"lon":93.17,"elev":80,   "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Simlipal (Odisha)",        "lat":21.83,"lon":86.50,"elev":900,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Bastar (Chhattisgarh)",    "lat":19.10,"lon":81.95,"elev":560,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Cuttack (Odisha)",         "lat":20.46,"lon":85.88,"elev":30,   "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Hazaribagh (Jharkhand)",   "lat":23.99,"lon":85.37,"elev":600,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Dehing Patkai (Assam)",    "lat":27.30,"lon":95.60,"elev":120,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        {"name":"Achanakmar (CG)",          "lat":22.27,"lon":81.55,"elev":420,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
+        # ── Tropical Wet Evergreen ────────────────────────────
+        {"name":"Agumbe (Karnataka)",       "lat":13.51,"lon":75.10,"elev":640,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Silent Valley (Kerala)",   "lat":11.08,"lon":76.47,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Periyar (Kerala)",         "lat":9.58, "lon":77.22,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Kudremukh (Karnataka)",    "lat":13.22,"lon":75.24,"elev":1800, "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Coorg (Karnataka)",        "lat":12.33,"lon":75.83,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Wayanad (Kerala)",         "lat":11.60,"lon":76.08,"elev":750,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Andaman (Port Blair)",     "lat":11.67,"lon":92.73,"elev":10,   "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        {"name":"Bhagwan Mahaveer (Goa)",   "lat":15.40,"lon":74.33,"elev":200,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
+        # ── Tropical Dry Evergreen ────────────────────────────
+        {"name":"Pichavaram (Tamil Nadu)",  "lat":11.43,"lon":79.78,"elev":5,    "type":"Tropical Dry Evergreen (Jan-Dec)"},
+        {"name":"Point Calimere (TN)",      "lat":10.30,"lon":79.85,"elev":5,    "type":"Tropical Dry Evergreen (Jan-Dec)"},
+        {"name":"Vedanthangal (TN)",        "lat":12.52,"lon":79.87,"elev":30,   "type":"Tropical Dry Evergreen (Jan-Dec)"},
+        # ── Tropical Thorn / Scrub ────────────────────────────
+        {"name":"Jaisalmer (Rajasthan)",    "lat":26.91,"lon":70.91,"elev":220,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
+        {"name":"Rann of Kutch (Gujarat)",  "lat":23.75,"lon":70.22,"elev":30,   "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
+        {"name":"Hisar (Haryana)",          "lat":29.15,"lon":75.72,"elev":215,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
+        {"name":"Jodhpur (Rajasthan)",      "lat":26.29,"lon":73.02,"elev":231,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
+        {"name":"Naliya (Gujarat)",         "lat":23.27,"lon":68.83,"elev":35,   "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
+        # ── Subtropical Hill Forest ───────────────────────────
+        {"name":"Rajaji NP (Uttarakhand)", "lat":30.00,"lon":78.17,"elev":900,   "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
+        {"name":"Manas (Assam foothills)", "lat":26.67,"lon":90.73,"elev":150,   "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
+        {"name":"Darjeeling (W Bengal)",   "lat":27.04,"lon":88.27,"elev":1200,  "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
+        {"name":"Shillong (Meghalaya)",    "lat":25.58,"lon":91.88,"elev":1400,  "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
+        {"name":"Jim Corbett (Ramnagar)", "lat":29.53,"lon":79.07,"elev":500,    "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
+        # ── Montane Temperate ─────────────────────────────────
+        {"name":"Kedarnath WLS",           "lat":30.73,"lon":79.07,"elev":2500,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        {"name":"Great Himalayan NP",      "lat":31.75,"lon":77.60,"elev":2500,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        {"name":"Deodar forest Manali",    "lat":32.23,"lon":77.19,"elev":2050,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        {"name":"Chopta (Uttarakhand)",    "lat":30.46,"lon":79.25,"elev":2680,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        {"name":"Munsiyari (Uttarakhand)", "lat":30.07,"lon":80.24,"elev":2200,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        {"name":"Tirthan Valley (HP)",     "lat":31.67,"lon":77.45,"elev":1700,  "type":"Montane Temperate Forest (Apr-Nov)"},
+        # ── Alpine / Subalpine ────────────────────────────────
+        {"name":"Valley of Flowers (UK)",  "lat":30.73,"lon":79.60,"elev":3600,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        {"name":"Spiti (Pin Valley)",      "lat":31.96,"lon":78.16,"elev":3800,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        {"name":"Ladakh (Nubra Valley)",   "lat":34.63,"lon":77.43,"elev":3100,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        {"name":"Zanskar (J&K)",           "lat":33.47,"lon":76.80,"elev":3700,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        {"name":"Rohtang Pass (HP)",       "lat":32.37,"lon":77.24,"elev":3980,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        {"name":"Hemkund Sahib (UK)",      "lat":30.70,"lon":79.65,"elev":4320,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
+        # ── Shola ─────────────────────────────────────────────
+        {"name":"Eravikulam (Munnar)",     "lat":10.17,"lon":77.05,"elev":2100,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
+        {"name":"Mukurthi NP (Nilgiris)",  "lat":11.23,"lon":76.52,"elev":2600,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
+        {"name":"Kodaikanal (Tamil Nadu)", "lat":10.24,"lon":77.49,"elev":2133,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
+        {"name":"Valparai (Tamil Nadu)",   "lat":10.33,"lon":76.96,"elev":1800,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
+        {"name":"Devikulam (Kerala)",      "lat":10.02,"lon":77.11,"elev":1800,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
+        # ── Mangrove ──────────────────────────────────────────
+        {"name":"Sundarbans (W Bengal)",   "lat":21.95,"lon":88.88,"elev":5,     "type":"Mangrove Forest (Jan-Dec)"},
+        {"name":"Bhitarkanika (Odisha)",   "lat":20.73,"lon":86.88,"elev":5,     "type":"Mangrove Forest (Jan-Dec)"},
+        {"name":"Pichavaram Mangrove",     "lat":11.43,"lon":79.78,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
+        {"name":"Coringa (Andhra Pradesh)","lat":16.72,"lon":82.25,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
+        {"name":"Gulf of Kutch (Gujarat)", "lat":22.60,"lon":69.80,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
+        # ── NE India Evergreen ────────────────────────────────
+        {"name":"Cherrapunji (Meghalaya)", "lat":25.27,"lon":91.73,"elev":1300,  "type":"NE India Moist Evergreen (Jan-Dec)"},
+        {"name":"Namdapha (Arunachal)",    "lat":27.40,"lon":96.38,"elev":500,   "type":"NE India Moist Evergreen (Jan-Dec)"},
+        {"name":"Dibru-Saikhowa (Assam)",  "lat":27.67,"lon":95.22,"elev":110,   "type":"NE India Moist Evergreen (Jan-Dec)"},
+        {"name":"Dampa TR (Mizoram)",      "lat":23.47,"lon":92.67,"elev":900,   "type":"NE India Moist Evergreen (Jan-Dec)"},
+        {"name":"Nokrek (Meghalaya)",      "lat":25.50,"lon":90.47,"elev":1400,  "type":"NE India Moist Evergreen (Jan-Dec)"},
+    ]
 
-| Your location / site | Select this type |
-|---|---|
-| Tirupati, Deccan, Eastern Ghats | 🍂 Tropical Dry Deciduous |
-| Sal forests — MP, CG, Odisha, Jharkhand | 🌿 Tropical Moist Deciduous |
-| Western Ghats — Kerala, Karnataka coast | 🌲 Tropical Wet Evergreen |
-| Tamil Nadu Coromandel coast | 🌴 Tropical Dry Evergreen |
-| Rajasthan, Gujarat, semi-arid Deccan | 🌵 Tropical Thorn / Scrub |
-| Himalayan foothills 500–1500m | 🌳 Subtropical Hill Forest |
-| W Himalayas 1500–3000m (Deodar, Oak) | 🏔️ Montane Temperate |
-| Himalayas >3000m, Ladakh, Spiti | ⛰️ Alpine / Subalpine |
-| Nilgiris, Munnar, Kodaikanal >1500m | 🌫️ Shola Montane |
-| Sundarbans, Bhitarkanika, Pichavaram | 🌊 Mangrove |
-| Assam, Meghalaya, NE states | 🌿 NE India Moist Evergreen |
+    def _suggest_forest_type(lat, lon, elev_m):
+        """Rule-based forest type suggestion from lat/lon/elevation.
+        Rules derived from Champion & Seth (1968) and FSI SFR 2023."""
+        # Tidal/coastal mangrove zones
+        if (20.5 < lat < 23.0 and 87.5 < lon < 89.5): return "Mangrove Forest (Jan-Dec)"
+        if (19.5 < lat < 22.0 and 85.5 < lon < 87.5): return "Mangrove Forest (Jan-Dec)"
+        if (10.5 < lat < 12.0 and 79.3 < lon < 80.2): return "Tropical Dry Evergreen (Jan-Dec)"
+        # NE India high-rain evergreen
+        if lat > 24.0 and lon > 89.5: return "NE India Moist Evergreen (Jan-Dec)"
+        # Alpine / High Himalaya >3000m
+        if elev_m and elev_m > 3000: return "Alpine / Subalpine Forest and Meadow (May-Oct)"
+        # Montane temperate 1500-3000m in Himalayas
+        if elev_m and 1500 < elev_m <= 3000 and lat > 29.0: return "Montane Temperate Forest (Apr-Nov)"
+        # Shola: Western Ghats / Nilgiris >1500m
+        if elev_m and elev_m > 1500 and lat < 13.0 and lon < 78.0: return "Shola Forest — Southern Montane (Jan-Dec)"
+        # Subtropical hill forest: Himalayan foothills 500-1500m
+        if elev_m and 500 < elev_m <= 1500 and lat > 26.0: return "Subtropical Broadleaved Hill Forest (Apr-Mar)"
+        # Thorn/scrub: Rajasthan, Kutch, semi-arid NW India
+        if lat > 23.0 and lon < 76.0: return "Tropical Thorn Forest / Scrub (Jun-May)"
+        # Wet evergreen: W Ghats, Andamans <1500m
+        if lon < 77.5 and lat < 16.0 and lat > 8.0: return "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"
+        if lon > 91.5 and lat < 14.0: return "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"
+        # Moist deciduous: >1000mm rainfall belt
+        if 18.0 < lat < 26.0 and 77.0 < lon < 87.0: return "Tropical Moist Deciduous — Monsoon (Jun-May)"
+        # Dry deciduous: Deccan, Central India
+        if 12.0 < lat < 22.0 and 74.0 < lon < 82.0: return "Tropical Dry Deciduous — Monsoon (Jun-May)"
+        return None  # cannot determine
+
+    with st.sidebar.expander("🎯 Auto-suggest forest type from coordinates", expanded=False):
+        st.caption("Enter your site coordinates to get an instant suggestion")
+        col_lat, col_lon = st.columns(2)
+        with col_lat:
+            user_lat = st.number_input("Latitude (°N)", min_value=5.0, max_value=38.0,
+                                        value=13.51, step=0.01, format="%.2f", key="user_lat")
+        with col_lon:
+            user_lon = st.number_input("Longitude (°E)", min_value=68.0, max_value=98.0,
+                                        value=75.10, step=0.01, format="%.2f", key="user_lon")
+        user_elev = st.number_input("Elevation (m) — enter 0 if unknown",
+                                     min_value=0, max_value=6000, value=0, step=50, key="user_elev")
+        elev_for_rule = user_elev if user_elev > 0 else None
+
+        if st.button("🔍 Find nearest sites & suggest forest type", key="coord_btn"):
+            # Find 3 nearest known sites by Euclidean distance in lat/lon
+            dists = []
+            for s in KNOWN_SITES:
+                d = ((s["lat"] - user_lat)**2 + (s["lon"] - user_lon)**2)**0.5
+                dists.append((d, s))
+            dists.sort(key=lambda x: x[0])
+            nearest = dists[:4]
+
+            st.markdown("**📍 Nearest reference sites:**")
+            for d, s in nearest:
+                km = d * 111
+                st.markdown(f"- **{s['name']}** — {km:.0f} km away  \n"
+                            f"  Elev: {s['elev']}m · `{s['type'].split('—')[0].strip()}`")
+
+            suggested = _suggest_forest_type(user_lat, user_lon, elev_for_rule)
+            if suggested:
+                st.success(f"✅ **Suggested forest type:**\n\n**{suggested}**")
+                st.caption("Select this in the dropdown below. Verify against the Forest Guide tab.")
+            else:
+                st.info("Could not auto-suggest — check the Forest Guide tab or use the nearest site above.")
+
+    # ── QUICK DECISION GUIDE ──────────────────────────────────
+    with st.sidebar.expander("❓ Step-by-step: How to choose forest type", expanded=False):
+        st.markdown("""
+**Answer these 4 questions in order:**
+
+**1️⃣ What is your elevation?**
+- Above 3000 m → ⛰️ **Alpine / Subalpine**
+- 1500–3000 m + Himalayas → 🏔️ **Montane Temperate**
+- Above 1500 m + Nilgiris/W Ghats → 🌫️ **Shola**
+- 500–1500 m + Himalayan foothills → 🌳 **Subtropical Hill**
+- Below 500 m → go to Q2
+
+**2️⃣ Is your site coastal/tidal?**
+- Yes, tidal mudflat → 🌊 **Mangrove**
+- Yes, Tamil Nadu east coast → 🌴 **Tropical Dry Evergreen**
+- Yes, NE India (Assam, Meghalaya) → 🌿 **NE India Moist Evergreen**
+- No → go to Q3
+
+**3️⃣ What is your annual rainfall?**
+- Below 700 mm → 🌵 **Tropical Thorn / Scrub**
+- 700–1200 mm → 🍂 **Tropical Dry Deciduous**
+- 1200–2000 mm → 🌿 **Tropical Moist Deciduous**
+- Above 2000 mm + W Ghats / Andamans → 🌲 **Tropical Wet Evergreen**
+- Above 2000 mm + NE India → 🌿 **NE India Moist Evergreen**
+
+**4️⃣ Does your forest shed ALL leaves in April–May?**
+- Yes → Deciduous type confirmed (Q3 above)
+- No → Evergreen type confirmed (Q3 above)
 
 ---
-**💡 Three quick questions to decide:**
+**🗺️ Quick city/site reference:**
 
-**Q1 — Does your forest shed all leaves in summer (Mar–May)?**
-→ Yes → *Deciduous* (Dry or Moist)
-→ No → *Evergreen or Montane*
-
-**Q2 — If deciduous: what is the annual rainfall?**
-→ < 1000 mm → **Tropical Dry Deciduous**
-→ 1000–2000 mm → **Tropical Moist Deciduous**
-
-**Q3 — If evergreen: what is the elevation?**
-→ < 500m, coastal → **Wet Evergreen / Mangrove / NE India**
-→ 500–1500m → **Subtropical Hill Forest**
-→ 1500–3000m → **Montane Temperate or Shola**
-→ > 3000m → **Alpine / Subalpine**
+| Site | Forest Type |
+|---|---|
+| Tirupati, Kanha, Pench, Bandipur | 🍂 Tropical Dry Deciduous |
+| Simlipal, Kaziranga, Bastar | 🌿 Tropical Moist Deciduous |
+| Agumbe, Silent Valley, Coorg | 🌲 Tropical Wet Evergreen |
+| Pichavaram, Point Calimere | 🌴 Tropical Dry Evergreen |
+| Jaisalmer, Rann of Kutch, Hisar | 🌵 Thorn / Scrub |
+| Rajaji, Corbett, Manas (foothills) | 🌳 Subtropical Hill |
+| Kedarnath, Manali, Chopta | 🏔️ Montane Temperate |
+| Valley of Flowers, Spiti, Ladakh | ⛰️ Alpine / Subalpine |
+| Eravikulam, Kodaikanal, Mukurthi | 🌫️ Shola Montane |
+| Sundarbans, Bhitarkanika | 🌊 Mangrove |
+| Cherrapunji, Namdapha | 🌿 NE India Evergreen |
         """)
 
     # ── FOREST TYPE DROPDOWN WITH RICHER HELP TEXT ────────────
@@ -2119,191 +2277,499 @@ Defaults are pre-filled from training data means — change them to forecast fut
 
     # ══ TAB 4 — FOREST GUIDE ═══════════════════════════════════
     with tab4:
-        st.markdown("### 🌳 Indian Forest Types — Phenology Reference Guide")
+        st.markdown("### 🌳 Indian Forest Types — Complete Phenology Field Guide")
+        st.caption("Based on: Champion & Seth (1968) · FSI State of Forest Report 2023 · "
+                   "Pascal (1988) · Rodgers & Panwar (1988) · Jha et al. (2013)")
 
-        # ── HOW TO CHOOSE ─────────────────────────────────────
+        # ── TOP BANNER ────────────────────────────────────────
         st.markdown("""
-<div style='background:#F1F8E9;padding:18px 22px;border-radius:12px;border-left:5px solid #33691E;margin-bottom:18px'>
-<b>🧭 How to choose the right forest type for your site</b><br><br>
-
-Use the three-question decision tree below, then expand the matching type further down this page
-to see its specific SOS/POS/EOS behaviour, species list, and literature references.
+<div style='background:linear-gradient(135deg,#E8F5E9,#C8E6C9);padding:18px 22px;
+border-radius:14px;border-left:6px solid #2E7D32;margin-bottom:18px'>
+<b>🧭 How to identify the correct forest type for your site — 3 steps:</b><br>
+<b>Step 1</b> — Use the coordinate tool in the sidebar (enter lat/lon → click suggest)<br>
+<b>Step 2</b> — Check the type-specific cards below (NDVI signature, elevation, rainfall, species)<br>
+<b>Step 3</b> — Confirm against the phenology calendar — does your NDVI time series match the pattern?
 </div>
         """, unsafe_allow_html=True)
 
-        col_q1, col_q2, col_q3 = st.columns(3)
-        with col_q1:
-            st.markdown("""
-**❓ Q1 — Rainfall & deciduousness**
+        # ── MASTER SELECTION TABLE ────────────────────────────
+        st.markdown("#### 📋 Master Forest Type Selection Table")
+        st.markdown("*Use this table as a first filter — match your site's rainfall, elevation, and region.*")
 
-| Annual rainfall | Leaf behaviour | → Type |
-|---|---|---|
-| < 700 mm | Sparse canopy, thorny | 🌵 Thorn / Scrub |
-| 700–1200 mm | Fully deciduous | 🍂 Tropical Dry Deciduous |
-| 1000–2000 mm | Mostly deciduous | 🌿 Tropical Moist Deciduous |
-| > 2000 mm | Mostly evergreen | 🌲 Wet Evergreen / NE India |
-| ~1000mm (Oct–Dec rain) | Evergreen, coast | 🌴 Tropical Dry Evergreen |
-            """)
-        with col_q2:
-            st.markdown("""
-**❓ Q2 — Elevation**
-
-| Elevation | → Type |
-|---|---|
-| 0–500m, plains | Tropical types above |
-| 0–500m, coastal tidal | 🌊 Mangrove |
-| 500–1500m, Himalayan foothills | 🌳 Subtropical Hill Forest |
-| 1500–3000m, W Himalayas | 🏔️ Montane Temperate |
-| > 3000m, Ladakh/Spiti | ⛰️ Alpine / Subalpine |
-| > 1500m, Nilgiris/Western Ghats | 🌫️ Shola Montane |
-            """)
-        with col_q3:
-            st.markdown("""
-**❓ Q3 — Primary monsoon**
-
-| Primary water source | → Type hint |
-|---|---|
-| SW Monsoon (Jun–Sep) | Most tropical types |
-| NE Monsoon (Oct–Dec) | 🌴 Tropical Dry Evergreen |
-| Both SW + NE | 🌫️ Shola, 🌿 NE India |
-| Snowmelt | 🏔️ Montane, ⛰️ Alpine |
-| Tidal water | 🌊 Mangrove |
-
-**🔑 Key met predictors by type:**
-- Monsoon deciduous → PRECTOTCORR, GWETTOP
-- Evergreen → RH2M, ALLSKY_SFC_SW_DWN
-- Montane/Alpine → T2M_MIN, GDD_10
-- Shola/Mangrove → RH2M, GWETROOT
-            """)
+        master_table = pd.DataFrame([
+            {"Forest Type": "🍂 Tropical Dry Deciduous",
+             "Rainfall (mm)": "700–1400", "Elevation (m)": "0–700", "Leaf Behaviour": "Fully deciduous Mar–May",
+             "NDVI Range": "0.25–0.72", "NDVI Peak": "Sep–Nov", "Season": "Jun–May",
+             "Key States": "AP, Telangana, MP, Maharashtra, Karnataka, Rajasthan",
+             "Key Sites": "Tirupati, Kanha, Pench, Bandipur, Mudumalai, Ranthambore"},
+            {"Forest Type": "🌿 Tropical Moist Deciduous",
+             "Rainfall (mm)": "1000–2000", "Elevation (m)": "0–900", "Leaf Behaviour": "Mostly deciduous; brief dry period",
+             "NDVI Range": "0.35–0.72", "NDVI Peak": "Aug–Oct", "Season": "Jun–May",
+             "Key States": "Odisha, Jharkhand, MP, Chhattisgarh, Assam, West Bengal",
+             "Key Sites": "Simlipal, Kaziranga, Bastar, Cuttack, Hazaribagh"},
+            {"Forest Type": "🌲 Tropical Wet Evergreen",
+             "Rainfall (mm)": ">2000", "Elevation (m)": "0–1500", "Leaf Behaviour": "Evergreen; weak seasonality",
+             "NDVI Range": "0.55–0.82", "NDVI Peak": "Oct–Dec", "Season": "Jan–Dec",
+             "Key States": "Kerala, Karnataka, Goa, Andamans",
+             "Key Sites": "Agumbe, Silent Valley, Periyar, Coorg, Wayanad, Andaman"},
+            {"Forest Type": "🌴 Tropical Dry Evergreen",
+             "Rainfall (mm)": "800–1200 (NE monsoon)", "Elevation (m)": "0–200", "Leaf Behaviour": "Evergreen; SOS Oct–Nov",
+             "NDVI Range": "0.35–0.62", "NDVI Peak": "Dec–Jan", "Season": "Jan–Dec",
+             "Key States": "Tamil Nadu (east coast only)",
+             "Key Sites": "Pichavaram, Point Calimere, Vedanthangal"},
+            {"Forest Type": "🌵 Tropical Thorn / Scrub",
+             "Rainfall (mm)": "<700", "Elevation (m)": "0–500", "Leaf Behaviour": "Sparse; brief monsoon flush",
+             "NDVI Range": "0.08–0.45", "NDVI Peak": "Aug–Sep", "Season": "Jun–May",
+             "Key States": "Rajasthan, Gujarat, Haryana, semi-arid AP",
+             "Key Sites": "Jaisalmer, Rann of Kutch, Jodhpur, Hisar, Naliya"},
+            {"Forest Type": "🌳 Subtropical Hill Forest",
+             "Rainfall (mm)": "1500–2500", "Elevation (m)": "500–1500", "Leaf Behaviour": "Mixed; semi-evergreen",
+             "NDVI Range": "0.45–0.72", "NDVI Peak": "Jul–Sep", "Season": "Apr–Mar",
+             "Key States": "Uttarakhand (foothills), HP (foothills), NE Hill States",
+             "Key Sites": "Rajaji NP, Corbett, Manas, Darjeeling, Shillong"},
+            {"Forest Type": "🏔️ Montane Temperate",
+             "Rainfall (mm)": "1000–2500", "Elevation (m)": "1500–3000", "Leaf Behaviour": "Deciduous/conifer; snow season",
+             "NDVI Range": "0.40–0.70", "NDVI Peak": "Jul–Aug", "Season": "Apr–Nov",
+             "Key States": "Uttarakhand, Himachal Pradesh, J&K, Sikkim",
+             "Key Sites": "Kedarnath, Great Himalayan NP, Manali, Chopta"},
+            {"Forest Type": "⛰️ Alpine / Subalpine",
+             "Rainfall (mm)": "300–800 (mostly snow)", "Elevation (m)": ">3000", "Leaf Behaviour": "Herbaceous; <5 months season",
+             "NDVI Range": "0.15–0.75", "NDVI Peak": "Jul–Aug", "Season": "May–Oct",
+             "Key States": "Uttarakhand (>3000m), Ladakh, Spiti, Arunachal alpine",
+             "Key Sites": "Valley of Flowers, Spiti, Ladakh Nubra, Rohtang, Hemkund"},
+            {"Forest Type": "🌫️ Shola Montane",
+             "Rainfall (mm)": "2000–5000", "Elevation (m)": ">1500 (S India)", "Leaf Behaviour": "Evergreen; cloud forest",
+             "NDVI Range": "0.45–0.72", "NDVI Peak": "Sep–Dec", "Season": "Jan–Dec",
+             "Key States": "Tamil Nadu (Nilgiris), Kerala (Munnar), Karnataka",
+             "Key Sites": "Eravikulam, Mukurthi, Kodaikanal, Valparai"},
+            {"Forest Type": "🌊 Mangrove",
+             "Rainfall (mm)": ">1500", "Elevation (m)": "0–10 (tidal)", "Leaf Behaviour": "Evergreen; tidal ecosystem",
+             "NDVI Range": "0.40–0.68", "NDVI Peak": "Aug–Oct", "Season": "Jan–Dec",
+             "Key States": "West Bengal, Odisha, Tamil Nadu, Gujarat, Andaman",
+             "Key Sites": "Sundarbans, Bhitarkanika, Coringa, Gulf of Kutch"},
+            {"Forest Type": "🌿 NE India Moist Evergreen",
+             "Rainfall (mm)": "2000–4000+", "Elevation (m)": "50–1500", "Leaf Behaviour": "Evergreen; dual peak",
+             "NDVI Range": "0.55–0.80", "NDVI Peak": "Aug–Sep", "Season": "Jan–Dec",
+             "Key States": "Assam, Meghalaya, Nagaland, Mizoram, Arunachal, Manipur",
+             "Key Sites": "Cherrapunji, Namdapha, Dibru-Saikhowa, Nokrek, Dampa"},
+        ])
+        st.dataframe(master_table.set_index("Forest Type"), use_container_width=True)
 
         st.markdown("---")
-        st.markdown("""
-<div style='background:#FFF9C4;padding:12px 16px;border-radius:10px;border-left:4px solid #F9A825;margin-bottom:16px;font-size:0.88rem'>
-<b>📌 What the model does with your chosen forest type:</b>
-Each type sets: (1) the growing season window (start → end month), (2) the NDVI threshold %,
-(3) the default SOS detection method (rainfall/threshold/derivative), and (4) which meteorological
-parameters are most likely to have high Pearson r with SOS/POS/EOS at that site.
-The Pearson correlations are computed fresh from YOUR data — not hardcoded — so the actual
-best predictor may differ from the listed key drivers if your site has unusual climate patterns.
-</div>
-        """, unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("#### 🔍 Expand any forest type for detailed phenology information:")
+        # ── PER-TYPE DETAILED CARDS ───────────────────────────
+        st.markdown("#### 🔍 Detailed Type Cards — Phenology, Ecology & Reference Sites")
 
-        ECOLOGY = {
+        FOREST_CARDS = {
             "Tropical Dry Deciduous — Monsoon (Jun-May)": {
-                "sos":"Leaf flush Jun–Jul triggered by first SW Monsoon rainfall. SOS follows 2–3 weeks after monsoon arrival.",
-                "pos":"Peak greenness Oct–Nov after monsoon withdrawal. NDVI 0.55–0.72.",
-                "eos":"Leaf fall Dec–Jan, complete by Mar–Apr. Controlled by T2M_MAX and VPD.",
-                "los":"~260–300 days. High inter-annual variability driven by monsoon onset date.",
-                "refs":["Prabakaran C et al. (2013) *Tropical Ecology* 54(2): 225–234.",
-                        "Singh KP & Kushwaha CP (2005) *Current Science* 89(6): 964–975.",
-                        "Champion HG & Seth SK (1968) *A Revised Survey of the Forest Types of India*. GoI Press."]},
+                "icon": "🍂",
+                "headline": "India's most widespread forest — 35% of total forest cover",
+                "champion_class": "Champion & Seth Type 5 — Tropical Dry Deciduous Forest",
+                "distribution": "Deccan Plateau, Eastern Ghats, Vindhyan Range, Central India. Absent in coastal strips and NE India.",
+                "climate": "Annual rainfall 700–1400 mm, strictly seasonal. 4–6 dry months. Temperature 15–45°C.",
+                "elevation": "0–700 m (plains and gentle hills)",
+                "species_dominant": "Teak (Tectona grandis), Axlewood (Anogeissus latifolia), Indian kino (Pterocarpus marsupium)",
+                "species_assoc": "Bamboo, Terminalia spp., Madhuca indica, Diospyros melanoxylon, Boswellia serrata",
+                "phenology_sos": "Leaf flush Jun–Jul immediately after monsoon onset. SOS follows 10–20 days after first 20mm rainfall event.",
+                "phenology_pos": "Peak canopy Sep–Nov after monsoon withdrawal. Max NDVI 0.60–0.72 in October.",
+                "phenology_eos": "Leaf fall Dec–Jan, complete by Mar–Apr. Teak begins senescence as soil moisture drops.",
+                "phenology_los": "260–300 days. High inter-annual variability (±15–25 days) driven by monsoon onset timing.",
+                "ndvi_signature": "Large NDVI amplitude (0.40–0.50). Clear single peak Sep–Nov. Near-zero NDVI Mar–May.",
+                "key_met_drivers": "PRECTOTCORR (onset timing → SOS), GWETTOP (soil moisture → leaf flush speed), T2M_MIN (bud-break warmth)",
+                "ref_sites": [
+                    ("Tirupati / Seshachalam", "13.63°N 79.40°E", "200m", "Classic Andhra dry deciduous"),
+                    ("Kanha NP (MP)", "22.33°N 80.61°E", "520m", "Sal + teak mixed"),
+                    ("Bandipur NP (Karnataka)", "11.67°N 76.63°E", "800m", "Teak + axlewood"),
+                    ("Ranthambore NP (Rajasthan)", "26.01°N 76.50°E", "350m", "Dry deciduous with dhok"),
+                    ("Mudumalai (TN)", "11.57°N 76.57°E", "1000m", "Transitional dry deciduous"),
+                    ("Tadoba (Maharashtra)", "20.22°N 79.33°E", "200m", "Central India type"),
+                ],
+                "literature": ["Champion HG & Seth SK (1968). A Revised Survey of the Forest Types of India. Govt. of India.",
+                               "Singh KP & Kushwaha CP (2005). Monsoon-driven phenology of tropical dry deciduous forests. Current Science 89(6):964-975.",
+                               "Prabakaran C et al. (2013). Phenological changes in tropical dry deciduous forests. Tropical Ecology 54(2):225-234."],
+                "common_mistake": "❌ Do NOT select this type for forests that stay green all year — those are Tropical Moist Deciduous or Wet Evergreen.",
+                "color": "#E8F5E9", "border": "#2E7D32"
+            },
             "Tropical Moist Deciduous — Monsoon (Jun-May)": {
-                "sos":"Leaf flush Jun–Jul. Sal shows a characteristic pre-monsoon leaf exchange (Apr–May).",
-                "pos":"Peak Sep–Oct. Sal-dominant stands reach NDVI 0.60–0.72.",
-                "eos":"Gradual senescence Nov–Mar. Complete leaf fall by Apr.",
-                "los":"~270–310 days.",
-                "refs":["Pandey CB & Singh JS (1992) *Vegetatio* 99–100: 291–305.",
-                        "Sagar R et al. (2008) *Forest Ecology and Management* 255: 3832–3840."]},
+                "icon": "🌿",
+                "headline": "Sal-dominant forests — India's richest timber zone",
+                "champion_class": "Champion & Seth Type 3 — Tropical Moist Deciduous Forest",
+                "distribution": "Sub-Himalayan foothills, NE India plains, Odisha–Jharkhand–Bengal belt, parts of W Ghats east slopes.",
+                "climate": "Annual rainfall 1000–2000 mm. 3–4 dry months. Temperature 10–40°C.",
+                "elevation": "0–900 m",
+                "species_dominant": "Sal (Shorea robusta), Teak (in south), Indian laurel (Terminalia tomentosa)",
+                "species_assoc": "Rosewood (Dalbergia latifolia), Bamboo, Sissoo (Dalbergia sissoo), Hollock, Gamari",
+                "phenology_sos": "Leaf flush Jun–Jul (monsoon onset). Sal also shows a pre-monsoon leaf exchange (Apr–May new leaves before old fall).",
+                "phenology_pos": "Peak Sep–Oct. Sal-dominant stands reach NDVI 0.60–0.72.",
+                "phenology_eos": "Gradual senescence Nov–Mar. Complete leaf fall Apr–May. Slower than dry deciduous.",
+                "phenology_los": "270–310 days. Less variable than dry deciduous due to higher rainfall reliability.",
+                "ndvi_signature": "Amplitude 0.30–0.45. Broader peak than dry deciduous. Some green retained Dec–Jan in moister sites.",
+                "key_met_drivers": "RH2M (humidity rise signals monsoon arrival → SOS), PRECTOTCORR (intensity → POS), GWETROOT (deep reserves → EOS timing)",
+                "ref_sites": [
+                    ("Simlipal (Odisha)", "21.83°N 86.50°E", "900m", "Classic sal-moist deciduous"),
+                    ("Kaziranga (Assam)", "26.58°N 93.17°E", "80m", "Grassland-moist deciduous mosaic"),
+                    ("Bastar (Chhattisgarh)", "19.10°N 81.95°E", "560m", "Sal + bamboo"),
+                    ("Cuttack forests (Odisha)", "20.46°N 85.88°E", "30m", "Coastal moist deciduous"),
+                    ("Hazaribagh (Jharkhand)", "23.99°N 85.37°E", "600m", "Plateau sal forests"),
+                    ("Dehing Patkai (Assam)", "27.30°N 95.60°E", "120m", "Eastern sal forests"),
+                ],
+                "literature": ["Pandey CB & Singh JS (1992). Rainfall and soil water effects on decomposition. Vegetatio 99-100:291-305.",
+                               "Sagar R et al. (2008). Gradients of tree diversity and composition in Sal-dominated forests. Forest Ecology & Management 255:3832-3840."],
+                "common_mistake": "❌ Do NOT confuse with Wet Evergreen. Moist deciduous sheds leaves fully in Apr–May. If your site stays green all year, use Wet Evergreen.",
+                "color": "#E8F5E9", "border": "#388E3C"
+            },
             "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)": {
-                "sos":"No dormant period. Weak SOS signal May–Jun as pre-monsoon dry spell ends.",
-                "pos":"Peak NDVI Oct–Dec. Values 0.65–0.82 — highest of any Indian forest type.",
-                "eos":"Weak senescence. EOS = last date NDVI above threshold.",
-                "los":">300 days; approaches 365 in high-rainfall years.",
-                "refs":["Jha CS et al. (2013) *Current Science* 105(6): 795–802."]},
+                "icon": "🌲",
+                "headline": "Highest NDVI in India — Western Ghats & Andaman rainforests",
+                "champion_class": "Champion & Seth Type 1A & 1B — Tropical Wet Evergreen & Semi-Evergreen",
+                "distribution": "Western Ghats (0–1500m), Andaman & Nicobar, NE India lowland pockets.",
+                "climate": "Annual rainfall >2000 mm (Agumbe receives ~7500 mm). No true dry season. Temperature 20–35°C.",
+                "elevation": "0–1500 m (below shola elevation)",
+                "species_dominant": "Dipterocarpus spp., Hopea spp., Mesua ferrea, Calophyllum spp.",
+                "species_assoc": "Bamboo, Rattan canes, Myristica, Garcinia, Artocarpus, Canarium",
+                "phenology_sos": "No dormant period. Weak SOS signal Jun–Jul as SW monsoon maximises canopy. Some species flush Feb–Apr in pre-monsoon.",
+                "phenology_pos": "Peak NDVI Oct–Dec after monsoon. Values 0.65–0.82 — highest of any Indian forest type.",
+                "phenology_eos": "Very weak EOS. Slight NDVI dip Mar–May during brief dry spell.",
+                "phenology_los": ">300 days; near 365 in the highest-rainfall zones like Agumbe.",
+                "ndvi_signature": "Low amplitude (0.10–0.25). High baseline NDVI (>0.55 even in dry season). Dual peaks possible (SW + NE monsoon).",
+                "key_met_drivers": "RH2M (near-constant humidity → weak SOS), ALLSKY_SFC_SW_DWN (radiation limits POS), GWETROOT (deep moisture reserve)",
+                "ref_sites": [
+                    ("Agumbe (Karnataka)", "13.51°N 75.10°E", "640m", "India's 2nd highest rainfall site — ~7500mm/yr"),
+                    ("Silent Valley (Kerala)", "11.08°N 76.47°E", "900m", "Undisturbed Gondwana relict"),
+                    ("Periyar TR (Kerala)", "9.58°N 77.22°E", "900m", "W Ghats wet evergreen"),
+                    ("Coorg / Kodagu (Karnataka)", "12.33°N 75.83°E", "900m", "Coffee+wet evergreen mosaic"),
+                    ("Wayanad (Kerala)", "11.60°N 76.08°E", "750m", "High biodiversity belt"),
+                    ("Andaman (Port Blair)", "11.67°N 92.73°E", "10m", "Island rainforest"),
+                ],
+                "literature": ["Pascal JP (1988). Wet Evergreen Forests of the Western Ghats of India. Institut Français de Pondichéry.",
+                               "Jha CS et al. (2013). Biodiversity characterization using satellite remote sensing. Current Science 105(6):795-802.",
+                               "Meher-Homji VM (1991). History of forests & climate. Tropical Forests. Delhi."],
+                "common_mistake": "❌ Agumbe (13.51°N 75.10°E, 640m) is WET EVERGREEN — NOT Shola. Shola requires >1500m elevation in South India.",
+                "color": "#E0F2F1", "border": "#00695C"
+            },
             "Tropical Dry Evergreen (Jan-Dec)": {
-                "sos":"Driven by NE monsoon. SOS Oct–Nov — opposite to rest of India.",
-                "pos":"Peak Dec–Jan following NE monsoon.",
-                "eos":"Senescence Feb–Apr.",
-                "los":"~180–220 days.",
-                "refs":["Parthasarathy N et al. (1992) *Journal of Tropical Ecology* 8: 153–163."]},
+                "icon": "🌴",
+                "headline": "NE monsoon-driven coastal forest — opposite phenology to rest of India",
+                "champion_class": "Champion & Seth Type 6 — Tropical Dry Evergreen Forest",
+                "distribution": "Tamil Nadu east coast strip (Coromandel Coast), very localised.",
+                "climate": "Annual rainfall ~1000 mm but dominated by NE monsoon (Oct–Dec). Long dry summer (Apr–Sep).",
+                "elevation": "0–200 m (coastal plains only)",
+                "species_dominant": "Manilkara hexandra, Memecylon umbellatum, Diospyros ebenum",
+                "species_assoc": "Eugenia, Canthium, Cassine, Tarenna, Ixora",
+                "phenology_sos": "SOS Oct–Nov — driven by NE monsoon. Opposite to all other Indian forests.",
+                "phenology_pos": "Peak Dec–Jan following NE monsoon.",
+                "phenology_eos": "Senescence Mar–Apr. May–Sep: stressed but not fully deciduous.",
+                "phenology_los": "~180–220 days.",
+                "ndvi_signature": "Moderate amplitude. Peak Dec–Jan (very distinctive — no other forest peaks in winter).",
+                "key_met_drivers": "PRECTOTCORR (Oct–Dec NE monsoon → SOS), T2M (temperature modulates pace), RH2M",
+                "ref_sites": [
+                    ("Pichavaram (Tamil Nadu)", "11.43°N 79.78°E", "5m", "Dry evergreen + mangrove mosaic"),
+                    ("Point Calimere WLS", "10.30°N 79.85°E", "5m", "Pure dry evergreen"),
+                    ("Vedanthangal (TN)", "12.52°N 79.87°E", "30m", "Dry evergreen with wetland"),
+                ],
+                "literature": ["Parthasarathy N et al. (1992). Tropical dry evergreen forests of Tamil Nadu. Journal of Tropical Ecology 8:153-163."],
+                "common_mistake": "❌ Only select this for Tamil Nadu east coast sites. Do NOT use for Andhra or Karnataka coasts which are moist deciduous.",
+                "color": "#FFF8E1", "border": "#F9A825"
+            },
             "Tropical Thorn Forest / Scrub (Jun-May)": {
-                "sos":"SOS follows first 20mm+ rainfall Jul–Aug. Pre-monsoon NDVI <0.15.",
-                "pos":"Peak Aug–Sep, brief. NDVI rarely >0.45.",
-                "eos":"Rapid senescence Oct–Nov.",
-                "los":"80–120 days. High inter-annual variability (±30 days).",
-                "refs":[]},
+                "icon": "🌵",
+                "headline": "Arid scrubland — shortest growing season in India",
+                "champion_class": "Champion & Seth Type 6B — Tropical Thorn Forest",
+                "distribution": "Rajasthan (Thar Desert), Gujarat (Rann of Kutch), semi-arid Deccan fringes, Haryana plains.",
+                "climate": "Annual rainfall <700 mm. 7–8 dry months. Temperature 5–48°C (extreme range).",
+                "elevation": "0–500 m",
+                "species_dominant": "Khejri (Prosopis cineraria), Babul (Acacia nilotica), Rohira (Tecomella undulata)",
+                "species_assoc": "Euphorbia caducifolia, Capparis decidua, Ziziphus nummularia, Calligonum polygonoides",
+                "phenology_sos": "SOS follows first significant monsoon rainfall (>15–20 mm) Jul–Aug. Very sharp onset.",
+                "phenology_pos": "Brief peak Aug–Sep. NDVI rarely exceeds 0.45. Very low baseline (<0.12).",
+                "phenology_eos": "Rapid senescence Oct–Nov within 4–6 weeks of monsoon withdrawal.",
+                "phenology_los": "80–130 days. Most variable in India (±30 days).",
+                "ndvi_signature": "Very low baseline (0.08–0.15). Small brief peak. Large amplitude relative to base but small absolute values.",
+                "key_met_drivers": "PRECTOTCORR (single monsoon pulse = entire season driver), GWETTOP (shallow roots, surface moisture controls all)",
+                "ref_sites": [
+                    ("Jaisalmer (Rajasthan)", "26.91°N 70.91°E", "220m", "Core Thar Desert thorn scrub"),
+                    ("Rann of Kutch (Gujarat)", "23.75°N 70.22°E", "30m", "Salt flat + scrub mosaic"),
+                    ("Jodhpur (Rajasthan)", "26.29°N 73.02°E", "231m", "Desert thorn forest"),
+                    ("Hisar (Haryana)", "29.15°N 75.72°E", "215m", "Semi-arid agricultural fringe"),
+                ],
+                "literature": ["Mertia RS et al. (2010). Plant phenology in Indian arid zone. Indian Journal of Arid Land Research 24(1):1-8."],
+                "common_mistake": "❌ Do NOT use for Rajasthan sites that receive >800mm rainfall (like Mt Abu area) — those are Subtropical Hill Forest.",
+                "color": "#FFF3E0", "border": "#E65100"
+            },
             "Subtropical Broadleaved Hill Forest (Apr-Mar)": {
-                "sos":"Leaf flush Apr–May as T rises above ~12°C.",
-                "pos":"Peak canopy Aug–Sep during monsoon.",
-                "eos":"Senescence Oct–Dec.",
-                "los":"~200–240 days.",
-                "refs":["Jeganathan C et al. (2014) *Forest Ecology and Management* 323: 153–162."]},
+                "icon": "🌳",
+                "headline": "Himalayan foothills & NE hill ranges — temperature + monsoon co-driven",
+                "champion_class": "Champion & Seth Type 9 — Subtropical Broadleaved Hill Forest",
+                "distribution": "Himalayan foothills (Shiwalik, outer ranges) 500–1500m; NE hill states.",
+                "climate": "Rainfall 1500–2500 mm. Distinct winter (3–4 months). Temperature 5–38°C.",
+                "elevation": "500–1500 m",
+                "species_dominant": "Oak (Quercus incana, Q. leucotrichophora), Chestnut, Alder (Alnus nepalensis)",
+                "species_assoc": "Rhododendron arboreum, Sal (lower slopes), Adina cordifolia, Schima wallichii",
+                "phenology_sos": "Leaf flush Apr–May as temperature rises above ~10°C. Rainfall not primary driver.",
+                "phenology_pos": "Peak canopy Jul–Sep during monsoon. NDVI 0.55–0.72.",
+                "phenology_eos": "Senescence Oct–Dec. Winter leaf fall Jan–Mar in deciduous oaks.",
+                "phenology_los": "200–240 days.",
+                "ndvi_signature": "Moderate amplitude. Clear spring SOS (Apr–May) visible. Monsoon peak. Autumn decline.",
+                "key_met_drivers": "T2M_MIN (spring warming → SOS), GDD_10 (heat accumulation → POS), PRECTOTCORR (monsoon sustains canopy)",
+                "ref_sites": [
+                    ("Rajaji NP (Uttarakhand)", "30.00°N 78.17°E", "900m", "Shiwalik subtropical forest"),
+                    ("Jim Corbett (Uttarakhand)", "29.53°N 79.07°E", "500m", "Foothills subtropical"),
+                    ("Manas (Assam foothills)", "26.67°N 90.73°E", "150m", "NE foothills"),
+                    ("Darjeeling forests", "27.04°N 88.27°E", "1200m", "Eastern Himalayan foothills"),
+                    ("Shillong (Meghalaya)", "25.58°N 91.88°E", "1400m", "NE hill subtropical"),
+                ],
+                "literature": ["Jeganathan C et al. (2014). Leaf phenology in Himalayan forest ecosystems. Forest Ecology & Management 323:153-162."],
+                "common_mistake": "❌ Do NOT use for sites above 1500m in Himalayas — those are Montane Temperate.",
+                "color": "#F1F8E9", "border": "#558B2F"
+            },
             "Montane Temperate Forest (Apr-Nov)": {
-                "sos":"Snowmelt and soil warming trigger bud burst. SOS Apr–May at 2000m, May–Jun at 2800m.",
-                "pos":"Peak Jul–Aug. NDVI ~0.65.",
-                "eos":"Autumn senescence Sep–Nov.",
-                "los":"150–200 days. +1°C advances SOS by ~6–8 days.",
-                "refs":["Sharma S & Chaturvedi RK (2015) *Indian Forester* 141(6): 617–625.",
-                        "Piao S et al. (2019) *Global Change Biology* 25: 1922–1940."]},
+                "icon": "🏔️",
+                "headline": "Himalayan temperate zone — snowmelt + temperature controlled",
+                "champion_class": "Champion & Seth Type 11 — Himalayan Moist Temperate Forest",
+                "distribution": "Western and Eastern Himalayas 1500–3000m. Also Sikkim and Arunachal upper zones.",
+                "climate": "Rainfall 1000–2500 mm. Heavy snowfall Dec–Mar. Temperature -15 to 30°C.",
+                "elevation": "1500–3000 m",
+                "species_dominant": "Deodar (Cedrus deodara), Oak (Quercus semecarpifolia), Blue pine (Pinus wallichiana)",
+                "species_assoc": "Maple (Acer), Silver fir (Abies), Birch (Betula), Rhododendron, Taxus",
+                "phenology_sos": "Snowmelt triggers soil warming → bud burst Apr–May at 2000m, May–Jun at 2800m. SOS advances ~6-8 days per +1°C.",
+                "phenology_pos": "Peak Jul–Aug. Conifer NDVI 0.55–0.70. Broadleaf NDVI 0.60–0.75.",
+                "phenology_eos": "Autumn senescence Sep–Nov. Larch/deciduous oak turn gold then drop.",
+                "phenology_los": "150–200 days. Highly sensitive to temperature — best climate indicator.",
+                "ndvi_signature": "Clear spring rise (Apr–May). Single summer peak. Autumn decline to low winter values. Conifers maintain moderate NDVI in winter.",
+                "key_met_drivers": "T2M_MIN (snowmelt threshold → SOS), GDD_10 (growing season heat → POS), ALLSKY_SFC_SW_DWN (radiation at altitude)",
+                "ref_sites": [
+                    ("Kedarnath WLS", "30.73°N 79.07°E", "2500m", "Classic Himalayan temperate"),
+                    ("Great Himalayan NP (HP)", "31.75°N 77.60°E", "2500m", "Deodar + oak zone"),
+                    ("Manali area (HP)", "32.23°N 77.19°E", "2050m", "Deodar + pine"),
+                    ("Chopta (Uttarakhand)", "30.46°N 79.25°E", "2680m", "Bugyals transition zone"),
+                    ("Tirthan Valley (HP)", "31.67°N 77.45°E", "1700m", "Lower montane temperate"),
+                ],
+                "literature": ["Sharma S & Chaturvedi RK (2015). Temperature sensitivity of Himalayan forest phenology. Indian Forester 141(6):617-625.",
+                               "Misra R et al. (2021). NDVI phenology of Himalayan forests. Remote Sensing Applications 22:100495."],
+                "common_mistake": "❌ Do NOT confuse with Alpine. Montane Temperate has TREES (oak, deodar, pine). Alpine has meadows and shrubs.",
+                "color": "#E3F2FD", "border": "#1565C0"
+            },
             "Alpine / Subalpine Forest and Meadow (May-Oct)": {
-                "sos":"Snowmelt controls SOS with high precision. Typical range May 20 – Jun 20.",
-                "pos":"Peak Jul–Aug. Alpine meadow NDVI 0.55–0.75.",
-                "eos":"First frost triggers rapid senescence Sep–Oct.",
-                "los":"Shortest in India: 100–140 days. Highest climate sensitivity.",
-                "refs":["Panwar P et al. (2014) *Current Science* 107(11): 1816–1821."]},
+                "icon": "⛰️",
+                "headline": "Roof of India — shortest season, highest climate sensitivity",
+                "champion_class": "Champion & Seth Type 12 — Sub-Alpine Forest; Bugyals (Alpine meadows)",
+                "distribution": "Himalayas >3000m: Uttarakhand, Ladakh, Spiti, Arunachal Pradesh alpine zone.",
+                "climate": "Rainfall 300–800mm (mostly snow). 8–9 month snow/frozen period. Temperature -30 to 20°C.",
+                "elevation": ">3000 m",
+                "species_dominant": "Juniper (Juniperus), Silver fir (Abies spectabilis), Birch (Betula utilis), Alpine meadow grasses",
+                "species_assoc": "Rhododendron campanulatum, Potentilla, Primula, Saxifraga, sedges (Carex)",
+                "phenology_sos": "Controlled almost entirely by snowmelt timing. Typical: May 20 – Jun 20. ±1 week inter-annual range. Best SOS predictor in India.",
+                "phenology_pos": "Peak Jul–Aug. Alpine meadow (bugyal) NDVI 0.55–0.75. Very brief — 6–8 weeks.",
+                "phenology_eos": "First frost triggers rapid senescence. Sep–Oct depending on elevation.",
+                "phenology_los": "Shortest in India: 90–140 days. Advances ~7–10 days per +1°C warming.",
+                "ndvi_signature": "Near-zero (0.05–0.15) for 7+ months. Then sharp rise to peak. Symmetric bell curve. Very clean signal.",
+                "key_met_drivers": "T2M_MIN (snowmelt → SOS; r typically 0.85–0.95), ALLSKY_SFC_SW_DWN (radiation → POS), GDD_5 (cold-adapted base)",
+                "ref_sites": [
+                    ("Valley of Flowers (UK)", "30.73°N 79.60°E", "3600m", "UNESCO World Heritage Alpine meadow"),
+                    ("Spiti / Pin Valley (HP)", "31.96°N 78.16°E", "3800m", "Cold desert alpine"),
+                    ("Ladakh / Nubra Valley", "34.63°N 77.43°E", "3100m", "Trans-Himalayan"),
+                    ("Hemkund Sahib (UK)", "30.70°N 79.65°E", "4320m", "High alpine meadow"),
+                    ("Rohtang Pass (HP)", "32.37°N 77.24°E", "3980m", "Subalpine-alpine transition"),
+                ],
+                "literature": ["Panwar P et al. (2014). Alpine vegetation phenology and climate. Current Science 107(11):1816-1821.",
+                               "Bhatt US et al. (2010). Circumpolar Arctic Tundra Vegetation Change. Remote Sensing 2:1856-1881.",
+                               "Sharma S (2024). Valley of Flowers phenology. Indian Forester (in press)."],
+                "common_mistake": "❌ If your site has TREES and is 2000–3000m, choose Montane Temperate. Alpine is for open meadows / sparse shrubs above treeline.",
+                "color": "#EDE7F6", "border": "#4527A0"
+            },
             "Shola Forest — Southern Montane (Jan-Dec)": {
-                "sos":"Two minor green-up pulses (SW and NE monsoons). Weak SOS definition.",
-                "pos":"Dual NDVI peaks Sep and Dec. NDVI 0.55–0.72.",
-                "eos":"Brief dry period Feb–May.",
-                "los":"Effectively year-round (>320 days).",
-                "refs":["Sukumar R et al. (1995) *Current Science* 69(10): 812–815."]},
+                "icon": "🌫️",
+                "headline": "Cloud forest islands — Nilgiris, Munnar, Kodaikanal ONLY (>1500m elevation)",
+                "champion_class": "Champion & Seth Type 16 — Southern Montane Wet Temperate Forest",
+                "distribution": "High elevations (>1500m) of Western Ghats: Nilgiris, Anamalais, Palani Hills, Brahmagiri. NOT lowland W Ghats.",
+                "climate": "Rainfall 2000–5000 mm from BOTH SW and NE monsoons. Persistent cloud cover and mist. Temperature 5–22°C.",
+                "elevation": ">1500 m (Southern India ONLY)",
+                "species_dominant": "Michelia nilagirica, Syzygium calophyllifolium, Rhododendron nilagiricum, Elaeocarpus recurvatus",
+                "species_assoc": "Ilex denticulata, Schefflera, Viburnum, Meliosma, Styrax",
+                "phenology_sos": "Two minor green-up pulses (SW monsoon Jun–Sep and NE monsoon Oct–Dec). Weak SOS signal. High baseline NDVI.",
+                "phenology_pos": "Dual NDVI peaks: Sep and Dec. Peak NDVI 0.60–0.72. Forest-grassland (Shola-Grass) mosaic creates complex signal.",
+                "phenology_eos": "Brief dry period Feb–May. Never fully deciduous.",
+                "phenology_los": "Effectively year-round (>320 days).",
+                "ndvi_signature": "High baseline with very low amplitude. Dual weak peaks. If you see a single large seasonal peak, this is NOT shola.",
+                "key_met_drivers": "RH2M (cloud forest humidity controls canopy), ALLSKY_SFC_SW_DWN (cloud cover limits sunlight → POS), GWETROOT",
+                "ref_sites": [
+                    ("Eravikulam NP (Kerala)", "10.17°N 77.05°E", "2100m", "Classic Shola + Nilgiri Tahr habitat"),
+                    ("Mukurthi NP (Nilgiris)", "11.23°N 76.52°E", "2600m", "High Shola plateau"),
+                    ("Kodaikanal (Tamil Nadu)", "10.24°N 77.49°E", "2133m", "Palani Hills Shola"),
+                    ("Valparai (Tamil Nadu)", "10.33°N 76.96°E", "1800m", "Anamalai Shola"),
+                    ("Devikulam (Kerala)", "10.02°N 77.11°E", "1800m", "Idukki Shola"),
+                ],
+                "literature": ["Sukumar R et al. (1995). Climate change and its impact on tropical montane ecosystems in Southern India. Current Science 69(10):812-815.",
+                               "Krishnaswamy J et al. (2014). Western Ghats & Climate Change. ATREE Report.",
+                               "Bali A et al. (2007). Shola forest bird communities. Biotropica 39(5):672-681."],
+                "common_mistake": "❌ CRITICAL: Agumbe (13.51°N 75.10°E, 640m) is NOT Shola — it is Tropical Wet Evergreen. Shola MUST be >1500m in South India.",
+                "color": "#F3E5F5", "border": "#7B1FA2"
+            },
             "Mangrove Forest (Jan-Dec)": {
-                "sos":"No strong dormancy. Monsoon flush Jun–Aug produces detectable NDVI increase.",
-                "pos":"Peak Sep–Oct. Sundarbans NDVI 0.55–0.68.",
-                "eos":"Minor senescence Dec–Feb.",
-                "los":"Near year-round (>300 days).",
-                "refs":["Dutta D et al. (2016) *Journal of Earth System Science* 125(4): 819–831."]},
+                "icon": "🌊",
+                "headline": "Tidal ecosystem — salt-tolerant canopy with monsoon NDVI flush",
+                "champion_class": "Champion & Seth Type 4 — Littoral and Swamp Forests",
+                "distribution": "Tidal mudflats: Sundarbans (W Bengal), Bhitarkanika (Odisha), Coringa (AP), Pichavaram (TN), Gulf of Kutch, Andamans.",
+                "climate": "Controlled by tidal inundation. Rainfall >1500mm. Temperature 20–35°C. Saline soil.",
+                "elevation": "0–10 m (tidal zone only)",
+                "species_dominant": "Sundri (Heritiera fomes), Gewa (Excoecaria agallocha), Rhizophora apiculata, Avicennia marina",
+                "species_assoc": "Bruguiera, Sonneratia, Ceriops, Aegiceras, Nypa fruticans",
+                "phenology_sos": "No strong dormancy. Monsoon flush Jun–Aug produces detectable NDVI increase from tidal freshwater input.",
+                "phenology_pos": "Peak Sep–Oct. Sundarbans NDVI 0.55–0.68.",
+                "phenology_eos": "Minor dry-season senescence Dec–Feb in upper canopy.",
+                "phenology_los": "Near year-round (>300 days).",
+                "ndvi_signature": "Moderate baseline (0.40–0.55). Low amplitude. Monsoon peak. Distinctive low EOS dip in winter.",
+                "key_met_drivers": "PRECTOTCORR (monsoon freshwater → canopy flush), RH2M (humidity sustains evergreen), T2M",
+                "ref_sites": [
+                    ("Sundarbans (W Bengal)", "21.95°N 88.88°E", "5m", "World's largest mangrove"),
+                    ("Bhitarkanika (Odisha)", "20.73°N 86.88°E", "5m", "2nd largest in India"),
+                    ("Coringa WLS (AP)", "16.72°N 82.25°E", "2m", "2nd largest in AP"),
+                    ("Gulf of Kutch (Gujarat)", "22.60°N 69.80°E", "2m", "Arid zone mangrove"),
+                ],
+                "literature": ["Dutta D et al. (2016). Mangrove phenology from MODIS. Journal of Earth System Science 125(4):819-831.",
+                               "Giri C et al. (2011). Status of mangroves worldwide. Global Ecology and Biogeography 20(1):154-159."],
+                "common_mistake": "❌ Only use for tidal mudflat sites. Coastal forests on dry ground are Tropical Dry Deciduous or Dry Evergreen.",
+                "color": "#E0F7FA", "border": "#00838F"
+            },
             "NE India Moist Evergreen (Jan-Dec)": {
-                "sos":"Pre-monsoon flush Mar–Apr + second green-up during SW monsoon Jun–Sep.",
-                "pos":"Peak Aug–Sep. Highest mean NDVI in India (0.69–0.72).",
-                "eos":"Weak senescence Nov–Dec in upper canopy only.",
-                "los":"Effectively year-round.",
-                "refs":["Jha CS et al. (2013) *Current Science* 105(6): 795–802."]},
+                "icon": "🌿",
+                "headline": "Highest mean NDVI in India — world's wettest evergreen forests",
+                "champion_class": "Champion & Seth Type 1A (Eastern variant) — Tropical Wet Evergreen",
+                "distribution": "All NE states (Assam, Meghalaya, Nagaland, Manipur, Mizoram, Arunachal) + sub-Himalayan W Bengal.",
+                "climate": "Annual rainfall 2000–4000 mm. Cherrapunji receives 11,000 mm. No real dry season. Temperature 10–35°C.",
+                "elevation": "50–1500 m (NE plains and lower hills)",
+                "species_dominant": "Dipterocarpus macrocarpus, Shorea assamica, Mesua ferrea (Nahar), Dillenia indica",
+                "species_assoc": "Bamboo (Bambusa tulda), Rattan, Cymbidium orchids, tree ferns, Livistona palm",
+                "phenology_sos": "Pre-monsoon flush Mar–Apr + second green-up during SW monsoon Jun–Sep. Dual-peak pattern.",
+                "phenology_pos": "Peak Aug–Sep. Highest mean NDVI in India (0.69–0.80). Forest maturity Jul–Sep.",
+                "phenology_eos": "Very weak senescence Nov–Dec in upper canopy only. NE monsoon maintains moisture.",
+                "phenology_los": "Effectively year-round. LOS > 350 days in most sites.",
+                "ndvi_signature": "Very high baseline (>0.55). Low amplitude. Dual peaks (Mar–Apr pre-monsoon + Aug–Sep monsoon). Distinctive pattern.",
+                "key_met_drivers": "PRECTOTCORR (world's highest rainfall controls POS), RH2M (year-round humidity), T2M (temperature fine-tunes dual-peak)",
+                "ref_sites": [
+                    ("Cherrapunji (Meghalaya)", "25.27°N 91.73°E", "1300m", "World's wettest place — 11,000 mm/yr"),
+                    ("Namdapha NP (Arunachal)", "27.40°N 96.38°E", "500m", "Richest NE forest"),
+                    ("Dibru-Saikhowa (Assam)", "27.67°N 95.22°E", "110m", "Floodplain evergreen"),
+                    ("Nokrek NP (Meghalaya)", "25.50°N 90.47°E", "1400m", "Citrus diversity centre"),
+                    ("Dampa TR (Mizoram)", "23.47°N 92.67°E", "900m", "SW NE India evergreen"),
+                ],
+                "literature": ["Jha CS et al. (2013). Biodiversity characterization at landscape level using satellite remote sensing. Current Science 105(6):795-802.",
+                               "Singh JS (2002). The biodiversity crisis: A multifaceted review. Current Science 82(6):638-647."],
+                "common_mistake": "❌ NE India Moist Evergreen (lowland) is different from NE hill forests >1500m (use Subtropical Hill Forest for those).",
+                "color": "#E8F5E9", "border": "#1B5E20"
+            },
         }
 
-        for name, cfg_ref in SEASON_CONFIGS.items():
-            ec=ECOLOGY.get(name,{})
-            window=f"{SM_NAME[cfg_ref['start_month']]} → {SM_NAME[cfg_ref['end_month']]}"
-            with st.expander(f"{cfg_ref.get('icon','')}  {name}   |   {window}   |   {cfg_ref.get('states','')}", expanded=False):
-                c1,c2,c3,c4=st.columns(4)
-                c1.metric("Season Window", window); c2.metric("Rainfall", cfg_ref.get("rainfall",""))
-                c3.metric("NDVI Peak", cfg_ref.get("ndvi_peak","")); c4.metric("Threshold", f"{int(cfg_ref.get('threshold_pct',0.30)*100)}%")
-                st.markdown(f"**Species:** {cfg_ref.get('species','')}  |  **Key drivers:** {cfg_ref.get('key_drivers','')}")
+        # Display cards
+        for forest_key, card in FOREST_CARDS.items():
+            cfg_ref = SEASON_CONFIGS.get(forest_key, {})
+            window = f"{SM_NAME[cfg_ref.get('start_month',1)]} → {SM_NAME[cfg_ref.get('end_month',12)]}"
+            with st.expander(
+                f"{card['icon']}  **{forest_key.split('—')[0].strip()}**  ·  "
+                f"{card['headline']}", expanded=False):
+
+                # Header banner
+                st.markdown(
+                    f"<div style='background:{card['color']};padding:10px 14px;border-radius:8px;"
+                    f"border-left:5px solid {card['border']};margin-bottom:10px'>"
+                    f"<b>{card['champion_class']}</b></div>",
+                    unsafe_allow_html=True)
+
+                # Metrics row
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Season Window", window)
+                m2.metric("Rainfall", cfg_ref.get('rainfall', ''))
+                m3.metric("Elevation", card['elevation'].split('(')[0].strip())
+                m4.metric("NDVI Peak", cfg_ref.get('ndvi_peak', ''))
+                m5.metric("NDVI Range", card['ndvi_signature'].split('.')[0].split('(')[-1].split(')')[0] if '(' in card['ndvi_signature'] else "—")
+
+                # Distribution + Climate
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("**📍 Distribution**")
+                    st.caption(card['distribution'])
+                    st.markdown("**🌡️ Climate**")
+                    st.caption(card['climate'])
+                with col_b:
+                    st.markdown("**🌳 Dominant Species**")
+                    st.caption(card['species_dominant'])
+                    st.markdown("**🌿 Associated Species**")
+                    st.caption(card['species_assoc'])
+
                 st.markdown("---")
-                pc1,pc2,pc3=st.columns(3)
-                with pc1: st.markdown("**🌱 SOS**"); st.caption(ec.get("sos",""))
-                with pc2: st.markdown("**🌿 POS**"); st.caption(ec.get("pos",""))
-                with pc3: st.markdown("**🍂 EOS**"); st.caption(ec.get("eos",""))
-                st.markdown(f"**📏 Season length:** {ec.get('los','')}")
-                if ec.get("refs"):
-                    st.markdown("**References:**")
-                    for r in ec["refs"]: st.markdown(f"- {r}")
 
-        st.markdown("""---
-#### 🗺️ Quick Location Guide
+                # Phenology
+                st.markdown("**📅 Phenological Behaviour**")
+                p1, p2, p3, p4 = st.columns(4)
+                with p1:
+                    st.markdown("🌱 **SOS**")
+                    st.caption(card['phenology_sos'])
+                with p2:
+                    st.markdown("🌿 **POS**")
+                    st.caption(card['phenology_pos'])
+                with p3:
+                    st.markdown("🍂 **EOS**")
+                    st.caption(card['phenology_eos'])
+                with p4:
+                    st.markdown("📏 **Season Length**")
+                    st.caption(card['phenology_los'])
 
-| Location | Forest Type |
-|---|---|
-| Tirupati, Eastern Ghats, Deccan | Tropical Dry Deciduous — Monsoon |
-| Sal forests — MP, Chhattisgarh, Odisha | Tropical Moist Deciduous — Monsoon |
-| Western Ghats — Kerala, Karnataka | Tropical Wet Evergreen |
-| Tamil Nadu Coromandel coast | Tropical Dry Evergreen |
-| Rajasthan, Gujarat | Tropical Thorn Forest / Scrub |
-| Himalayan foothills 500–1500m | Subtropical Broadleaved Hill Forest |
-| W Himalayas 1500–3000m | Montane Temperate Forest |
-| Himalayas >3000m, Ladakh, Spiti | Alpine / Subalpine Forest |
-| Nilgiris, Munnar, Kodaikanal >1500m | Shola Forest |
-| Sundarbans, Bhitarkanika, Pichavaram | Mangrove Forest |
-| Assam, Meghalaya, Manipur, Arunachal | NE India Moist Evergreen |
+                # NDVI + Met
+                st.markdown(f"**📊 NDVI Signature:** {card['ndvi_signature']}")
+                st.markdown(f"**🔑 Key met drivers:** `{card['key_met_drivers']}`")
 
-#### 📐 Definitions
-**SOS** = first date smoothed NDVI rises above: base + threshold% × (peak − base)  
-**POS** = date of maximum smoothed NDVI within the season window  
-**EOS** = last date smoothed NDVI stays above the same threshold after POS  
-**LOS** = elapsed days SOS → EOS (correct even for seasons crossing the calendar year boundary)
+                st.markdown("---")
+
+                # Reference sites table
+                st.markdown("**📌 Reference Sites with Coordinates**")
+                ref_df = pd.DataFrame(card['ref_sites'],
+                                      columns=['Site', 'Coordinates', 'Elevation', 'Notes'])
+                st.dataframe(ref_df, use_container_width=True, hide_index=True)
+
+                # Common mistake warning
+                st.markdown(
+                    f"<div style='background:#FFEBEE;padding:10px 14px;border-radius:8px;"
+                    f"border-left:5px solid #C62828;margin:8px 0;font-size:0.85rem'>"
+                    f"{card['common_mistake']}</div>",
+                    unsafe_allow_html=True)
+
+                # Literature
+                if card.get('literature'):
+                    with st.expander("📚 Key references", expanded=False):
+                        for ref in card['literature']:
+                            st.markdown(f"- {ref}")
+
+        # ── PHENOLOGY CALENDAR ────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📅 Phenology Calendar — All Forest Types at a Glance")
+        st.markdown("*Month when each event typically occurs. SOS = first green-up · POS = peak · EOS = senescence end*")
+
+        cal_data = {
+            "Forest Type":        ["🍂 Dry Deciduous", "🌿 Moist Deciduous", "🌲 Wet Evergreen",
+                                   "🌴 Dry Evergreen", "🌵 Thorn/Scrub", "🌳 Subtrop Hill",
+                                   "🏔️ Montane Temp", "⛰️ Alpine", "🌫️ Shola", "🌊 Mangrove", "🌿 NE Evergreen"],
+            "SOS":  ["Jun–Jul","Jun–Jul","May–Jun","Oct–Nov","Jul–Aug","Apr–May","Apr–May","May–Jun","Jun+Oct","Jun–Jul","Mar–Apr"],
+            "POS":  ["Sep–Nov","Sep–Oct","Oct–Dec","Dec–Jan","Aug–Sep","Jul–Sep","Jul–Aug","Jul–Aug","Sep+Dec","Sep–Oct","Aug–Sep"],
+            "EOS":  ["Mar–Apr","Mar–Apr","Mar–Apr","Mar–Apr","Oct–Nov","Oct–Dec","Sep–Nov","Sep–Oct","Feb–Apr","Jan–Feb","Nov–Dec"],
+            "LOS (days)":["260–300","270–310",">300","180–220","80–130","200–240","150–200","90–140",">320",">300",">350"],
+        }
+        cal_df = pd.DataFrame(cal_data).set_index("Forest Type")
+        st.dataframe(cal_df, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("""
+#### 📐 Technical Definitions
+
+**SOS (Start of Season)** = first date smoothed NDVI rises above: *base NDVI + threshold% × (peak − base)*  
+**POS (Peak of Season)** = date of maximum smoothed NDVI within the growing season window  
+**EOS (End of Season)** = last date smoothed NDVI remains above the same threshold after POS  
+**LOS (Length of Season)** = calendar days from SOS to EOS (cross-year seasons handled correctly)  
+**Target DOY** = season-relative days (days since season start month) — used in regression equations
+
+**Threshold recommendation by forest type:**
+- Thorn / Dry Deciduous / Alpine: 25–35% (high contrast)
+- Moist Deciduous / Subtropical: 20–30%
+- Wet Evergreen / Shola / Mangrove / NE India: 10–20% (low amplitude; lower threshold needed)
         """)
 
     # ══ TAB 5 — TECHNICAL GUIDE ════════════════════════════════
