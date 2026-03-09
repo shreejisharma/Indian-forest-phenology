@@ -792,7 +792,17 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                                 })
             except Exception:
                 pass
-            return None, "No complete seasons found — check season window / threshold"
+
+        if not rows:
+            return None, (
+                f"No complete seasons found. "
+                f"Troughs detected: {len(trough_indices)}. "
+                f"Data span: {ndvi_5d.index.min().date()} → {ndvi_5d.index.max().date()} "
+                f"({n} points on 5-day grid). "
+                f"Try: (1) reducing the Minimum Days slider, "
+                f"(2) ensuring Season Start ≠ Season End, "
+                f"(3) adjusting the threshold % slider."
+            )
 
         df_out = pd.DataFrame(rows).drop_duplicates(subset="Year", keep="first")
         return df_out.sort_values("Year").reset_index(drop=True), None
@@ -1692,16 +1702,11 @@ def main():
         help="Daily export from power.larc.nasa.gov — header block auto-skipped, all parameters auto-detected")
 
     # ── CACHE-BUST: clear stale predictor/train_df when files change ──
-    # Build a fingerprint from current file names + sizes
+    # Build a fingerprint from current file names + sizes + ALL sidebar parameters
+    # This ensures session_state is wiped whenever ANY analysis parameter changes
     _ndvi_fp = f"{ndvi_file.name}:{ndvi_file.size}" if ndvi_file else ""
     _met_fp  = f"{met_file.name}:{met_file.size}"   if met_file  else ""
-    _cur_fp  = f"{_ndvi_fp}|{_met_fp}"
-    if st.session_state.get('_file_fingerprint') != _cur_fp:
-        # New files — wipe all derived state so Predict tab never shows
-        # features from a previous training run
-        for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
-            st.session_state[_k] = None
-        st.session_state['_file_fingerprint'] = _cur_fp
+    # NOTE: full fingerprint is built AFTER sidebar widgets are rendered (see below)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 📅 Season Window Configuration")
@@ -1740,6 +1745,13 @@ def main():
         "icon": "🌿",
     }
 
+    # Warn if season window is too narrow
+    if start_month_sel == end_month_sel:
+        st.sidebar.warning(
+            "⚠️ Season Start = Season End — window is only ~1 month. "
+            "No seasons will be detected. Please set different start and end months."
+        )
+
     # NDVI threshold — single slider for amplitude-based threshold
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚙️ NDVI Amplitude Threshold")
@@ -1766,6 +1778,17 @@ def main():
     roll_days_sel        = 7
     eos_rain_thresh_sel  = 3.0
     eos_roll_days_sel    = 14
+
+    # ── Full fingerprint: files + ALL sidebar parameters ──────
+    # Any change to thresholds, season window, or model triggers a fresh run
+    _cur_fp = (f"{_ndvi_fp}|{_met_fp}"
+               f"|sm={start_month_sel}|em={end_month_sel}|md={min_days_sel}"
+               f"|sos={sos_threshold_pct:.4f}|eos={eos_threshold_pct:.4f}"
+               f"|model={regression_model_key}")
+    if st.session_state.get('_file_fingerprint') != _cur_fp:
+        for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
+            st.session_state[_k] = None
+        st.session_state['_file_fingerprint'] = _cur_fp
 
     # Regression model selector
     st.sidebar.markdown("---")
