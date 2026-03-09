@@ -1,26 +1,20 @@
 """
-Universal Vegetation Phenology Predictor
-==========================================
+🌲 UNIVERSAL INDIAN FOREST PHENOLOGY PREDICTOR 🌲
+===================================================
 
-Phenology extraction: NDVI Amplitude-Based Method (per reference document)
-  Workflow:
-    1. Interpolate NDVI to a regular 5-day grid
-    2. Apply Savitzky-Golay smoothing filter to the 5-day series
-    3. Compute NDVImin (dormancy) and NDVImax (peak)
-    4. Amplitude  A = NDVImax - NDVImin
-    5. Threshold  = NDVImin + threshold% x A  (default 10%)
-    6. SOS = first t where Sm(t) >= threshold
-       EOS = last  t where Sm(t) >= threshold
-       POS = max Sm(t) between SOS and EOS
+Upload:
+  1. NDVI CSV  — any CSV with Date + NDVI columns
+  2. NASA POWER Met CSV — daily export, headers auto-skipped
 
-Regression models (user-selectable):
-  - Ridge (Linear)             LOO cross-validated
-  - Ridge + Polynomial deg 2   non-linear met-phenology relationships
-  - LOWESS-smoothed + Ridge    reduces inter-annual noise before fitting
+Predicts SOS / POS / EOS / LOS for 11 Indian forest types using:
+  • Pearson |r| >= 0.40 feature filter
+  • Multi-feature Ridge (up to n−2 features; collinearity-filtered; all significant drivers shown)
+  • Ridge Regression with auto-tuned alpha (RidgeCV)
+  • Leave-One-Out cross-validation (honest R² for small samples)
+  • Threshold-based phenology extraction (robust for multi-hump NDVI)
+  • Optional IMD monsoon onset date as SOS predictor
 
-Feature selection: Pearson |r| >= 0.40 filter, collinearity-controlled Ridge
-
-pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
+pip install streamlit pandas numpy scipy scikit-learn matplotlib
 streamlit run app/universal_Indian_forest_phenology_assesment.py
 """
 
@@ -29,12 +23,14 @@ import pandas as pd
 import numpy as np
 from scipy.signal import savgol_filter
 from scipy.stats import pearsonr
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import interp1d
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import LeaveOneOut, cross_val_predict
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import LeaveOneOut
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.lines import Line2D
@@ -43,16 +39,37 @@ from io import StringIO
 import warnings
 warnings.filterwarnings('ignore')
 
-# ── Optional: statsmodels LOWESS ─────────────────────────────
-try:
-    from statsmodels.nonparametric.smoothers_lowess import lowess as sm_lowess
-    _HAS_STATSMODELS = True
-except ImportError:
-    _HAS_STATSMODELS = False
 
-# ── Regression model type — set per session in sidebar ───────
-# Options: "Ridge (Linear)", "Ridge + Polynomial (deg 2)", "LOWESS + Ridge"
-_MODEL_TYPES = ["Ridge (Linear)", "Ridge + Polynomial (deg 2)", "LOWESS-smoothed + Ridge"]
+# ─── LOESS / LOWESS implementation (no external dependency) ──
+def _loess_predict(x_train, y_train, x_new, frac=0.75):
+    """
+    Locally-weighted scatterplot smoothing (LOESS/LOWESS).
+    Uses tricube kernel weights around each prediction point.
+    Works with 1-D x arrays.
+    """
+    n = len(x_train)
+    k = max(2, int(np.ceil(frac * n)))
+    result = np.zeros(len(x_new))
+    for i, xp in enumerate(x_new):
+        dists = np.abs(x_train - xp)
+        idx   = np.argsort(dists)[:k]
+        d_max = dists[idx[-1]] + 1e-10
+        u     = dists[idx] / d_max
+        w     = np.maximum(0, (1 - u**3)**3)   # tricube
+        if w.sum() < 1e-12:
+            result[i] = np.mean(y_train)
+        else:
+            # Weighted least-squares line
+            Xw = np.column_stack([np.ones(k), x_train[idx]]) * w[:, None]
+            Yw = y_train[idx] * w
+            try:
+                coef, *_ = np.linalg.lstsq(Xw, Yw, rcond=None)
+                result[i] = coef[0] + coef[1] * xp
+            except Exception:
+                result[i] = np.average(y_train[idx], weights=w)
+    return result
+
+
 
 st.set_page_config(
     page_title="🌲 Indian Forest Phenology",
@@ -446,102 +463,110 @@ def make_training_features(pheno_df, met_df, params, window=15, monsoon_onset_do
 
 
 # ─── PHENOLOGY EXTRACTION ────────────────────────────────────
-def _sos_from_rainfall(met_df, yr, sm, rain_thresh=8.0, roll_days=7, search_months=4):
-    if met_df is None or 'PRECTOTCORR' not in met_df.columns: return None
-    ss = sm-search_months; sy = yr
-    if ss < 1: ss += 12; sy -= 1
-    try:
-        s = pd.Timestamp(f"{sy}-{ss:02d}-01")
-        e = pd.Timestamp(f"{yr}-{sm:02d}-28")+timedelta(days=60)
-        sub = met_df[(met_df['Date']>=s) & (met_df['Date']<=e)].copy()
-        if len(sub) < roll_days: return None
-        sub['roll'] = sub['PRECTOTCORR'].fillna(0).rolling(roll_days).sum()
-        rainy = sub[sub['roll']>=rain_thresh]
-        return rainy['Date'].iloc[0] if len(rainy)>0 else None
-    except Exception: return None
-
-
 def extract_phenology(ndvi_df, season_type, threshold_override=None,
                       eos_threshold_override=None,
-                      met_df_for_sos=None, sos_method="auto", rain_thresh=8.0, roll_days=7,
-                      eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14):
+                      met_df_for_sos=None, sos_method="threshold", rain_thresh=8.0, roll_days=7,
+                      eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14,
+                      cfg=None):
     """
-    NDVI Amplitude-Based Phenology Extraction
-    ==========================================
-    Implements the method exactly as defined in the reference document:
+    NDVI Amplitude-Based Phenology Extraction.
 
-    Processing Workflow (PDF Step 1-6):
-        1. Interpolate NDVI to a regular 5-day grid (fills gaps from clouds / irregular cadence)
-        2. Apply Savitzky-Golay smoothing filter to the 5-day series
-        3. Compute NDVImin (dormancy minimum) and NDVImax (growing season peak)
-        4. Calculate amplitude:  A = NDVImax - NDVImin
-        5. Determine threshold:  NDVIthreshold = NDVImin + 0.10 * A
-        6. Extract metrics:
-              SOS = first  t  where  Sm(t) >= NDVIthreshold
-              EOS = last   t  where  Sm(t) >= NDVIthreshold
-              POS = maximum of Sm(t) between SOS and EOS
+    Workflow (per Jeganathan amplitude-threshold method):
+      1. Interpolate raw NDVI to a regular 5-day grid (temporal gap-filling).
+      2. Apply Savitzky–Golay smoothing to reduce sensor noise.
+      3. For each growing season independently:
+         a. Identify NDVI_min (base) and NDVI_max (peak).
+         b. Compute amplitude A = NDVI_max − NDVI_min.
+         c. Define threshold = NDVI_min + threshold_pct × A  (default 10%).
+         d. SOS = first time-step when smoothed NDVI ≥ threshold (after dormancy minimum).
+         e. EOS = last time-step when smoothed NDVI ≥ threshold (before next dormancy minimum).
+         f. POS = time-step of maximum smoothed NDVI between SOS and EOS.
 
-    The threshold percentage is user-adjustable (default 10% per the document).
-    All metrics are extracted from the SG-smoothed series, as specified.
+    Thresholds are computed INDEPENDENTLY per season so inter-annual amplitude
+    variability does not bias the detection dates.
     """
     try:
-        cfg   = SEASON_CONFIGS[season_type]
-        sm    = cfg["start_month"]; em = cfg["end_month"]; min_d = cfg["min_days"]
-        thr_pct = threshold_override if threshold_override is not None else cfg.get("threshold_pct", 0.10)
+        if cfg is None:
+            # fallback: look up from SEASON_CONFIGS if available, else use defaults
+            cfg = SEASON_CONFIGS.get(season_type, {
+                "start_month": 6, "end_month": 5, "min_days": 150,
+                "pos_constrain_end": None, "threshold_pct": 0.10,
+            })
+        sm  = cfg["start_month"]
+        em  = cfg["end_month"]
+        min_d = cfg.get("min_days", 150)
 
-        # ── Step 1: Interpolate to regular 5-day grid ───────────────
-        ndvi_input = (ndvi_df[["Date", "NDVI"]].copy()
-                      .set_index("Date").sort_index())
-        ndvi_daily = ndvi_input.resample("D").interpolate(method="time")
-        ndvi_5d    = ndvi_daily.resample("5D").mean()
-        ndvi_5d["NDVI"] = ndvi_5d["NDVI"].ffill().bfill()
+        # ── Step 1: 5-day regular interpolation ──────────────
+        ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
+        ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
 
-        # ── Step 2: Savitzky-Golay smoothing of the FULL time series ──
-        # Window = ~8% of series length, minimum 7, always odd; poly <= window-1
-        n          = len(ndvi_5d)
-        wl_target  = max(7, int(n * 0.08))
-        wl         = wl_target if wl_target % 2 == 1 else wl_target + 1
-        wl         = min(wl, n - 1 if n > 1 else 1)
+        # Build 5-day grid spanning the full date range
+        full_range = pd.date_range(
+            start=ndvi_raw.index.min(),
+            end=ndvi_raw.index.max(),
+            freq="5D")
+        ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range))
+        ndvi_5d = ndvi_5d.interpolate(method="time")
+        ndvi_5d = ndvi_5d.reindex(full_range)
+        ndvi_5d.columns = ["NDVI"]
+
+        # ── Step 2: Savitzky–Golay smoothing ─────────────────
+        n = len(ndvi_5d)
+        # ~5% of series length, minimum 7, must be odd
+        wl_target = max(7, int(n * 0.05))
+        wl = wl_target if wl_target % 2 == 1 else wl_target + 1
+        wl = min(wl, n - 1 if n > 1 else 1)
         if wl % 2 == 0: wl = max(7, wl - 1)
-        poly       = min(3, wl - 1)
-        if n >= 7:
-            ndvi_5d["Sm"] = savgol_filter(ndvi_5d["NDVI"].values, wl, poly)
-        else:
-            ndvi_5d["Sm"] = ndvi_5d["NDVI"]
+        poly = min(3, wl - 1)
+        if wl < 5:
+            return None, f"Too few interpolated NDVI points ({n}) — check date range"
+        ndvi_5d["Sm"]  = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
+        ndvi_5d["Drv"] = np.gradient(ndvi_5d["Sm"])
+
+        thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
+        eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
+        pos_constrain_end = cfg.get("pos_constrain_end", None)
 
         rows = []
         for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
             try:
                 if sm <= em:
-                    s = f"{yr}-{sm:02d}-01";  e = f"{yr}-{em:02d}-28"
+                    s = f"{yr}-{sm:02d}-01"
+                    e = f"{yr}-{em:02d}-28"
                 else:
-                    s = f"{yr}-{sm:02d}-01";  e = f"{yr+1}-{em:02d}-28"
+                    s = f"{yr}-{sm:02d}-01"
+                    e = f"{yr+1}-{em:02d}-28"
 
-                sub = ndvi_5d.loc[s:e, "Sm"]      # smoothed series for this season
-                if len(sub) < max(8, min_d // 5):
-                    continue
+                sub = ndvi_5d.loc[s:e]
+                if len(sub) < max(10, min_d // 5): continue  # ~equiv min_days on 5-day grid
 
-                # ── Steps 3-5: amplitude & threshold ────────────────────
-                ndvi_min  = float(sub.min())
-                ndvi_max  = float(sub.max())
-                amplitude = ndvi_max - ndvi_min
+                # ── Step 3: Per-season amplitude threshold ────
+                peak_ndvi = sub["Sm"].max()
+                base_ndvi = sub["Sm"].min()
+                amplitude = peak_ndvi - base_ndvi
 
-                if amplitude < 0.02:
-                    continue   # signal too flat for reliable phenology
+                # Season-specific thresholds
+                threshold     = base_ndvi + thr_pct     * amplitude
+                eos_threshold = base_ndvi + eos_thr_pct * amplitude
 
-                threshold = ndvi_min + thr_pct * amplitude
+                # POS — constrained window if configured
+                if pos_constrain_end:
+                    pw  = ndvi_5d.loc[f"{yr}-{sm:02d}-01":f"{yr}-{pos_constrain_end:02d}-31", "Sm"]
+                    pos = pw.idxmax() if len(pw) >= 3 else sub["Sm"].idxmax()
+                else:
+                    pos = sub["Sm"].idxmax()
 
-                # ── Step 6a: SOS = first t where Sm(t) >= threshold ─────
-                above_all = sub[sub >= threshold]
-                if len(above_all) == 0:
-                    continue
-                sos = above_all.index[0]
+                # ── Step 4: SOS — first crossing after dormancy minimum ──
+                # Look before POS; first date smoothed NDVI ≥ threshold
+                pre   = sub.loc[:pos, "Sm"]
+                above = pre[pre >= threshold]
+                sos   = above.index[0] if len(above) > 0 else pre.idxmax()
 
-                # ── Step 6b: EOS = last t where Sm(t) >= threshold ──────
-                eos = above_all.index[-1]
-
-                # ── Step 6c: POS = max Sm between SOS and EOS ───────────
-                pos = sub.loc[sos:eos].idxmax()
+                # ── Step 5: EOS — last crossing before next dormancy ────
+                # Look after POS; last date smoothed NDVI stays ≥ threshold
+                post       = sub.loc[pos:, "Sm"]
+                above_post = post[post >= eos_threshold]
+                eos        = above_post.index[-1] if len(above_post) > 0 else post.index[-1]
 
                 season_start = pd.Timestamp(s)
                 sos_rel = (sos - season_start).days
@@ -549,30 +574,24 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 eos_rel = (eos - season_start).days
 
                 rows.append({
-                    "Year":          yr,
-                    "SOS_Date":      sos,  "SOS_DOY": sos.dayofyear,  "SOS_Target": sos_rel,
-                    "SOS_Method":    "amplitude_threshold",
-                    "POS_Date":      pos,  "POS_DOY": pos.dayofyear,  "POS_Target": pos_rel,
-                    "EOS_Date":      eos,  "EOS_DOY": eos.dayofyear,  "EOS_Target": eos_rel,
-                    "EOS_Method":    "amplitude_threshold",
-                    "LOS_Days":      (eos - sos).days,
-                    "Season_Start":  season_start,
-                    "Peak_NDVI":     ndvi_max,
-                    "Base_NDVI":     ndvi_min,
-                    "Amplitude":     amplitude,
-                    "SOS_Threshold": threshold,
-                    "Season":        season_type,
+                    "Year":       yr,
+                    "SOS_Date":   sos,  "SOS_DOY":  sos.dayofyear,  "SOS_Target": sos_rel,
+                    "SOS_Method": "amplitude_threshold",
+                    "POS_Date":   pos,  "POS_DOY":  pos.dayofyear,  "POS_Target": pos_rel,
+                    "EOS_Date":   eos,  "EOS_DOY":  eos.dayofyear,  "EOS_Target": eos_rel,
+                    "EOS_Method": "amplitude_threshold",
+                    "LOS_Days":   (eos - sos).days,
+                    "Season_Start": season_start,
+                    "Peak_NDVI":  float(sub.loc[pos, "Sm"]),
+                    "Amplitude":  float(amplitude),
+                    "Threshold":  float(threshold),
+                    "Season":     season_type,
                 })
             except Exception:
                 continue
 
         if not rows:
-            return None, (
-                "No complete seasons found. Tips:\n"
-                "- Check that season start/end months match your NDVI data dates.\n"
-                "- Lower threshold (5%) if signal amplitude is very small (evergreen sites).\n"
-                "- Ensure NDVI CSV covers at least one full season window."
-            )
+            return None, "No complete seasons found — check season window / threshold"
         return pd.DataFrame(rows), None
 
     except Exception as e:
@@ -715,14 +734,43 @@ def loo_ridge(X_vals, y_vals, alpha):
     return float(np.clip(1-ss_res/ss_tot,-1.0,1.0)), float(mean_absolute_error(y_vals,preds))
 
 
-def fit_event_model(X_all, y, event, model_type="Ridge (Linear)"):
-    """
-    Fit phenology model for a single event.
+def fit_loess(X_vals_1d, y_vals, frac=0.75):
+    """LOESS/LOWESS fit with LOO cross-validation."""
+    n = len(y_vals)
+    preds = np.zeros(n)
+    for i in range(n):
+        mask = np.ones(n, dtype=bool); mask[i] = False
+        Xtr = X_vals_1d[mask].astype(float); ytr = y_vals[mask].astype(float)
+        preds[i] = _loess_predict(Xtr, ytr, np.array([X_vals_1d[i]]), frac=frac)[0]
+    ss_res = np.sum((y_vals - preds)**2)
+    ss_tot = np.sum((y_vals - y_vals.mean())**2) + 1e-12
+    r2  = float(np.clip(1 - ss_res / ss_tot, -1.0, 1.0))
+    mae = float(mean_absolute_error(y_vals, preds))
+    return r2, mae
 
-    model_type options:
-      "Ridge (Linear)"              — standard Ridge regression (LOO CV)
-      "Ridge + Polynomial (deg 2)"  — Ridge on degree-2 polynomial features
-      "LOWESS-smoothed + Ridge"     — LOWESS smooths y residuals; Ridge on met features
+
+def loo_poly(X_vals, y_vals, degree=2):
+    """Polynomial regression LOO cross-validation."""
+    loo = LeaveOneOut(); preds = []
+    for tr, te in loo.split(X_vals):
+        pipe = Pipeline([
+            ('sc', StandardScaler()),
+            ('pf', PolynomialFeatures(degree=degree, include_bias=False)),
+            ('r',  Ridge(alpha=1.0))
+        ])
+        pipe.fit(X_vals[tr], y_vals[tr])
+        preds.append(float(pipe.predict(X_vals[te])[0]))
+    preds = np.array(preds)
+    ss_res = np.sum((y_vals - preds)**2)
+    ss_tot = np.sum((y_vals - y_vals.mean())**2) + 1e-12
+    r2  = float(np.clip(1 - ss_res / ss_tot, -1.0, 1.0))
+    mae = float(mean_absolute_error(y_vals, preds))
+    return r2, mae
+
+
+def fit_event_model(X_all, y, event, model_key="ridge"):
+    """Multi-feature Ridge / LOESS / Polynomial regression with LOO CV.
+    model_key: 'ridge' | 'loess' | 'poly2' | 'poly3'
     """
     yt = y.values; n = len(yt)
 
@@ -732,77 +780,11 @@ def fit_event_model(X_all, y, event, model_type="Ridge (Linear)"):
         md = float(yt.mean())
         return {'mode':'mean','features':[],'r2':0.0,
                 'mae':float(np.mean(np.abs(yt-md))),
-                'alpha':None,'coef':[],'intercept':md,'best_r':0.0,
-                'mean_doy':md,'n':n,'pipe':None,'model_type':model_type}
+                'alpha':None,'coef':[],'intercept':md,'best_r':0.0,'mean_doy':md,'n':n,'pipe':None,
+                'model_key': model_key}
 
     Xf = X_all[features].fillna(X_all[features].median())
     Xv = Xf.values
-
-    # ── Choose fitting strategy ────────────────────────────────
-    if model_type == "Ridge + Polynomial (deg 2)":
-        # Polynomial feature expansion then Ridge
-        poly_tf = PolynomialFeatures(degree=2, include_bias=False)
-        Xv_poly = poly_tf.fit_transform(StandardScaler().fit_transform(Xv))
-        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
-        rcv.fit(Xv_poly, yt)
-        best_alpha = float(rcv.alpha_)
-        pipe = Pipeline([
-            ('sc', StandardScaler()),
-            ('poly', PolynomialFeatures(degree=2, include_bias=False)),
-            ('r', Ridge(alpha=best_alpha))
-        ])
-        pipe.fit(Xv, yt)
-        # LOO R² via manual loop
-        loo = LeaveOneOut(); preds = []
-        for tr, te in loo.split(Xv):
-            p = Pipeline([('sc', StandardScaler()),
-                          ('poly', PolynomialFeatures(degree=2, include_bias=False)),
-                          ('r', Ridge(alpha=best_alpha))])
-            p.fit(Xv[tr], yt[tr]); preds.append(float(p.predict(Xv[te])[0]))
-        preds = np.array(preds)
-        ss_res = np.sum((yt - preds)**2)
-        ss_tot = np.sum((yt - yt.mean())**2) + 1e-12
-        r2  = float(np.clip(1 - ss_res/ss_tot, -1.0, 1.0))
-        mae = float(mean_absolute_error(yt, preds))
-        coef_unstd = []  # polynomial coefs not directly interpretable
-        intercept_unstd = float(pipe.named_steps['r'].intercept_)
-
-    elif model_type == "LOWESS-smoothed + Ridge" and _HAS_STATSMODELS:
-        # Smooth y with LOWESS to reduce noise, then Ridge on met features
-        years_idx = np.arange(n, dtype=float)
-        smoothed_yt = sm_lowess(yt, years_idx, frac=0.6, return_sorted=False)
-        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
-        sc  = StandardScaler()
-        rcv.fit(sc.fit_transform(Xv), smoothed_yt)
-        best_alpha = float(rcv.alpha_)
-        pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
-        pipe.fit(Xv, smoothed_yt)
-        # LOO R² on original (un-smoothed) y
-        preds = []
-        loo = LeaveOneOut()
-        for tr, te in loo.split(Xv):
-            p = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
-            p.fit(Xv[tr], smoothed_yt[tr]); preds.append(float(p.predict(Xv[te])[0]))
-        preds = np.array(preds)
-        ss_res = np.sum((yt - preds)**2)
-        ss_tot = np.sum((yt - yt.mean())**2) + 1e-12
-        r2  = float(np.clip(1 - ss_res/ss_tot, -1.0, 1.0))
-        mae = float(mean_absolute_error(yt, preds))
-        sc2 = pipe.named_steps['sc']; r2_coef = pipe.named_steps['r']
-        coef_unstd  = list(r2_coef.coef_ / sc2.scale_)
-        intercept_unstd = float(r2_coef.intercept_ - np.dot(r2_coef.coef_ / sc2.scale_, sc2.mean_))
-
-    else:
-        # Default: standard Ridge (Linear)
-        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
-        rcv.fit(StandardScaler().fit_transform(Xv), yt)
-        best_alpha = float(rcv.alpha_)
-        pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
-        pipe.fit(Xv, yt)
-        r2, mae = loo_ridge(Xv, yt, best_alpha)
-        sc2 = pipe.named_steps['sc']; ridge = pipe.named_steps['r']
-        coef_unstd      = list(ridge.coef_ / sc2.scale_)
-        intercept_unstd = float(ridge.intercept_ - np.dot(ridge.coef_ / sc2.scale_, sc2.mean_))
 
     best_single_r = 0.0
     for f in features:
@@ -811,10 +793,51 @@ def fit_event_model(X_all, y, event, model_type="Ridge (Linear)"):
             if abs(r_val) > best_single_r: best_single_r = abs(r_val)
         except Exception: pass
 
+    # ── LOESS (single feature only — uses best feature) ──────
+    if model_key == "loess":
+        feat = features[0]
+        x1d  = Xf[feat].values.astype(float)
+        r2, mae = fit_loess(x1d, yt.astype(float))
+        # Store training data for prediction interpolation
+        sort_idx = np.argsort(x1d)
+        loess_data = np.column_stack([x1d[sort_idx], yt.astype(float)[sort_idx]])
+        return {'mode': 'loess', 'features': [feat], 'r2': r2, 'mae': mae,
+                'alpha': None, 'coef': [], 'intercept': 0.0,
+                'best_r': best_single_r, 'mean_doy': float(yt.mean()), 'n': n,
+                'pipe': None, 'loess_data': loess_data, 'model_key': model_key,
+                'x_train': x1d, 'y_train': yt.astype(float)}
+
+    # ── Polynomial regression ─────────────────────────────────
+    if model_key in ("poly2", "poly3"):
+        degree = 2 if model_key == "poly2" else 3
+        r2, mae = loo_poly(Xv, yt, degree=degree)
+        pipe = Pipeline([
+            ('sc', StandardScaler()),
+            ('pf', PolynomialFeatures(degree=degree, include_bias=False)),
+            ('r',  Ridge(alpha=1.0))
+        ])
+        pipe.fit(Xv, yt)
+        return {'mode': model_key, 'features': features, 'r2': r2, 'mae': mae,
+                'alpha': 1.0, 'coef': [], 'intercept': 0.0,
+                'best_r': best_single_r, 'mean_doy': float(yt.mean()), 'n': n,
+                'pipe': pipe, 'model_key': model_key}
+
+    # ── Default: Ridge Regression ─────────────────────────────
+    rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
+    rcv.fit(StandardScaler().fit_transform(Xv), yt)
+    best_alpha = float(rcv.alpha_)
+
+    pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
+    pipe.fit(Xv, yt)
+    r2, mae = loo_ridge(Xv, yt, best_alpha)
+
+    sc = pipe.named_steps['sc']; ridge = pipe.named_steps['r']
+    coef_unstd = list(ridge.coef_ / sc.scale_)
+    intercept_unstd = float(ridge.intercept_ - np.dot(ridge.coef_ / sc.scale_, sc.mean_))
+
     return {'mode':'ridge','features':features,'r2':r2,'mae':mae,
             'alpha':best_alpha,'coef':coef_unstd,'intercept':intercept_unstd,
-            'best_r':best_single_r,'n':n,'pipe':pipe,'model_type':model_type}
-
+            'best_r':best_single_r,'n':n,'pipe':pipe, 'model_key': model_key}
 
 
 
@@ -823,7 +846,7 @@ class UniversalPredictor:
     def __init__(self):
         self._fits={}; self.r2={}; self.mae={}; self.n_seasons={}; self.corr_tables={}
 
-    def train(self, train_df, all_params, model_type="Ridge (Linear)"):
+    def train(self, train_df, all_params, model_key="ridge"):
         meta={'Year','Event','Target_DOY','LOS_Days','Peak_NDVI'}
         feat_cols=[c for c in train_df.columns if c not in meta
                    and pd.api.types.is_numeric_dtype(train_df[c]) and train_df[c].std()>1e-8]
@@ -832,7 +855,7 @@ class UniversalPredictor:
             if len(sub)<3: continue
             X=sub[feat_cols].fillna(sub[feat_cols].median()); y=sub['Target_DOY']
             self.corr_tables[event]=get_all_correlations(X, y)
-            fit=fit_event_model(X, y, event, model_type=model_type)
+            fit=fit_event_model(X, y, event, model_key=model_key)
             self._fits[event]=fit; self.r2[event]=fit['r2']; self.mae[event]=fit['mae']
 
     def predict(self, inputs, event, year=2026, season_start_month=6):
@@ -840,16 +863,25 @@ class UniversalPredictor:
         fit = self._fits[event]
         if fit['mode'] == 'mean':
             rel_days = int(round(fit['mean_doy']))
+        elif fit['mode'] == 'loess':
+            feat    = fit['features'][0]
+            x_new   = float(inputs.get(feat, 0.0))
+            x_train = fit.get('x_train')
+            y_train = fit.get('y_train')
+            if x_train is not None and len(x_train) >= 2:
+                pred = _loess_predict(x_train, y_train, np.array([x_new]), frac=0.75)[0]
+                rel_days = int(np.clip(round(float(pred)), 0, 500))
+            else:
+                rel_days = int(round(fit['mean_doy']))
         else:
             vals = np.array([[inputs.get(f, 0.0) for f in fit['features']]])
             rel_days = int(np.clip(round(float(fit['pipe'].predict(vals)[0])), 0, 500))
-        # Convert season-relative days → calendar date
-        # Season start is typically Jun 1 for monsoon forests
         season_start = datetime(year, season_start_month, 1)
         date = season_start + timedelta(days=rel_days)
         doy = date.timetuple().tm_yday
         return {'doy': doy, 'date': date, 'rel_days': rel_days,
                 'r2': self.r2[event], 'mae': self.mae[event], 'event': event}
+
 
     def equation_str(self, event, season_start_month=6):
         """Returns only the regression equation line — used in Predict tab & short displays."""
@@ -911,98 +943,43 @@ class UniversalPredictor:
 
 # ─── PLOTS ───────────────────────────────────────────────────
 def plot_ndvi_phenology(ndvi_raw, pheno_df):
-    """
-    NDVI plot following the PDF processing workflow:
-      - Raw observations shown as scatter (original data)
-      - 5-day interpolated series shown as thin line
-      - SG-smoothed series shown as bold line (this is what SOS/POS/EOS are extracted from)
-      - Amplitude threshold shown as horizontal dotted line
-      - SOS / POS / EOS shown as vertical dashed lines
-    """
-    fig, ax = plt.subplots(figsize=(14, 5.2))
-
-    # ── 1. Raw observations ──────────────────────────────────
-    dates = pd.to_datetime(ndvi_raw["Date"])
-    ax.scatter(dates, ndvi_raw["NDVI"], color="#A5D6A7", s=22, alpha=0.65,
-               zorder=3, label="Raw NDVI observations")
-
-    # ── 2. 5-day interpolated series ─────────────────────────
-    ndvi_5d = (ndvi_raw.set_index("Date")["NDVI"]
-               .resample("D").interpolate(method="time")
-               .resample("5D").mean()
-               .ffill().bfill())
-    ax.plot(ndvi_5d.index, ndvi_5d.values,
-            color="#81C784", lw=1.2, alpha=0.60, zorder=4,
-            label="5-day interpolated")
-
-    # ── 3. SG-smoothed series (the analysis series) ──────────
-    n = len(ndvi_5d)
-    wl_target = max(7, int(n * 0.08))
+    fig, ax = plt.subplots(figsize=(14, 4.8))
+    dates = pd.to_datetime(ndvi_raw['Date'])
+    ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
+               label='NDVI (raw obs)', zorder=3)
+    ndvi_s = ndvi_raw.set_index('Date')['NDVI'].resample('D').interpolate(method='time')
+    n = len(ndvi_s)
+    # Adaptive SG window: ~5% of series length, minimum 11, always odd
+    wl_target = max(11, int(n * 0.05))
     wl = wl_target if wl_target % 2 == 1 else wl_target + 1
-    wl = min(wl, n - 1 if n > 1 else 1)
-    if wl % 2 == 0: wl = max(7, wl - 1)
-    poly = min(3, wl - 1)
-    if n >= 7:
-        sm_vals = savgol_filter(ndvi_5d.ffill().bfill().values, wl, poly)
-        ax.plot(ndvi_5d.index, sm_vals, color="#1B5E20", lw=2.4, zorder=5,
-                label=f"SG-smoothed (w={wl})  — SOS / POS / EOS extracted from this")
-
-    # ── 4. Amplitude threshold horizontal line ───────────────
-    thresh_drawn = False
-    for _, row in pheno_df.iterrows():
-        if not thresh_drawn:
-            thr  = row.get("SOS_Threshold")
-            base = row.get("Base_NDVI")
-            amp  = row.get("Amplitude")
-            if thr is not None and amp:
-                pct = round(thr_pct_label := (thr - base) / amp * 100) if base is not None else 10
-                ax.axhline(thr, color="#FF6F00", lw=1.5, ls=":", alpha=0.80, zorder=4,
-                           label=f"NDVIthreshold = NDVImin + {round((thr-base)/amp*100) if amp and base is not None else 10}% x amplitude")
-                thresh_drawn = True
-
-    # ── 5. SOS / POS / EOS vertical lines ────────────────────
-    ev_colors = {"SOS": "#43A047", "POS": "#1565C0", "EOS": "#E65100"}
-    ev_labels = {"SOS": "SOS  (first t: NDVI >= threshold)",
-                 "POS": "POS  (max NDVI between SOS and EOS)",
-                 "EOS": "EOS  (last t: NDVI >= threshold)"}
+    wl = min(wl, n - 1 if (n - 1) % 2 == 1 else n - 2)
+    if wl >= 7:
+        sm_arr = savgol_filter(ndvi_s.ffill().bfill().values, wl, 3)
+        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})', zorder=5)
+    ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    ev_labels = {'SOS': 'SOS', 'POS': 'POS', 'EOS': 'EOS'}
     plotted = set()
     for _, row in pheno_df.iterrows():
         for ev, col in ev_colors.items():
-            d = row.get(f"{ev}_Date")
+            d = row.get(f'{ev}_Date')
             if pd.notna(d):
-                lbl = ev_labels[ev] if ev not in plotted else ""
-                ax.axvline(pd.Timestamp(d), color=col, lw=1.8,
-                           alpha=0.55, ls="--", label=lbl, zorder=6)
+                ax.axvline(d, color=col, lw=1.4, alpha=0.50, ls='--',
+                           label=ev_labels.pop(ev) if ev not in plotted else '')
                 plotted.add(ev)
-
-    # ── Legend & formatting ───────────────────────────────────
     handles = [
-        Line2D([0],[0], color="#A5D6A7", marker="o", ms=5, lw=0,
-               label="Raw NDVI observations"),
-        Line2D([0],[0], color="#81C784", lw=1.2, alpha=0.60,
-               label="5-day interpolated"),
-        Line2D([0],[0], color="#1B5E20", lw=2.4,
-               label=f"SG-smoothed (w={wl if n>=7 else 'N/A'})  — SOS/POS/EOS from this"),
-        Line2D([0],[0], color="#FF6F00", lw=1.5, ls=":",
-               label="NDVIthreshold = NDVImin + threshold% x amplitude"),
-        Line2D([0],[0], color="#43A047", lw=1.8, ls="--",
-               label="SOS  first t: NDVI >= threshold"),
-        Line2D([0],[0], color="#1565C0", lw=1.8, ls="--",
-               label="POS  max NDVI between SOS and EOS"),
-        Line2D([0],[0], color="#E65100", lw=1.8, ls="--",
-               label="EOS  last t: NDVI >= threshold"),
+        Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
+        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})'),
+        Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
+        Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
+        Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
     ]
-    ax.set_title(
-        "NDVI Amplitude-Based Phenology Extraction\n"
-        "Workflow: Interpolate  ->  SG-smooth  ->  NDVImin + threshold% x A  "
-        "->  SOS / POS / EOS",
-        fontsize=10.5, fontweight="bold", color="#1B5E20"
-    )
-    ax.set_xlabel("Date"); ax.set_ylabel("NDVI")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
-    ax.legend(handles=handles, ncol=2, fontsize=7.8, loc="upper left", framealpha=0.92)
-    ax.grid(True, alpha=0.22, ls="--"); ax.set_facecolor("#FAFFF8")
+    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events',
+                 fontsize=12, fontweight='bold', color='#1B5E20')
+    ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
+    ax.legend(handles=handles, ncol=5, fontsize=8.5, loc='upper left', framealpha=0.88)
+    ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
 
@@ -1467,23 +1444,16 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
 def main():
     st.markdown('<p class="main-header">🌲 Universal Vegetation Phenology Predictor</p>',
                 unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Any Vegetation · Upload NDVI + NASA POWER Met · '
-                '5-Day Interpolation · Amplitude Threshold · Ridge / Polynomial / LOWESS Models · LOO CV</p>',
-                unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Upload NDVI + NASA POWER Met · '
+                'NDVI Amplitude Threshold · Ridge / LOESS / Polynomial · LOO CV · SOS / POS / EOS / LOS</p>', unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="info-box">
-    <b>📋 How to use:</b>
-    <ol style="margin:6px 0 0 16px;padding:0">
-    <li>Upload your <b>NDVI CSV</b> and <b>NASA POWER Met CSV</b> in the sidebar</li>
-    <li>Set the <b>season window</b> (start and end month for your growing season)</li>
-    <li>Adjust the <b>amplitude threshold</b> — default 10% works for most vegetation types</li>
-    <li>Choose a <b>regression model</b> (Ridge / Polynomial / LOWESS)</li>
-    <li>App extracts SOS / POS / EOS, fits models, shows correlations &amp; equations</li>
-    </ol>
-    <b>Phenology method:</b> 5-day interpolation → base + threshold% × amplitude → SOS / POS / EOS&nbsp;&nbsp;·&nbsp;&nbsp;
-    <b>Feature filter:</b> Pearson |r| ≥ {MIN_CORR_THRESHOLD}&nbsp;&nbsp;·&nbsp;&nbsp;
-    <b>Validation:</b> Leave-One-Out CV
+    <b>📋 How to use:</b> Upload your <b>NDVI CSV</b> and <b>NASA POWER Met CSV</b> →
+    App interpolates NDVI at 5-day intervals, applies SG smoothing, extracts phenology via amplitude-based threshold, fits models &amp; shows correlations →
+    Use <b>Predict</b> tab to forecast events for any year<br>
+    <b>Model:</b> Pearson |r|≥{MIN_CORR_THRESHOLD} feature filter &nbsp;·&nbsp;
+    Single best feature per event &nbsp;·&nbsp; Ridge α auto-tuned &nbsp;·&nbsp; LOO cross-validation
     </div>
     """, unsafe_allow_html=True)
 
@@ -1509,114 +1479,85 @@ def main():
         st.session_state['_file_fingerprint'] = _cur_fp
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## ⚙️ Phenology Settings")
+    st.sidebar.markdown("## 📅 Season Window Configuration")
 
-    # ── UNIVERSAL SEASON WINDOW ───────────────────────────────
-    st.sidebar.markdown("### 📅 Season Window")
-    st.sidebar.caption(
-        "Define the growing season start and end month. "
-        "All phenology metrics are extracted within this window."
-    )
-    _month_names = ["Jan","Feb","Mar","Apr","May","Jun",
-                    "Jul","Aug","Sep","Oct","Nov","Dec"]
-    season_start_mo = st.sidebar.selectbox(
-        "Season start month", options=list(range(1,13)),
-        format_func=lambda m: _month_names[m-1], index=5,   # default Jun
-        key="season_start_mo",
-        help="First month of the growing season (e.g. Jun for monsoon forests)")
-    season_end_mo = st.sidebar.selectbox(
-        "Season end month", options=list(range(1,13)),
-        format_func=lambda m: _month_names[m-1], index=4,   # default May
-        key="season_end_mo",
-        help="Last month of the growing season. Can be in the next calendar year (e.g. May for Jun-May)")
+    # Simple season window — user sets start/end month manually
+    sm_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+                7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    month_options = list(sm_names.keys())
+    month_labels  = [sm_names[m] for m in month_options]
 
-    # Build a minimal universal SEASON_CONFIG entry from user choice
-    season_type = f"Custom ({_month_names[season_start_mo-1]}–{_month_names[season_end_mo-1]})"
-    if season_type not in SEASON_CONFIGS:
-        SEASON_CONFIGS[season_type] = {
-            "start_month": season_start_mo,
-            "end_month":   season_end_mo,
-            "min_days":    60,
-            "threshold_pct": 0.10,
-            "sos_method":  "threshold",
-            "icon": "🌿",
-            "regions": "User-defined",
-            "species": "—", "states": "—",
-            "rainfall": "—", "ndvi_peak": "—", "key_drivers": "—",
-            "desc": "User-defined season window.",
-            "pos_constrain_end": None,
-        }
-    else:
-        SEASON_CONFIGS[season_type]["start_month"] = season_start_mo
-        SEASON_CONFIGS[season_type]["end_month"]   = season_end_mo
+    col_sm, col_em = st.sidebar.columns(2)
+    start_month_sel = col_sm.selectbox(
+        "Season start", options=month_options,
+        index=5,  # default June
+        format_func=lambda m: sm_names[m],
+        help="Month when the growing season begins")
+    end_month_sel = col_em.selectbox(
+        "Season end", options=month_options,
+        index=4,  # default May
+        format_func=lambda m: sm_names[m],
+        help="Month when the growing season ends")
+    min_days_sel = st.sidebar.slider(
+        "Minimum days in season window", 60, 300, 150, 10,
+        help="Seasons with fewer interpolated days are skipped")
 
-    cfg = SEASON_CONFIGS[season_type]
+    # Build a minimal cfg dict so downstream code keeps working
+    season_type = f"Custom ({sm_names[start_month_sel]}–{sm_names[end_month_sel]})"
+    cfg = {
+        "start_month": start_month_sel,
+        "end_month":   end_month_sel,
+        "min_days":    min_days_sel,
+        "sos_base":    None,
+        "pos_constrain_end": None,
+        "threshold_pct": 0.10,
+        "sos_method":  "threshold",
+        "icon": "🌿",
+    }
 
-    # ── AMPLITUDE THRESHOLD SLIDER (5–30%) ───────────────────
+    # NDVI threshold — single slider for amplitude-based threshold
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 Amplitude Threshold")
+    st.sidebar.markdown("### ⚙️ NDVI Amplitude Threshold")
     st.sidebar.caption(
-        "**SOS** = first date NDVI ≥ base + threshold% × amplitude after minimum  \n"
-        "**EOS** = last date NDVI ≥ base + threshold% × amplitude before next minimum  \n"
-        "**POS** = date of maximum NDVI"
+        "Threshold is applied **per season** as: NDVI_min + threshold% × (NDVI_max − NDVI_min). "
+        "SOS = first date NDVI rises above this; EOS = last date before dormancy.")
+    sos_threshold_pct = st.sidebar.slider(
+        "SOS threshold (% of NDVI amplitude)", 5, 30, 10, 5,
+        help="First date NDVI rises above: base + threshold% × amplitude. Default: 10%"
+    ) / 100.0
+    eos_threshold_pct = st.sidebar.slider(
+        "EOS threshold (% of NDVI amplitude)", 5, 30, 10, 5,
+        help="Last date NDVI stays above: base + threshold% × amplitude before next dormancy. Default: 10%"
+    ) / 100.0
+    st.sidebar.caption(
+        f"SOS: **{int(sos_threshold_pct*100)}%** | EOS: **{int(eos_threshold_pct*100)}%**"
     )
-    threshold_pct_val = st.sidebar.slider(
-        "Threshold (% of NDVI amplitude)", 5, 30, 10, 1,
-        key="thr_slider",
-        help="10% is the standard amplitude method. Lower values detect earlier SOS / later EOS."
-    )
-    sos_threshold_pct     = threshold_pct_val / 100.0
-    eos_threshold_pct     = sos_threshold_pct
     threshold_pct_override = sos_threshold_pct
 
-    st.sidebar.info(
-        f"Threshold = base NDVI + **{threshold_pct_val}%** × amplitude\n\n"
-        f"5-day interpolated series used for all phenology metrics."
-    )
+    # Fixed method values (amplitude threshold only — other methods removed)
+    sos_method_sel       = "threshold"
+    eos_method_sel       = "threshold"
+    rain_thresh_sel      = 8.0
+    roll_days_sel        = 7
+    eos_rain_thresh_sel  = 3.0
+    eos_roll_days_sel    = 14
 
-    # Variables that old code expects — set to dummy values (methods removed)
-    sos_method_sel     = "threshold"
-    eos_method_sel     = "threshold"
-    rain_thresh_sel    = 8.0
-    roll_days_sel      = 7
-    eos_rain_thresh_sel = 3.0
-    eos_roll_days_sel  = 14
-
-    # ── REGRESSION MODEL TYPE ─────────────────────────────────
+    # Regression model selector
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🤖 Regression Model")
-    _lowess_note = "" if _HAS_STATSMODELS else " (install statsmodels to enable)"
-    _model_opts  = [
-        "Ridge (Linear)",
-        "Ridge + Polynomial (deg 2)",
-        f"LOWESS-smoothed + Ridge{_lowess_note}",
-    ]
-    model_type_sel = st.sidebar.radio(
-        "Model type", options=_model_opts, index=0, key="model_type_sel",
-        help=(
-            "**Ridge (Linear):** Standard Ridge regression — interpretable equation, "
-            "LOO cross-validated R².\n\n"
-            "**Ridge + Polynomial (deg 2):** Adds squared and interaction terms — "
-            "captures non-linear responses between met variables and phenology.\n\n"
-            "**LOWESS-smoothed + Ridge:** LOWESS first smooths inter-annual variability "
-            "in phenology dates, then Ridge fits the met predictors — reduces noise "
-            "influence on model fitting."
-        )
+    st.sidebar.markdown("### 📈 Regression Model")
+    model_options = {
+        "Ridge Regression (Linear)":    "ridge",
+        "LOESS / LOWESS Smoothing":     "loess",
+        "Polynomial Regression (deg 2)":"poly2",
+        "Polynomial Regression (deg 3)":"poly3",
+    }
+    regression_model_sel = st.sidebar.radio(
+        "Select fitting model",
+        options=list(model_options.keys()),
+        index=0,
+        help="Ridge = L2-regularised linear regression (default). LOESS = locally weighted smoothing. Polynomial = non-linear fit."
     )
-    # Strip the note suffix for internal use
-    model_type_clean = model_type_sel.replace(_lowess_note, "").strip()
-    if "LOWESS" in model_type_clean and not _HAS_STATSMODELS:
-        st.sidebar.warning("⚠️ statsmodels not installed — falling back to Ridge (Linear). "
-                           "Run: `pip install statsmodels`")
-        model_type_clean = "Ridge (Linear)"
-
-    st.sidebar.markdown(
-        "<div style='background:#E8F5E9;padding:10px 12px;border-radius:8px;"
-        "border-left:4px solid #2E7D32;font-size:0.77rem;margin-top:4px'>"
-        "<b>ℹ️ Model note:</b> All models use Pearson |r| ≥ 0.40 feature filter "
-        "and Leave-One-Out cross-validation for honest R² on small samples.</div>",
-        unsafe_allow_html=True
-    )
+    regression_model_key = model_options[regression_model_sel]
 
     # ── GATE ─────────────────────────────────────────────────
     if not (ndvi_file and met_file):
@@ -1665,7 +1606,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         met_df, raw_params, met_err = parse_nasa_power(met_file)
         if met_df is None: st.error(f"❌ Met: {met_err}"); return
 
-    met_df     = add_derived_features(met_df, season_start_month=season_start_mo)
+    met_df     = add_derived_features(met_df, season_start_month=cfg['start_month'])
     all_params = [c for c in met_df.columns
                   if c not in {'Date','YEAR','MO','DY','DOY','LON','LAT','ELEV'}
                   and pd.api.types.is_numeric_dtype(met_df[c])]
@@ -1685,9 +1626,9 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
     )
 
     # ── TABS ─────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab5 = st.tabs([
         "🔬 Training & Models", "📊 Correlations & Met", "🔮 Predict",
-        "🌳 Forest Guide", "📖 Technical Guide"
+        "📖 Technical Guide"
     ])
     icons = {'SOS':'🌱','POS':'🌿','EOS':'🍂'}
 
@@ -1695,18 +1636,12 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
     with tab1:
         st.markdown("### 🔬 Phenology Extraction & Model Training")
 
-        with st.spinner("Extracting phenology from NDVI…"):
+        with st.spinner("Extracting phenology from NDVI (5-day interpolation + SG smoothing + amplitude threshold)…"):
             pheno_df, pheno_err = extract_phenology(
                 ndvi_df, season_type,
                 threshold_override=threshold_pct_override,
                 eos_threshold_override=eos_threshold_pct,
-                met_df_for_sos=met_df,
-                sos_method=sos_method_sel,
-                rain_thresh=float(rain_thresh_sel),
-                roll_days=int(roll_days_sel),
-                eos_method=eos_method_sel,
-                eos_rain_thresh=float(eos_rain_thresh_sel),
-                eos_roll_days=int(eos_roll_days_sel))
+                cfg=cfg)
 
         if pheno_df is None: st.error(f"❌ Phenology extraction: {pheno_err}"); return
         n_seasons = len(pheno_df)
@@ -1714,10 +1649,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
             st.error(f"❌ Only {n_seasons} season(s) detected. Minimum 3 required. Upload ≥3 years of NDVI.")
             return
 
-        st.success(f"✅ **{n_seasons} growing seasons** extracted  |  "
-                   f"Season window: **{_month_names[season_start_mo-1]} → {_month_names[season_end_mo-1]}**  |  "
-                   f"Threshold: **{threshold_pct_val}% amplitude**  |  "
-                   f"Method: **5-day interpolation + amplitude threshold**")
+        st.success(f"✅ **{n_seasons} growing seasons** extracted")
 
         c_left, c_right = st.columns([2,1])
         with c_left: st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df))
@@ -1746,42 +1678,34 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         fig_t = plot_pheno_trends(pheno_df)
         if fig_t: st.pyplot(fig_t)
 
-        # Monsoon onset — always available (user decides if relevant for their site)
-        monsoon_onset_doys = {}
-        years_in_data = sorted(pheno_df['Year'].unique().tolist())
-
-        with st.expander("🌧️ Optional: Enter IMD Monsoon Onset Dates — Strengthens SOS Model", expanded=False):
-            st.markdown(
-                "**SW Monsoon onset DOY** is the primary SOS driver for monsoon-driven vegetation "
-                "and is NOT in NASA POWER. Entering it adds `Monsoon_Onset_DOY` as a SOS predictor.\n\n"
-                "**Source:** [IMD Monsoon Reports](https://mausam.imd.gov.in/). Enter 0 to skip a year.")
-            mc1, mc2 = st.columns(2)
-            for i, yr in enumerate(years_in_data):
-                c = mc1 if i%2==0 else mc2
-                val = c.number_input(f"Onset DOY — {yr}", 0, 220, 0, 1, key=f"onset_{yr}",
-                                     help="Typical: 152 (Jun 1) to 196 (Jul 15). 0 = skip.")
-                if val > 0: monsoon_onset_doys[yr] = val
-            if monsoon_onset_doys:
-                st.success(f"✅ Onset dates entered for {len(monsoon_onset_doys)} seasons.")
-            else:
-                st.info("No onset dates entered. Typical SOS R² without this: 0.0–0.35 for monsoon forests.")
+        # Method explanation box
+        st.markdown(
+            '<div class="info-box"><b>📐 Method:</b> Phenological metrics were extracted using an '
+            '<b>amplitude-based threshold method</b>. NDVI was first interpolated to a regular '
+            '<b>5-day grid</b>, then smoothed with the <b>Savitzky–Golay filter</b>. '
+            'The seasonal NDVI amplitude A = NDVI_max − NDVI_min was computed per season. '
+            'SOS = first date NDVI ≥ NDVI_min + threshold% × A; '
+            'EOS = last date NDVI ≥ same threshold; '
+            'POS = maximum NDVI between SOS and EOS. '
+            'Thresholds are computed independently for each growing season.</div>',
+            unsafe_allow_html=True)
 
         # Train
-        with st.spinner("Building training features and fitting Ridge models…"):
-            train_df = make_training_features(pheno_df, met_df, all_params,
-                                              monsoon_onset_doys=monsoon_onset_doys if monsoon_onset_doys else None)
-            extra_params = all_params + (['Monsoon_Onset_DOY'] if monsoon_onset_doys else [])
+        model_label = regression_model_sel
+        with st.spinner(f"Building training features and fitting {model_label}…"):
+            train_df = make_training_features(pheno_df, met_df, all_params)
             predictor = UniversalPredictor()
-            predictor.train(train_df, extra_params, model_type=model_type_clean)
+            predictor.train(train_df, all_params, model_key=regression_model_key)
 
         st.session_state.update({
             'pheno_df':pheno_df, 'met_df':met_df, 'train_df':train_df,
-            'predictor':predictor, 'all_params':extra_params if monsoon_onset_doys else all_params,
-            'raw_params':raw_params, 'ndvi_df':ndvi_df})
+            'predictor':predictor, 'all_params':all_params,
+            'raw_params':raw_params, 'ndvi_df':ndvi_df,
+            'regression_model_key': regression_model_key})
 
         # Performance cards
         st.markdown("---")
-        st.markdown(f"### 📊 Model Performance  (LOO Cross-Validated R²)  ·  Model: `{model_type_clean}`")
+        st.markdown(f"### 📊 Model Performance  (LOO Cross-Validated R²)  —  {model_label}")
         c1, c2, c3 = st.columns(3)
 
         def _card(col, ev):
@@ -1797,18 +1721,16 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
                              unsafe_allow_html=True)
             else:
                 clr='#1B5E20' if r2>0.6 else '#E65100' if r2>0.3 else '#B71C1C'
-                hint=""
-                if ev=='SOS' and r2<0.20:
-                    hint=("<br><i style='font-size:.72rem;color:#777'>Monsoon onset (not in NASA POWER)"
-                          " is the primary SOS driver. Enter IMD dates above.</i>")
                 feats = fit.get('features', [])
                 feat_str = ', '.join(feats) if feats else '—'
                 n_feats = len(feats)
+                mkey = fit.get('model_key', 'ridge')
+                model_tag = {'ridge':'Ridge','loess':'LOESS','poly2':'Poly-2','poly3':'Poly-3'}.get(mkey, mkey)
                 col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
                              f'<h1 style="color:{clr}">{r2*100:.1f}%</h1>'
-                             f'<p>Ridge α={fit["alpha"]} | LOO | {n} seasons<br>'
+                             f'<p>{model_tag} | LOO | {n} seasons<br>'
                              f'<b>{n_feats} feature{"s" if n_feats!=1 else ""}:</b> {feat_str}<br>'
-                             f'Best |r|={fit["best_r"]:.3f} | MAE = ±{mae:.1f} d{hint}</p></div>',
+                             f'Best |r|={fit["best_r"]:.3f} | MAE = ±{mae:.1f} d</p></div>',
                              unsafe_allow_html=True)
 
         _card(c1,'SOS'); _card(c2,'POS'); _card(c3,'EOS')
@@ -1833,7 +1755,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 
         for ui_tab, ev in zip([ev_tab_sos, ev_tab_pos, ev_tab_eos], ['SOS', 'POS', 'EOS']):
             with ui_tab:
-                sm_val = season_start_mo
+                sm_val = cfg['start_month']
                 raw_eq = predictor.equation_str(ev, season_start_month=sm_val)
                 eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
                 st.markdown(f'<div class="eq-box">{eq_html}</div>', unsafe_allow_html=True)
@@ -1995,7 +1917,7 @@ The scatter plots on the right show the best single predictor vs observed event 
         ndvi_df_ss = st.session_state.get('ndvi_df')
         if met_df_ss is not None and raw_params_ss and ndvi_df_ss is not None:
             figs_list = plot_met_with_ndvi(met_df_ss, ndvi_df_ss, raw_params_ss,
-                                           season_cfg=SEASON_CONFIGS.get(season_type, cfg),
+                                           season_cfg=cfg,
                                            pheno_df=pheno_df_ss,
                                            predictor=st.session_state.get('predictor'))
             if figs_list:
@@ -2014,7 +1936,7 @@ The scatter plots on the right show the best single predictor vs observed event 
         predictor=st.session_state.get('predictor'); train_df=st.session_state.get('train_df')
         if predictor is None: st.info("Train models first (Tab 1)."); return
 
-        pred_sm = season_start_mo
+        pred_sm = cfg['start_month']
 
         # ── Build per-event feature inputs ────────────────────
         # Each event uses its OWN features — show them grouped by event
@@ -2113,8 +2035,7 @@ Defaults are pre-filled from training data means — change them to forecast fut
 
             if results:
                 # ── Enforce ecological ordering: SOS < POS < EOS ──────────
-                cfg_pred = SEASON_CONFIGS[st.session_state.get('season_type', season_type)
-                                          ] if 'season_type' in st.session_state else SEASON_CONFIGS[season_type]
+                cfg_pred = cfg
                 pheno_ss = st.session_state.get('pheno_df')
                 order_warnings = []
 
@@ -2192,586 +2113,47 @@ Defaults are pre-filled from training data means — change them to forecast fut
                 st.markdown("---")
                 st.markdown("**Equations used for this prediction:**")
                 for ev in list(results.keys()):
-                    raw_eq = predictor.equation_str(ev, season_start_month=season_start_mo)
+                    raw_eq = predictor.equation_str(ev, season_start_month=cfg['start_month'])
                     eq_line = raw_eq.split('\n')[0]   # show equation line only — clean, no feature table
                     st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b>&nbsp;&nbsp;{eq_line}</div>',
                                 unsafe_allow_html=True)
-
-    # ══ TAB 4 — FOREST GUIDE ═══════════════════════════════════
-    with tab4:
-        st.markdown("### 🌳 Indian Forest Types — Complete Phenology Field Guide")
-        st.caption("Based on: Champion & Seth (1968) · FSI State of Forest Report 2023 · "
-                   "Pascal (1988) · Rodgers & Panwar (1988) · Jha et al. (2013)")
-
-        # ── CLARIFICATION: Forest Type Classification ──────────
-        with st.expander("❓ Important: Are the forest types connected to external data? Read this first.", expanded=True):
-            st.markdown("""
-<div style='background:#FFF3E0;padding:16px 20px;border-radius:12px;border-left:6px solid #E65100;margin-bottom:8px'>
-<b>🔍 What is the forest type classification? Is it connected to external data?</b><br><br>
-
-<b>Short answer: The forest type categories are static reference information — they are NOT connected
-to any external database, API, vegetation classification model, or GIS layer.</b><br><br>
-
-<b>Detailed explanation:</b><br>
-<ul>
-<li><b>Source:</b> The 11 forest types used in this app are based on the
-<b>Champion & Seth (1968)</b> classification — <i>A Revised Survey of the Forest Types of India</i>,
-published by the Government of India Press. This is the standard authoritative reference for
-Indian forest classification, also adopted by the Forest Survey of India (FSI).</li>
-
-<li><b>What is hardcoded:</b> The season window (start/end month), default NDVI threshold percentage,
-ecological descriptions, species lists, typical NDVI peak timing, and key meteorological drivers
-are all <b>hardcoded reference values</b> derived from published literature. They are static
-interface elements that guide the user toward an appropriate season window for their site.</li>
-
-<li><b>What is NOT hardcoded:</b> The actual Pearson correlations, regression equations, R² values,
-and model coefficients are computed <b>entirely fresh from your uploaded NDVI and met CSV files</b>.
-No pre-built coefficients are used — the model trains on your data every time.</li>
-
-<li><b>No auto-assignment from NDVI:</b> When you upload NDVI data, the app does NOT automatically
-classify your vegetation type using spectral analysis, machine learning, or any lookup table.
-The user must select the forest type (or season window) manually based on their knowledge
-of the study site.</li>
-
-<li><b>No external API or database:</b> There is no call to a remote server, no GIS polygon overlay,
-no link to NASA LPDAAC, MODIS land cover products, or any other external classification service.
-The coordinate-based suggestion tool (in this version, shown in the sidebar in the v8 build)
-uses only a simple rule-based function based on known site coordinates — it is also fully
-local and hardcoded, not connected to any external service.</li>
-
-<li><b>In the current version (v10):</b> Forest type selection has been <b>removed from the
-analysis workflow</b>. You now directly set the season window (start month / end month)
-in the sidebar. The Forest Guide tab below is retained as an <b>educational reference</b>
-for users who want to understand what season window is appropriate for their site based
-on forest type literature.</li>
-</ul>
-
-<b>Summary table:</b>
-
-| Component | Hardcoded / Static? | Dynamic / From your data? |
-|---|---|---|
-| Season window (months) | ✅ Reference defaults | ✅ User-adjustable in sidebar |
-| NDVI threshold % | ✅ Reference defaults | ✅ User-adjustable slider |
-| Pearson correlations | ❌ | ✅ Computed from your CSV |
-| Regression equations | ❌ | ✅ Fitted to your CSV |
-| Forest type assignment | ❌ Not automatic | 👤 Manual by user |
-| External API / GIS link | ❌ None | ❌ None |
-</div>
-            """, unsafe_allow_html=True)
-
-        # ── TOP BANNER ────────────────────────────────────────
-        st.markdown("""
-<div style='background:linear-gradient(135deg,#E8F5E9,#C8E6C9);padding:18px 22px;
-border-radius:14px;border-left:6px solid #2E7D32;margin-bottom:18px'>
-<b>🧭 How to use this reference guide:</b><br>
-Find your site's forest type → note its typical season window (start/end month) →
-set those same months in the sidebar Season Window selector. The phenology extraction
-will then use that window with your uploaded NDVI data.
-</div>
-        """, unsafe_allow_html=True)
-
-        # ── MASTER SELECTION TABLE ────────────────────────────
-        st.markdown("#### 📋 Master Forest Type Selection Table")
-        st.markdown("*Use this table as a first filter — match your site's rainfall, elevation, and region.*")
-
-        master_table = pd.DataFrame([
-            {"Forest Type": "🍂 Tropical Dry Deciduous",
-             "Rainfall (mm)": "700–1400", "Elevation (m)": "0–700", "Leaf Behaviour": "Fully deciduous Mar–May",
-             "NDVI Range": "0.25–0.72", "NDVI Peak": "Sep–Nov", "Season": "Jun–May",
-             "Key States": "AP, Telangana, MP, Maharashtra, Karnataka, Rajasthan",
-             "Key Sites": "Tirupati, Kanha, Pench, Bandipur, Mudumalai, Ranthambore"},
-            {"Forest Type": "🌿 Tropical Moist Deciduous",
-             "Rainfall (mm)": "1000–2000", "Elevation (m)": "0–900", "Leaf Behaviour": "Mostly deciduous; brief dry period",
-             "NDVI Range": "0.35–0.72", "NDVI Peak": "Aug–Oct", "Season": "Jun–May",
-             "Key States": "Odisha, Jharkhand, MP, Chhattisgarh, Assam, West Bengal",
-             "Key Sites": "Simlipal, Kaziranga, Bastar, Cuttack, Hazaribagh"},
-            {"Forest Type": "🌲 Tropical Wet Evergreen",
-             "Rainfall (mm)": ">2000", "Elevation (m)": "0–1500", "Leaf Behaviour": "Evergreen; weak seasonality",
-             "NDVI Range": "0.55–0.82", "NDVI Peak": "Oct–Dec", "Season": "Jan–Dec",
-             "Key States": "Kerala, Karnataka, Goa, Andamans",
-             "Key Sites": "Agumbe, Silent Valley, Periyar, Coorg, Wayanad, Andaman"},
-            {"Forest Type": "🌴 Tropical Dry Evergreen",
-             "Rainfall (mm)": "800–1200 (NE monsoon)", "Elevation (m)": "0–200", "Leaf Behaviour": "Evergreen; SOS Oct–Nov",
-             "NDVI Range": "0.35–0.62", "NDVI Peak": "Dec–Jan", "Season": "Jan–Dec",
-             "Key States": "Tamil Nadu (east coast only)",
-             "Key Sites": "Pichavaram, Point Calimere, Vedanthangal"},
-            {"Forest Type": "🌵 Tropical Thorn / Scrub",
-             "Rainfall (mm)": "<700", "Elevation (m)": "0–500", "Leaf Behaviour": "Sparse; brief monsoon flush",
-             "NDVI Range": "0.08–0.45", "NDVI Peak": "Aug–Sep", "Season": "Jun–May",
-             "Key States": "Rajasthan, Gujarat, Haryana, semi-arid AP",
-             "Key Sites": "Jaisalmer, Rann of Kutch, Jodhpur, Hisar, Naliya"},
-            {"Forest Type": "🌳 Subtropical Hill Forest",
-             "Rainfall (mm)": "1500–2500", "Elevation (m)": "500–1500", "Leaf Behaviour": "Mixed; semi-evergreen",
-             "NDVI Range": "0.45–0.72", "NDVI Peak": "Jul–Sep", "Season": "Apr–Mar",
-             "Key States": "Uttarakhand (foothills), HP (foothills), NE Hill States",
-             "Key Sites": "Rajaji NP, Corbett, Manas, Darjeeling, Shillong"},
-            {"Forest Type": "🏔️ Montane Temperate",
-             "Rainfall (mm)": "1000–2500", "Elevation (m)": "1500–3000", "Leaf Behaviour": "Deciduous/conifer; snow season",
-             "NDVI Range": "0.40–0.70", "NDVI Peak": "Jul–Aug", "Season": "Apr–Nov",
-             "Key States": "Uttarakhand, Himachal Pradesh, J&K, Sikkim",
-             "Key Sites": "Kedarnath, Great Himalayan NP, Manali, Chopta"},
-            {"Forest Type": "⛰️ Alpine / Subalpine",
-             "Rainfall (mm)": "300–800 (mostly snow)", "Elevation (m)": ">3000", "Leaf Behaviour": "Herbaceous; <5 months season",
-             "NDVI Range": "0.15–0.75", "NDVI Peak": "Jul–Aug", "Season": "May–Oct",
-             "Key States": "Uttarakhand (>3000m), Ladakh, Spiti, Arunachal alpine",
-             "Key Sites": "Valley of Flowers, Spiti, Ladakh Nubra, Rohtang, Hemkund"},
-            {"Forest Type": "🌫️ Shola Montane",
-             "Rainfall (mm)": "2000–5000", "Elevation (m)": ">1500 (S India)", "Leaf Behaviour": "Evergreen; cloud forest",
-             "NDVI Range": "0.45–0.72", "NDVI Peak": "Sep–Dec", "Season": "Jan–Dec",
-             "Key States": "Tamil Nadu (Nilgiris), Kerala (Munnar), Karnataka",
-             "Key Sites": "Eravikulam, Mukurthi, Kodaikanal, Valparai"},
-            {"Forest Type": "🌊 Mangrove",
-             "Rainfall (mm)": ">1500", "Elevation (m)": "0–10 (tidal)", "Leaf Behaviour": "Evergreen; tidal ecosystem",
-             "NDVI Range": "0.40–0.68", "NDVI Peak": "Aug–Oct", "Season": "Jan–Dec",
-             "Key States": "West Bengal, Odisha, Tamil Nadu, Gujarat, Andaman",
-             "Key Sites": "Sundarbans, Bhitarkanika, Coringa, Gulf of Kutch"},
-            {"Forest Type": "🌿 NE India Moist Evergreen",
-             "Rainfall (mm)": "2000–4000+", "Elevation (m)": "50–1500", "Leaf Behaviour": "Evergreen; dual peak",
-             "NDVI Range": "0.55–0.80", "NDVI Peak": "Aug–Sep", "Season": "Jan–Dec",
-             "Key States": "Assam, Meghalaya, Nagaland, Mizoram, Arunachal, Manipur",
-             "Key Sites": "Cherrapunji, Namdapha, Dibru-Saikhowa, Nokrek, Dampa"},
-        ])
-        st.dataframe(master_table.set_index("Forest Type"), use_container_width=True)
-
-        st.markdown("---")
-
-        # ── PER-TYPE DETAILED CARDS ───────────────────────────
-        st.markdown("#### 🔍 Detailed Type Cards — Phenology, Ecology & Reference Sites")
-
-        FOREST_CARDS = {
-            "Tropical Dry Deciduous — Monsoon (Jun-May)": {
-                "icon": "🍂",
-                "headline": "India's most widespread forest — 35% of total forest cover",
-                "champion_class": "Champion & Seth Type 5 — Tropical Dry Deciduous Forest",
-                "distribution": "Deccan Plateau, Eastern Ghats, Vindhyan Range, Central India. Absent in coastal strips and NE India.",
-                "climate": "Annual rainfall 700–1400 mm, strictly seasonal. 4–6 dry months. Temperature 15–45°C.",
-                "elevation": "0–700 m (plains and gentle hills)",
-                "species_dominant": "Teak (Tectona grandis), Axlewood (Anogeissus latifolia), Indian kino (Pterocarpus marsupium)",
-                "species_assoc": "Bamboo, Terminalia spp., Madhuca indica, Diospyros melanoxylon, Boswellia serrata",
-                "phenology_sos": "Leaf flush Jun–Jul immediately after monsoon onset. SOS follows 10–20 days after first 20mm rainfall event.",
-                "phenology_pos": "Peak canopy Sep–Nov after monsoon withdrawal. Max NDVI 0.60–0.72 in October.",
-                "phenology_eos": "Leaf fall Dec–Jan, complete by Mar–Apr. Teak begins senescence as soil moisture drops.",
-                "phenology_los": "260–300 days. High inter-annual variability (±15–25 days) driven by monsoon onset timing.",
-                "ndvi_signature": "Large NDVI amplitude (0.40–0.50). Clear single peak Sep–Nov. Near-zero NDVI Mar–May.",
-                "key_met_drivers": "PRECTOTCORR (onset timing → SOS), GWETTOP (soil moisture → leaf flush speed), T2M_MIN (bud-break warmth)",
-                "ref_sites": [
-                    ("Tirupati / Seshachalam", "13.63°N 79.40°E", "200m", "Classic Andhra dry deciduous"),
-                    ("Kanha NP (MP)", "22.33°N 80.61°E", "520m", "Sal + teak mixed"),
-                    ("Bandipur NP (Karnataka)", "11.67°N 76.63°E", "800m", "Teak + axlewood"),
-                    ("Ranthambore NP (Rajasthan)", "26.01°N 76.50°E", "350m", "Dry deciduous with dhok"),
-                    ("Mudumalai (TN)", "11.57°N 76.57°E", "1000m", "Transitional dry deciduous"),
-                    ("Tadoba (Maharashtra)", "20.22°N 79.33°E", "200m", "Central India type"),
-                ],
-                "literature": ["Champion HG & Seth SK (1968). A Revised Survey of the Forest Types of India. Govt. of India.",
-                               "Singh KP & Kushwaha CP (2005). Monsoon-driven phenology of tropical dry deciduous forests. Current Science 89(6):964-975.",
-                               "Prabakaran C et al. (2013). Phenological changes in tropical dry deciduous forests. Tropical Ecology 54(2):225-234."],
-                "common_mistake": "❌ Do NOT select this type for forests that stay green all year — those are Tropical Moist Deciduous or Wet Evergreen.",
-                "color": "#E8F5E9", "border": "#2E7D32"
-            },
-            "Tropical Moist Deciduous — Monsoon (Jun-May)": {
-                "icon": "🌿",
-                "headline": "Sal-dominant forests — India's richest timber zone",
-                "champion_class": "Champion & Seth Type 3 — Tropical Moist Deciduous Forest",
-                "distribution": "Sub-Himalayan foothills, NE India plains, Odisha–Jharkhand–Bengal belt, parts of W Ghats east slopes.",
-                "climate": "Annual rainfall 1000–2000 mm. 3–4 dry months. Temperature 10–40°C.",
-                "elevation": "0–900 m",
-                "species_dominant": "Sal (Shorea robusta), Teak (in south), Indian laurel (Terminalia tomentosa)",
-                "species_assoc": "Rosewood (Dalbergia latifolia), Bamboo, Sissoo (Dalbergia sissoo), Hollock, Gamari",
-                "phenology_sos": "Leaf flush Jun–Jul (monsoon onset). Sal also shows a pre-monsoon leaf exchange (Apr–May new leaves before old fall).",
-                "phenology_pos": "Peak Sep–Oct. Sal-dominant stands reach NDVI 0.60–0.72.",
-                "phenology_eos": "Gradual senescence Nov–Mar. Complete leaf fall Apr–May. Slower than dry deciduous.",
-                "phenology_los": "270–310 days. Less variable than dry deciduous due to higher rainfall reliability.",
-                "ndvi_signature": "Amplitude 0.30–0.45. Broader peak than dry deciduous. Some green retained Dec–Jan in moister sites.",
-                "key_met_drivers": "RH2M (humidity rise signals monsoon arrival → SOS), PRECTOTCORR (intensity → POS), GWETROOT (deep reserves → EOS timing)",
-                "ref_sites": [
-                    ("Simlipal (Odisha)", "21.83°N 86.50°E", "900m", "Classic sal-moist deciduous"),
-                    ("Kaziranga (Assam)", "26.58°N 93.17°E", "80m", "Grassland-moist deciduous mosaic"),
-                    ("Bastar (Chhattisgarh)", "19.10°N 81.95°E", "560m", "Sal + bamboo"),
-                    ("Cuttack forests (Odisha)", "20.46°N 85.88°E", "30m", "Coastal moist deciduous"),
-                    ("Hazaribagh (Jharkhand)", "23.99°N 85.37°E", "600m", "Plateau sal forests"),
-                    ("Dehing Patkai (Assam)", "27.30°N 95.60°E", "120m", "Eastern sal forests"),
-                ],
-                "literature": ["Pandey CB & Singh JS (1992). Rainfall and soil water effects on decomposition. Vegetatio 99-100:291-305.",
-                               "Sagar R et al. (2008). Gradients of tree diversity and composition in Sal-dominated forests. Forest Ecology & Management 255:3832-3840."],
-                "common_mistake": "❌ Do NOT confuse with Wet Evergreen. Moist deciduous sheds leaves fully in Apr–May. If your site stays green all year, use Wet Evergreen.",
-                "color": "#E8F5E9", "border": "#388E3C"
-            },
-            "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)": {
-                "icon": "🌲",
-                "headline": "Highest NDVI in India — Western Ghats & Andaman rainforests",
-                "champion_class": "Champion & Seth Type 1A & 1B — Tropical Wet Evergreen & Semi-Evergreen",
-                "distribution": "Western Ghats (0–1500m), Andaman & Nicobar, NE India lowland pockets.",
-                "climate": "Annual rainfall >2000 mm (Agumbe receives ~7500 mm). No true dry season. Temperature 20–35°C.",
-                "elevation": "0–1500 m (below shola elevation)",
-                "species_dominant": "Dipterocarpus spp., Hopea spp., Mesua ferrea, Calophyllum spp.",
-                "species_assoc": "Bamboo, Rattan canes, Myristica, Garcinia, Artocarpus, Canarium",
-                "phenology_sos": "No dormant period. Weak SOS signal Jun–Jul as SW monsoon maximises canopy. Some species flush Feb–Apr in pre-monsoon.",
-                "phenology_pos": "Peak NDVI Oct–Dec after monsoon. Values 0.65–0.82 — highest of any Indian forest type.",
-                "phenology_eos": "Very weak EOS. Slight NDVI dip Mar–May during brief dry spell.",
-                "phenology_los": ">300 days; near 365 in the highest-rainfall zones like Agumbe.",
-                "ndvi_signature": "Low amplitude (0.10–0.25). High baseline NDVI (>0.55 even in dry season). Dual peaks possible (SW + NE monsoon).",
-                "key_met_drivers": "RH2M (near-constant humidity → weak SOS), ALLSKY_SFC_SW_DWN (radiation limits POS), GWETROOT (deep moisture reserve)",
-                "ref_sites": [
-                    ("Agumbe (Karnataka)", "13.51°N 75.10°E", "640m", "India's 2nd highest rainfall site — ~7500mm/yr"),
-                    ("Silent Valley (Kerala)", "11.08°N 76.47°E", "900m", "Undisturbed Gondwana relict"),
-                    ("Periyar TR (Kerala)", "9.58°N 77.22°E", "900m", "W Ghats wet evergreen"),
-                    ("Coorg / Kodagu (Karnataka)", "12.33°N 75.83°E", "900m", "Coffee+wet evergreen mosaic"),
-                    ("Wayanad (Kerala)", "11.60°N 76.08°E", "750m", "High biodiversity belt"),
-                    ("Andaman (Port Blair)", "11.67°N 92.73°E", "10m", "Island rainforest"),
-                ],
-                "literature": ["Pascal JP (1988). Wet Evergreen Forests of the Western Ghats of India. Institut Français de Pondichéry.",
-                               "Jha CS et al. (2013). Biodiversity characterization using satellite remote sensing. Current Science 105(6):795-802.",
-                               "Meher-Homji VM (1991). History of forests & climate. Tropical Forests. Delhi."],
-                "common_mistake": "❌ Agumbe (13.51°N 75.10°E, 640m) is WET EVERGREEN — NOT Shola. Shola requires >1500m elevation in South India.",
-                "color": "#E0F2F1", "border": "#00695C"
-            },
-            "Tropical Dry Evergreen (Jan-Dec)": {
-                "icon": "🌴",
-                "headline": "NE monsoon-driven coastal forest — opposite phenology to rest of India",
-                "champion_class": "Champion & Seth Type 6 — Tropical Dry Evergreen Forest",
-                "distribution": "Tamil Nadu east coast strip (Coromandel Coast), very localised.",
-                "climate": "Annual rainfall ~1000 mm but dominated by NE monsoon (Oct–Dec). Long dry summer (Apr–Sep).",
-                "elevation": "0–200 m (coastal plains only)",
-                "species_dominant": "Manilkara hexandra, Memecylon umbellatum, Diospyros ebenum",
-                "species_assoc": "Eugenia, Canthium, Cassine, Tarenna, Ixora",
-                "phenology_sos": "SOS Oct–Nov — driven by NE monsoon. Opposite to all other Indian forests.",
-                "phenology_pos": "Peak Dec–Jan following NE monsoon.",
-                "phenology_eos": "Senescence Mar–Apr. May–Sep: stressed but not fully deciduous.",
-                "phenology_los": "~180–220 days.",
-                "ndvi_signature": "Moderate amplitude. Peak Dec–Jan (very distinctive — no other forest peaks in winter).",
-                "key_met_drivers": "PRECTOTCORR (Oct–Dec NE monsoon → SOS), T2M (temperature modulates pace), RH2M",
-                "ref_sites": [
-                    ("Pichavaram (Tamil Nadu)", "11.43°N 79.78°E", "5m", "Dry evergreen + mangrove mosaic"),
-                    ("Point Calimere WLS", "10.30°N 79.85°E", "5m", "Pure dry evergreen"),
-                    ("Vedanthangal (TN)", "12.52°N 79.87°E", "30m", "Dry evergreen with wetland"),
-                ],
-                "literature": ["Parthasarathy N et al. (1992). Tropical dry evergreen forests of Tamil Nadu. Journal of Tropical Ecology 8:153-163."],
-                "common_mistake": "❌ Only select this for Tamil Nadu east coast sites. Do NOT use for Andhra or Karnataka coasts which are moist deciduous.",
-                "color": "#FFF8E1", "border": "#F9A825"
-            },
-            "Tropical Thorn Forest / Scrub (Jun-May)": {
-                "icon": "🌵",
-                "headline": "Arid scrubland — shortest growing season in India",
-                "champion_class": "Champion & Seth Type 6B — Tropical Thorn Forest",
-                "distribution": "Rajasthan (Thar Desert), Gujarat (Rann of Kutch), semi-arid Deccan fringes, Haryana plains.",
-                "climate": "Annual rainfall <700 mm. 7–8 dry months. Temperature 5–48°C (extreme range).",
-                "elevation": "0–500 m",
-                "species_dominant": "Khejri (Prosopis cineraria), Babul (Acacia nilotica), Rohira (Tecomella undulata)",
-                "species_assoc": "Euphorbia caducifolia, Capparis decidua, Ziziphus nummularia, Calligonum polygonoides",
-                "phenology_sos": "SOS follows first significant monsoon rainfall (>15–20 mm) Jul–Aug. Very sharp onset.",
-                "phenology_pos": "Brief peak Aug–Sep. NDVI rarely exceeds 0.45. Very low baseline (<0.12).",
-                "phenology_eos": "Rapid senescence Oct–Nov within 4–6 weeks of monsoon withdrawal.",
-                "phenology_los": "80–130 days. Most variable in India (±30 days).",
-                "ndvi_signature": "Very low baseline (0.08–0.15). Small brief peak. Large amplitude relative to base but small absolute values.",
-                "key_met_drivers": "PRECTOTCORR (single monsoon pulse = entire season driver), GWETTOP (shallow roots, surface moisture controls all)",
-                "ref_sites": [
-                    ("Jaisalmer (Rajasthan)", "26.91°N 70.91°E", "220m", "Core Thar Desert thorn scrub"),
-                    ("Rann of Kutch (Gujarat)", "23.75°N 70.22°E", "30m", "Salt flat + scrub mosaic"),
-                    ("Jodhpur (Rajasthan)", "26.29°N 73.02°E", "231m", "Desert thorn forest"),
-                    ("Hisar (Haryana)", "29.15°N 75.72°E", "215m", "Semi-arid agricultural fringe"),
-                ],
-                "literature": ["Mertia RS et al. (2010). Plant phenology in Indian arid zone. Indian Journal of Arid Land Research 24(1):1-8."],
-                "common_mistake": "❌ Do NOT use for Rajasthan sites that receive >800mm rainfall (like Mt Abu area) — those are Subtropical Hill Forest.",
-                "color": "#FFF3E0", "border": "#E65100"
-            },
-            "Subtropical Broadleaved Hill Forest (Apr-Mar)": {
-                "icon": "🌳",
-                "headline": "Himalayan foothills & NE hill ranges — temperature + monsoon co-driven",
-                "champion_class": "Champion & Seth Type 9 — Subtropical Broadleaved Hill Forest",
-                "distribution": "Himalayan foothills (Shiwalik, outer ranges) 500–1500m; NE hill states.",
-                "climate": "Rainfall 1500–2500 mm. Distinct winter (3–4 months). Temperature 5–38°C.",
-                "elevation": "500–1500 m",
-                "species_dominant": "Oak (Quercus incana, Q. leucotrichophora), Chestnut, Alder (Alnus nepalensis)",
-                "species_assoc": "Rhododendron arboreum, Sal (lower slopes), Adina cordifolia, Schima wallichii",
-                "phenology_sos": "Leaf flush Apr–May as temperature rises above ~10°C. Rainfall not primary driver.",
-                "phenology_pos": "Peak canopy Jul–Sep during monsoon. NDVI 0.55–0.72.",
-                "phenology_eos": "Senescence Oct–Dec. Winter leaf fall Jan–Mar in deciduous oaks.",
-                "phenology_los": "200–240 days.",
-                "ndvi_signature": "Moderate amplitude. Clear spring SOS (Apr–May) visible. Monsoon peak. Autumn decline.",
-                "key_met_drivers": "T2M_MIN (spring warming → SOS), GDD_10 (heat accumulation → POS), PRECTOTCORR (monsoon sustains canopy)",
-                "ref_sites": [
-                    ("Rajaji NP (Uttarakhand)", "30.00°N 78.17°E", "900m", "Shiwalik subtropical forest"),
-                    ("Jim Corbett (Uttarakhand)", "29.53°N 79.07°E", "500m", "Foothills subtropical"),
-                    ("Manas (Assam foothills)", "26.67°N 90.73°E", "150m", "NE foothills"),
-                    ("Darjeeling forests", "27.04°N 88.27°E", "1200m", "Eastern Himalayan foothills"),
-                    ("Shillong (Meghalaya)", "25.58°N 91.88°E", "1400m", "NE hill subtropical"),
-                ],
-                "literature": ["Jeganathan C et al. (2014). Leaf phenology in Himalayan forest ecosystems. Forest Ecology & Management 323:153-162."],
-                "common_mistake": "❌ Do NOT use for sites above 1500m in Himalayas — those are Montane Temperate.",
-                "color": "#F1F8E9", "border": "#558B2F"
-            },
-            "Montane Temperate Forest (Apr-Nov)": {
-                "icon": "🏔️",
-                "headline": "Himalayan temperate zone — snowmelt + temperature controlled",
-                "champion_class": "Champion & Seth Type 11 — Himalayan Moist Temperate Forest",
-                "distribution": "Western and Eastern Himalayas 1500–3000m. Also Sikkim and Arunachal upper zones.",
-                "climate": "Rainfall 1000–2500 mm. Heavy snowfall Dec–Mar. Temperature -15 to 30°C.",
-                "elevation": "1500–3000 m",
-                "species_dominant": "Deodar (Cedrus deodara), Oak (Quercus semecarpifolia), Blue pine (Pinus wallichiana)",
-                "species_assoc": "Maple (Acer), Silver fir (Abies), Birch (Betula), Rhododendron, Taxus",
-                "phenology_sos": "Snowmelt triggers soil warming → bud burst Apr–May at 2000m, May–Jun at 2800m. SOS advances ~6-8 days per +1°C.",
-                "phenology_pos": "Peak Jul–Aug. Conifer NDVI 0.55–0.70. Broadleaf NDVI 0.60–0.75.",
-                "phenology_eos": "Autumn senescence Sep–Nov. Larch/deciduous oak turn gold then drop.",
-                "phenology_los": "150–200 days. Highly sensitive to temperature — best climate indicator.",
-                "ndvi_signature": "Clear spring rise (Apr–May). Single summer peak. Autumn decline to low winter values. Conifers maintain moderate NDVI in winter.",
-                "key_met_drivers": "T2M_MIN (snowmelt threshold → SOS), GDD_10 (growing season heat → POS), ALLSKY_SFC_SW_DWN (radiation at altitude)",
-                "ref_sites": [
-                    ("Kedarnath WLS", "30.73°N 79.07°E", "2500m", "Classic Himalayan temperate"),
-                    ("Great Himalayan NP (HP)", "31.75°N 77.60°E", "2500m", "Deodar + oak zone"),
-                    ("Manali area (HP)", "32.23°N 77.19°E", "2050m", "Deodar + pine"),
-                    ("Chopta (Uttarakhand)", "30.46°N 79.25°E", "2680m", "Bugyals transition zone"),
-                    ("Tirthan Valley (HP)", "31.67°N 77.45°E", "1700m", "Lower montane temperate"),
-                ],
-                "literature": ["Sharma S & Chaturvedi RK (2015). Temperature sensitivity of Himalayan forest phenology. Indian Forester 141(6):617-625.",
-                               "Misra R et al. (2021). NDVI phenology of Himalayan forests. Remote Sensing Applications 22:100495."],
-                "common_mistake": "❌ Do NOT confuse with Alpine. Montane Temperate has TREES (oak, deodar, pine). Alpine has meadows and shrubs.",
-                "color": "#E3F2FD", "border": "#1565C0"
-            },
-            "Alpine / Subalpine Forest and Meadow (May-Oct)": {
-                "icon": "⛰️",
-                "headline": "Roof of India — shortest season, highest climate sensitivity",
-                "champion_class": "Champion & Seth Type 12 — Sub-Alpine Forest; Bugyals (Alpine meadows)",
-                "distribution": "Himalayas >3000m: Uttarakhand, Ladakh, Spiti, Arunachal Pradesh alpine zone.",
-                "climate": "Rainfall 300–800mm (mostly snow). 8–9 month snow/frozen period. Temperature -30 to 20°C.",
-                "elevation": ">3000 m",
-                "species_dominant": "Juniper (Juniperus), Silver fir (Abies spectabilis), Birch (Betula utilis), Alpine meadow grasses",
-                "species_assoc": "Rhododendron campanulatum, Potentilla, Primula, Saxifraga, sedges (Carex)",
-                "phenology_sos": "Controlled almost entirely by snowmelt timing. Typical: May 20 – Jun 20. ±1 week inter-annual range. Best SOS predictor in India.",
-                "phenology_pos": "Peak Jul–Aug. Alpine meadow (bugyal) NDVI 0.55–0.75. Very brief — 6–8 weeks.",
-                "phenology_eos": "First frost triggers rapid senescence. Sep–Oct depending on elevation.",
-                "phenology_los": "Shortest in India: 90–140 days. Advances ~7–10 days per +1°C warming.",
-                "ndvi_signature": "Near-zero (0.05–0.15) for 7+ months. Then sharp rise to peak. Symmetric bell curve. Very clean signal.",
-                "key_met_drivers": "T2M_MIN (snowmelt → SOS; r typically 0.85–0.95), ALLSKY_SFC_SW_DWN (radiation → POS), GDD_5 (cold-adapted base)",
-                "ref_sites": [
-                    ("Valley of Flowers (UK)", "30.73°N 79.60°E", "3600m", "UNESCO World Heritage Alpine meadow"),
-                    ("Spiti / Pin Valley (HP)", "31.96°N 78.16°E", "3800m", "Cold desert alpine"),
-                    ("Ladakh / Nubra Valley", "34.63°N 77.43°E", "3100m", "Trans-Himalayan"),
-                    ("Hemkund Sahib (UK)", "30.70°N 79.65°E", "4320m", "High alpine meadow"),
-                    ("Rohtang Pass (HP)", "32.37°N 77.24°E", "3980m", "Subalpine-alpine transition"),
-                ],
-                "literature": ["Panwar P et al. (2014). Alpine vegetation phenology and climate. Current Science 107(11):1816-1821.",
-                               "Bhatt US et al. (2010). Circumpolar Arctic Tundra Vegetation Change. Remote Sensing 2:1856-1881.",
-                               "Sharma S (2024). Valley of Flowers phenology. Indian Forester (in press)."],
-                "common_mistake": "❌ If your site has TREES and is 2000–3000m, choose Montane Temperate. Alpine is for open meadows / sparse shrubs above treeline.",
-                "color": "#EDE7F6", "border": "#4527A0"
-            },
-            "Shola Forest — Southern Montane (Jan-Dec)": {
-                "icon": "🌫️",
-                "headline": "Cloud forest islands — Nilgiris, Munnar, Kodaikanal ONLY (>1500m elevation)",
-                "champion_class": "Champion & Seth Type 16 — Southern Montane Wet Temperate Forest",
-                "distribution": "High elevations (>1500m) of Western Ghats: Nilgiris, Anamalais, Palani Hills, Brahmagiri. NOT lowland W Ghats.",
-                "climate": "Rainfall 2000–5000 mm from BOTH SW and NE monsoons. Persistent cloud cover and mist. Temperature 5–22°C.",
-                "elevation": ">1500 m (Southern India ONLY)",
-                "species_dominant": "Michelia nilagirica, Syzygium calophyllifolium, Rhododendron nilagiricum, Elaeocarpus recurvatus",
-                "species_assoc": "Ilex denticulata, Schefflera, Viburnum, Meliosma, Styrax",
-                "phenology_sos": "Two minor green-up pulses (SW monsoon Jun–Sep and NE monsoon Oct–Dec). Weak SOS signal. High baseline NDVI.",
-                "phenology_pos": "Dual NDVI peaks: Sep and Dec. Peak NDVI 0.60–0.72. Forest-grassland (Shola-Grass) mosaic creates complex signal.",
-                "phenology_eos": "Brief dry period Feb–May. Never fully deciduous.",
-                "phenology_los": "Effectively year-round (>320 days).",
-                "ndvi_signature": "High baseline with very low amplitude. Dual weak peaks. If you see a single large seasonal peak, this is NOT shola.",
-                "key_met_drivers": "RH2M (cloud forest humidity controls canopy), ALLSKY_SFC_SW_DWN (cloud cover limits sunlight → POS), GWETROOT",
-                "ref_sites": [
-                    ("Eravikulam NP (Kerala)", "10.17°N 77.05°E", "2100m", "Classic Shola + Nilgiri Tahr habitat"),
-                    ("Mukurthi NP (Nilgiris)", "11.23°N 76.52°E", "2600m", "High Shola plateau"),
-                    ("Kodaikanal (Tamil Nadu)", "10.24°N 77.49°E", "2133m", "Palani Hills Shola"),
-                    ("Valparai (Tamil Nadu)", "10.33°N 76.96°E", "1800m", "Anamalai Shola"),
-                    ("Devikulam (Kerala)", "10.02°N 77.11°E", "1800m", "Idukki Shola"),
-                ],
-                "literature": ["Sukumar R et al. (1995). Climate change and its impact on tropical montane ecosystems in Southern India. Current Science 69(10):812-815.",
-                               "Krishnaswamy J et al. (2014). Western Ghats & Climate Change. ATREE Report.",
-                               "Bali A et al. (2007). Shola forest bird communities. Biotropica 39(5):672-681."],
-                "common_mistake": "❌ CRITICAL: Agumbe (13.51°N 75.10°E, 640m) is NOT Shola — it is Tropical Wet Evergreen. Shola MUST be >1500m in South India.",
-                "color": "#F3E5F5", "border": "#7B1FA2"
-            },
-            "Mangrove Forest (Jan-Dec)": {
-                "icon": "🌊",
-                "headline": "Tidal ecosystem — salt-tolerant canopy with monsoon NDVI flush",
-                "champion_class": "Champion & Seth Type 4 — Littoral and Swamp Forests",
-                "distribution": "Tidal mudflats: Sundarbans (W Bengal), Bhitarkanika (Odisha), Coringa (AP), Pichavaram (TN), Gulf of Kutch, Andamans.",
-                "climate": "Controlled by tidal inundation. Rainfall >1500mm. Temperature 20–35°C. Saline soil.",
-                "elevation": "0–10 m (tidal zone only)",
-                "species_dominant": "Sundri (Heritiera fomes), Gewa (Excoecaria agallocha), Rhizophora apiculata, Avicennia marina",
-                "species_assoc": "Bruguiera, Sonneratia, Ceriops, Aegiceras, Nypa fruticans",
-                "phenology_sos": "No strong dormancy. Monsoon flush Jun–Aug produces detectable NDVI increase from tidal freshwater input.",
-                "phenology_pos": "Peak Sep–Oct. Sundarbans NDVI 0.55–0.68.",
-                "phenology_eos": "Minor dry-season senescence Dec–Feb in upper canopy.",
-                "phenology_los": "Near year-round (>300 days).",
-                "ndvi_signature": "Moderate baseline (0.40–0.55). Low amplitude. Monsoon peak. Distinctive low EOS dip in winter.",
-                "key_met_drivers": "PRECTOTCORR (monsoon freshwater → canopy flush), RH2M (humidity sustains evergreen), T2M",
-                "ref_sites": [
-                    ("Sundarbans (W Bengal)", "21.95°N 88.88°E", "5m", "World's largest mangrove"),
-                    ("Bhitarkanika (Odisha)", "20.73°N 86.88°E", "5m", "2nd largest in India"),
-                    ("Coringa WLS (AP)", "16.72°N 82.25°E", "2m", "2nd largest in AP"),
-                    ("Gulf of Kutch (Gujarat)", "22.60°N 69.80°E", "2m", "Arid zone mangrove"),
-                ],
-                "literature": ["Dutta D et al. (2016). Mangrove phenology from MODIS. Journal of Earth System Science 125(4):819-831.",
-                               "Giri C et al. (2011). Status of mangroves worldwide. Global Ecology and Biogeography 20(1):154-159."],
-                "common_mistake": "❌ Only use for tidal mudflat sites. Coastal forests on dry ground are Tropical Dry Deciduous or Dry Evergreen.",
-                "color": "#E0F7FA", "border": "#00838F"
-            },
-            "NE India Moist Evergreen (Jan-Dec)": {
-                "icon": "🌿",
-                "headline": "Highest mean NDVI in India — world's wettest evergreen forests",
-                "champion_class": "Champion & Seth Type 1A (Eastern variant) — Tropical Wet Evergreen",
-                "distribution": "All NE states (Assam, Meghalaya, Nagaland, Manipur, Mizoram, Arunachal) + sub-Himalayan W Bengal.",
-                "climate": "Annual rainfall 2000–4000 mm. Cherrapunji receives 11,000 mm. No real dry season. Temperature 10–35°C.",
-                "elevation": "50–1500 m (NE plains and lower hills)",
-                "species_dominant": "Dipterocarpus macrocarpus, Shorea assamica, Mesua ferrea (Nahar), Dillenia indica",
-                "species_assoc": "Bamboo (Bambusa tulda), Rattan, Cymbidium orchids, tree ferns, Livistona palm",
-                "phenology_sos": "Pre-monsoon flush Mar–Apr + second green-up during SW monsoon Jun–Sep. Dual-peak pattern.",
-                "phenology_pos": "Peak Aug–Sep. Highest mean NDVI in India (0.69–0.80). Forest maturity Jul–Sep.",
-                "phenology_eos": "Very weak senescence Nov–Dec in upper canopy only. NE monsoon maintains moisture.",
-                "phenology_los": "Effectively year-round. LOS > 350 days in most sites.",
-                "ndvi_signature": "Very high baseline (>0.55). Low amplitude. Dual peaks (Mar–Apr pre-monsoon + Aug–Sep monsoon). Distinctive pattern.",
-                "key_met_drivers": "PRECTOTCORR (world's highest rainfall controls POS), RH2M (year-round humidity), T2M (temperature fine-tunes dual-peak)",
-                "ref_sites": [
-                    ("Cherrapunji (Meghalaya)", "25.27°N 91.73°E", "1300m", "World's wettest place — 11,000 mm/yr"),
-                    ("Namdapha NP (Arunachal)", "27.40°N 96.38°E", "500m", "Richest NE forest"),
-                    ("Dibru-Saikhowa (Assam)", "27.67°N 95.22°E", "110m", "Floodplain evergreen"),
-                    ("Nokrek NP (Meghalaya)", "25.50°N 90.47°E", "1400m", "Citrus diversity centre"),
-                    ("Dampa TR (Mizoram)", "23.47°N 92.67°E", "900m", "SW NE India evergreen"),
-                ],
-                "literature": ["Jha CS et al. (2013). Biodiversity characterization at landscape level using satellite remote sensing. Current Science 105(6):795-802.",
-                               "Singh JS (2002). The biodiversity crisis: A multifaceted review. Current Science 82(6):638-647."],
-                "common_mistake": "❌ NE India Moist Evergreen (lowland) is different from NE hill forests >1500m (use Subtropical Hill Forest for those).",
-                "color": "#E8F5E9", "border": "#1B5E20"
-            },
-        }
-
-        # Display cards
-        for forest_key, card in FOREST_CARDS.items():
-            cfg_ref = SEASON_CONFIGS.get(forest_key, {})
-            window = f"{SM_NAME[cfg_ref.get('start_month',1)]} → {SM_NAME[cfg_ref.get('end_month',12)]}"
-            with st.expander(
-                f"{card['icon']}  **{forest_key.split('—')[0].strip()}**  ·  "
-                f"{card['headline']}", expanded=False):
-
-                # Header banner
-                st.markdown(
-                    f"<div style='background:{card['color']};padding:10px 14px;border-radius:8px;"
-                    f"border-left:5px solid {card['border']};margin-bottom:10px'>"
-                    f"<b>{card['champion_class']}</b></div>",
-                    unsafe_allow_html=True)
-
-                # Metrics row
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Season Window", window)
-                m2.metric("Rainfall", cfg_ref.get('rainfall', ''))
-                m3.metric("Elevation", card['elevation'].split('(')[0].strip())
-                m4.metric("NDVI Peak", cfg_ref.get('ndvi_peak', ''))
-                m5.metric("NDVI Range", card['ndvi_signature'].split('.')[0].split('(')[-1].split(')')[0] if '(' in card['ndvi_signature'] else "—")
-
-                # Distribution + Climate
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown("**📍 Distribution**")
-                    st.caption(card['distribution'])
-                    st.markdown("**🌡️ Climate**")
-                    st.caption(card['climate'])
-                with col_b:
-                    st.markdown("**🌳 Dominant Species**")
-                    st.caption(card['species_dominant'])
-                    st.markdown("**🌿 Associated Species**")
-                    st.caption(card['species_assoc'])
-
-                st.markdown("---")
-
-                # Phenology
-                st.markdown("**📅 Phenological Behaviour**")
-                p1, p2, p3, p4 = st.columns(4)
-                with p1:
-                    st.markdown("🌱 **SOS**")
-                    st.caption(card['phenology_sos'])
-                with p2:
-                    st.markdown("🌿 **POS**")
-                    st.caption(card['phenology_pos'])
-                with p3:
-                    st.markdown("🍂 **EOS**")
-                    st.caption(card['phenology_eos'])
-                with p4:
-                    st.markdown("📏 **Season Length**")
-                    st.caption(card['phenology_los'])
-
-                # NDVI + Met
-                st.markdown(f"**📊 NDVI Signature:** {card['ndvi_signature']}")
-                st.markdown(f"**🔑 Key met drivers:** `{card['key_met_drivers']}`")
-
-                st.markdown("---")
-
-                # Reference sites table
-                st.markdown("**📌 Reference Sites with Coordinates**")
-                ref_df = pd.DataFrame(card['ref_sites'],
-                                      columns=['Site', 'Coordinates', 'Elevation', 'Notes'])
-                st.dataframe(ref_df, use_container_width=True, hide_index=True)
-
-                # Common mistake warning
-                st.markdown(
-                    f"<div style='background:#FFEBEE;padding:10px 14px;border-radius:8px;"
-                    f"border-left:5px solid #C62828;margin:8px 0;font-size:0.85rem'>"
-                    f"{card['common_mistake']}</div>",
-                    unsafe_allow_html=True)
-
-                # Literature
-                if card.get('literature'):
-                    with st.expander("📚 Key references", expanded=False):
-                        for ref in card['literature']:
-                            st.markdown(f"- {ref}")
-
-        # ── PHENOLOGY CALENDAR ────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 📅 Phenology Calendar — All Forest Types at a Glance")
-        st.markdown("*Month when each event typically occurs. SOS = first green-up · POS = peak · EOS = senescence end*")
-
-        cal_data = {
-            "Forest Type":        ["🍂 Dry Deciduous", "🌿 Moist Deciduous", "🌲 Wet Evergreen",
-                                   "🌴 Dry Evergreen", "🌵 Thorn/Scrub", "🌳 Subtrop Hill",
-                                   "🏔️ Montane Temp", "⛰️ Alpine", "🌫️ Shola", "🌊 Mangrove", "🌿 NE Evergreen"],
-            "SOS":  ["Jun–Jul","Jun–Jul","May–Jun","Oct–Nov","Jul–Aug","Apr–May","Apr–May","May–Jun","Jun+Oct","Jun–Jul","Mar–Apr"],
-            "POS":  ["Sep–Nov","Sep–Oct","Oct–Dec","Dec–Jan","Aug–Sep","Jul–Sep","Jul–Aug","Jul–Aug","Sep+Dec","Sep–Oct","Aug–Sep"],
-            "EOS":  ["Mar–Apr","Mar–Apr","Mar–Apr","Mar–Apr","Oct–Nov","Oct–Dec","Sep–Nov","Sep–Oct","Feb–Apr","Jan–Feb","Nov–Dec"],
-            "LOS (days)":["260–300","270–310",">300","180–220","80–130","200–240","150–200","90–140",">320",">300",">350"],
-        }
-        cal_df = pd.DataFrame(cal_data).set_index("Forest Type")
-        st.dataframe(cal_df, use_container_width=True)
-
-        st.markdown("---")
-        st.markdown("""
-#### 📐 Technical Definitions
-
-**SOS (Start of Season)** = first date smoothed NDVI rises above: *base NDVI + threshold% × (peak − base)*  
-**POS (Peak of Season)** = date of maximum smoothed NDVI within the growing season window  
-**EOS (End of Season)** = last date smoothed NDVI remains above the same threshold after POS  
-**LOS (Length of Season)** = calendar days from SOS to EOS (cross-year seasons handled correctly)  
-**Target DOY** = season-relative days (days since season start month) — used in regression equations
-
-**Threshold recommendation by forest type:**
-- Thorn / Dry Deciduous / Alpine: 25–35% (high contrast)
-- Moist Deciduous / Subtropical: 20–30%
-- Wet Evergreen / Shola / Mangrove / NE India: 10–20% (low amplitude; lower threshold needed)
-        """)
 
     # ══ TAB 5 — TECHNICAL GUIDE ════════════════════════════════
     with tab5:
         st.markdown(f"""
 ### 📖 Technical Guide
 
+#### Phenology Extraction Method
+
+Phenological metrics are extracted using the **NDVI Amplitude-Based Threshold Method**:
+
+1. **5-day interpolation** — raw NDVI observations are interpolated to a regular 5-day grid to fill temporal gaps.
+2. **Savitzky–Golay smoothing** — adaptive window (≈5% of series length, min 7 points) reduces noise.
+3. **Per-season amplitude** — for each growing season independently: A = NDVI_max − NDVI_min.
+4. **Threshold** = NDVI_min + threshold% × A  (default 10%, adjustable 5–30%).
+5. **SOS** = first 5-day step when smoothed NDVI ≥ threshold (after dormancy minimum).
+6. **EOS** = last 5-day step when smoothed NDVI ≥ threshold (before next dormancy minimum).
+7. **POS** = maximum smoothed NDVI value between SOS and EOS.
+
+Thresholds are computed **independently per season** — inter-annual amplitude variability does not bias detection.
+
 #### Model Architecture
 
 | Component | Detail |
 |-----------|--------|
 | Feature selection | Pearson |r| ≥ {MIN_CORR_THRESHOLD} required |
-| Features per model | **1** (n < 10 seasons rule) |
-| Regression | **Ridge** (L2, α auto-tuned via RidgeCV LOO) |
+| Regression options | **Ridge** (L2, RidgeCV), **LOESS** (locally weighted), **Polynomial deg 2/3** |
 | Cross-validation | **Leave-One-Out** (unbiased for small samples) |
-| Phenology extraction | NDVI amplitude threshold |
-| SOS enhancement | IMD monsoon onset DOY (optional) |
+| Phenology extraction | NDVI amplitude threshold (per-season) |
 
-#### Why One Feature Per Model?
+#### Available Regression Models
 
-With n = 8 seasons, reliable predictors ≤ n/8 = 1. Adding a second feature with n = 8
-requires both features to be strongly correlated with the target AND uncorrelated with each other
-— almost never true in climate data with this sample size. The |r| ≥ {MIN_CORR_THRESHOLD} threshold
-ensures only genuine climate signals enter the model.
+| Model | Best for | Notes |
+|-------|---------|-------|
+| Ridge Regression | Most cases — reliable, regularised | α auto-tuned via RidgeCV LOO |
+| LOESS / LOWESS | Non-linear, unimodal relationships | Uses single best feature; frac=0.75 |
+| Polynomial deg 2 | Curved relationships | Ridge-regularised polynomial |
+| Polynomial deg 3 | Complex curves | Ridge-regularised; may overfit with few seasons |
 
 #### R² Guide
 
@@ -2783,19 +2165,12 @@ ensures only genuine climate signals enter the model.
 | 0.0 | No feature found — prediction = mean DOY |
 | <0 | Below mean baseline — increase seasons |
 
-#### Steps to Improve Performance
+#### Threshold Sensitivity
 
-1. **More seasons** — most impactful; 15+ recommended for publication
-2. **Add ALLSKY_SFC_SW_DWN** (solar radiation) to NASA POWER export — critical for POS
-3. **Add GWETROOT** (root zone soil moisture) — key EOS driver for deciduous forests
-4. **Adjust NDVI threshold** — ±5% to test sensitivity
-5. **Enter IMD monsoon onset dates** — raises SOS R² from ~0.30 to 0.70+ for monsoon forests
-6. **Check Correlations tab** — identify strongest parameters for your site
-
-#### Recommended NASA POWER Parameters
-
-Download daily data from [power.larc.nasa.gov](https://power.larc.nasa.gov/data-access-viewer/):
-T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
+The 5–30% range covers the full ecologically relevant spectrum:
+- **5–10%** — sensitive; picks up early green-up / late senescence; best for sparse or high-noise NDVI
+- **10–15%** — standard recommended range (this method's scientific default is 10%)
+- **15–30%** — conservative; detects only peak growing period
 
 #### Data Requirements
 
@@ -2806,13 +2181,14 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 | 9–14 | Good — reliable LOO R² |
 | 15+ | Publication-quality |
 
-#### SOS Method Selection
+#### Recommended NASA POWER Parameters
 
-| Method | Best for | Mechanism |
-|--------|---------|-----------|
-| First Sustained Rainfall | Monsoon dry/moist deciduous, thorn | First rolling 7-day total ≥ 8 mm |
-| NDVI Threshold | Evergreen, mangrove, NE India, shola | First date NDVI > base + pct × amplitude |
-| Max NDVI Rate | Temperate, alpine, subtropical hill | Date of peak NDVI rate of change |
+Download daily data from [power.larc.nasa.gov](https://power.larc.nasa.gov/data-access-viewer/):
+T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
+
+#### Scientific Description (for thesis / report)
+
+> *"Phenological metrics were extracted from the smoothed NDVI time series using an amplitude-based threshold method. Prior to extraction, the NDVI time series was interpolated to a regular 5-day grid and smoothed using the Savitzky–Golay filter to reduce sensor noise. The seasonal NDVI amplitude was calculated as the difference between the maximum and minimum NDVI values within each growing cycle. The Start of Season (SOS) was defined as the first time step when NDVI exceeded 10% of the seasonal amplitude above the base value (NDVI_min). Similarly, the End of Season (EOS) was defined as the last time step when NDVI remained above this threshold. The Peak of Season (POS) corresponded to the maximum NDVI value occurring between SOS and EOS. Thresholds were computed independently for each growing season to account for inter-annual amplitude variability."*
         """)
 
 
