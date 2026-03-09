@@ -463,28 +463,70 @@ def make_training_features(pheno_df, met_df, params, window=15, monsoon_onset_do
 
 
 # ─── PHENOLOGY EXTRACTION ────────────────────────────────────
+def _find_troughs(ndvi_values, min_distance=10):
+    """
+    Find all local minima (troughs / inter-season valleys) in a smoothed NDVI array.
+
+    A trough at index i satisfies:
+        ndvi[i] == min(ndvi[i-min_distance : i+min_distance+1])
+    and is a true local minimum (lower than its immediate neighbours).
+
+    Returns sorted list of trough indices.
+    """
+    n = len(ndvi_values)
+    troughs = []
+    for i in range(min_distance, n - min_distance):
+        window = ndvi_values[max(0, i - min_distance): i + min_distance + 1]
+        if ndvi_values[i] == np.min(window):
+            # Confirm it is strictly lower than at least one neighbour on each side
+            if ndvi_values[i] <= ndvi_values[i - 1] and ndvi_values[i] <= ndvi_values[i + 1]:
+                troughs.append(i)
+    # Remove duplicates that are closer than min_distance (keep the lower one)
+    if not troughs:
+        return troughs
+    merged = [troughs[0]]
+    for t in troughs[1:]:
+        if t - merged[-1] < min_distance:
+            # Keep the one with the lower NDVI value
+            if ndvi_values[t] < ndvi_values[merged[-1]]:
+                merged[-1] = t
+        else:
+            merged.append(t)
+    return merged
+
+
 def extract_phenology(ndvi_df, season_type, threshold_override=None,
                       eos_threshold_override=None,
                       met_df_for_sos=None, sos_method="threshold", rain_thresh=8.0, roll_days=7,
                       eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14,
                       cfg=None):
     """
-    NDVI Amplitude-Based Phenology Extraction.
+    NDVI Amplitude-Based Phenology Extraction — Trough-Anchored Method.
 
-    Mirrors the reference implementation exactly:
+    Problem with simple window-min approach:
+      Using np.min(season_window) as base picks up the current season's trough,
+      which may sit INSIDE the previous growing cycle — causing SOS to be detected
+      too early (in the wrong cycle), as visible in the 2024-25 season.
 
-        ndvi = interpolate(raw_ndvi)          # fill gaps at 5-day interval
-        ndvi = savgol_filter(ndvi, 7, 2)      # smooth
-        ndvi_min = np.min(ndvi)               # base (per season)
-        ndvi_max = np.max(ndvi)               # peak (per season)
-        A = ndvi_max - ndvi_min               # amplitude
-        threshold = ndvi_min + 0.1 * A        # 10% threshold
-        sos_index = np.where(ndvi >= threshold)[0][0]   # first crossing
-        eos_index = np.where(ndvi >= threshold)[0][-1]  # last crossing
-        pos_index = sos_index + np.argmax(ndvi[sos_index:eos_index+1])  # max between SOS-EOS
+    Correct approach — valley-anchored thresholds:
+      1. Interpolate NDVI to 5-day grid  →  pd.Series.interpolate()
+      2. Apply Savitzky–Golay smoothing  →  savgol_filter(ndvi, window, 2)
+      3. Detect all inter-season troughs (local minima) across the full time series
+      4. For each pair of adjacent troughs  [trough_i … trough_{i+1}]  that bracket
+         one growing cycle:
+           • ndvi_min  = value at trough_i          ← BASE from PREVIOUS cycle valley
+           • ndvi_max  = peak NDVI between the two troughs
+           • A         = ndvi_max − ndvi_min         ← seasonal amplitude
+           • SOS threshold = ndvi_min + thr_pct × A
+           • EOS threshold = ndvi_min + eos_thr_pct × A  (same base)
+           • SOS = first index AFTER trough_i  where NDVI ≥ SOS threshold
+           • EOS = last  index BEFORE trough_{i+1} where NDVI ≥ EOS threshold
+           • POS = argmax(NDVI[SOS : EOS+1])
 
-    Threshold % is adjustable via the sidebar slider (default 10%).
-    Thresholds are computed independently per growing season.
+    This guarantees:
+      - SOS is always in the RISING limb of the correct cycle
+      - EOS is always in the FALLING limb before the next valley
+      - Thresholds are independently computed for each cycle (no global bias)
     """
     try:
         if cfg is None:
@@ -500,7 +542,6 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
 
         # ── Step 1: 5-day regular interpolation ──────────────
-        # pandas interpolate() on a 5-day grid — matches reference pd.Series.interpolate()
         ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
         ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
 
@@ -509,96 +550,160 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             end=ndvi_raw.index.max(),
             freq="5D")
         ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range))
-        ndvi_5d = ndvi_5d.interpolate(method="time")   # equivalent to pd.Series.interpolate()
+        ndvi_5d = ndvi_5d.interpolate(method="time")
         ndvi_5d = ndvi_5d.reindex(full_range)
         ndvi_5d.columns = ["NDVI"]
 
         # ── Step 2: Savitzky–Golay smoothing ─────────────────
-        # Adaptive window size: ~5 % of series, min 7, must be odd, poly < window
         n = len(ndvi_5d)
         wl_target = max(7, int(n * 0.05))
         wl = wl_target if wl_target % 2 == 1 else wl_target + 1
         wl = min(wl, n - 1 if n > 1 else 1)
         if wl % 2 == 0: wl = max(7, wl - 1)
-        poly = min(2, wl - 1)          # poly=2 matches savgol_filter(ndvi, 7, 2) in reference
+        poly = min(2, wl - 1)
         if wl < 5:
             return None, f"Too few interpolated NDVI points ({n}) — check date range"
 
-        ndvi_5d["Sm"] = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
+        sm_vals = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
+        ndvi_5d["Sm"] = sm_vals
+        t_all = ndvi_5d.index  # full DatetimeIndex
+
+        # ── Step 3: Find all inter-season troughs ─────────────
+        # min_distance ~ 1 year / 2 on a 5-day grid  ≈  36 steps
+        min_dist = max(10, int((365 / 5) * 0.4))   # ~29 steps ≈ ~145 days
+        trough_indices = _find_troughs(sm_vals, min_distance=min_dist)
+
+        # Fallback: if fewer than 2 troughs found, use season window boundaries
+        if len(trough_indices) < 2:
+            # Original simple method as fallback
+            rows = []
+            for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
+                try:
+                    s = f"{yr}-{sm:02d}-01"
+                    e = f"{yr+1}-{em:02d}-28" if sm > em else f"{yr}-{em:02d}-28"
+                    sub_vals = ndvi_5d.loc[s:e, "Sm"].values
+                    sub_t    = ndvi_5d.loc[s:e, "Sm"].index
+                    if len(sub_vals) < 10: continue
+                    ndvi_min = np.min(sub_vals); ndvi_max = np.max(sub_vals)
+                    A = ndvi_max - ndvi_min
+                    if A < 1e-6: continue
+                    sos_thr = ndvi_min + thr_pct * A
+                    eos_thr = ndvi_min + eos_thr_pct * A
+                    sc = np.where(sub_vals >= sos_thr)[0]
+                    ec = np.where(sub_vals >= eos_thr)[0]
+                    if not len(sc) or not len(ec): continue
+                    si, ei = int(sc[0]), int(ec[-1])
+                    if ei <= si: continue
+                    pi = si + int(np.argmax(sub_vals[si:ei+1]))
+                    sos = sub_t[si]; pos = sub_t[pi]; eos = sub_t[ei]
+                    ss = pd.Timestamp(s)
+                    rows.append({"Year":yr,"SOS_Date":sos,"SOS_DOY":sos.dayofyear,
+                                 "SOS_Target":(sos-ss).days,"SOS_Method":"amplitude_threshold",
+                                 "POS_Date":pos,"POS_DOY":pos.dayofyear,"POS_Target":(pos-ss).days,
+                                 "EOS_Date":eos,"EOS_DOY":eos.dayofyear,"EOS_Target":(eos-ss).days,
+                                 "EOS_Method":"amplitude_threshold","LOS_Days":(eos-sos).days,
+                                 "Season_Start":ss,"Peak_NDVI":float(sub_vals[pi]),
+                                 "Amplitude":float(A),"Threshold_SOS":float(sos_thr),
+                                 "Threshold_EOS":float(eos_thr),"Season":season_type})
+                except Exception: continue
+            if not rows: return None, "No complete seasons found — check season window / threshold"
+            return pd.DataFrame(rows), None
+
+        # ── Step 4: Extract one phenology cycle per trough pair ──
+        # Add sentinel endpoints so the first and last cycles are also captured
+        # (prepend index 0 if not already a trough, append n-1)
+        all_troughs = list(trough_indices)
+        if all_troughs[0] > min_dist:
+            all_troughs = [0] + all_troughs
+        if all_troughs[-1] < n - min_dist:
+            all_troughs = all_troughs + [n - 1]
 
         rows = []
-        for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
+        for i in range(len(all_troughs) - 1):
             try:
-                # Season window
-                if sm <= em:
-                    s = f"{yr}-{sm:02d}-01"
-                    e = f"{yr}-{em:02d}-28"
-                else:
-                    s = f"{yr}-{sm:02d}-01"
-                    e = f"{yr+1}-{em:02d}-28"
+                ti  = all_troughs[i]       # index of left  trough (season start valley)
+                ti1 = all_troughs[i + 1]   # index of right trough (season end   valley)
 
-                sub = ndvi_5d.loc[s:e, "Sm"]
-                if len(sub) < max(10, min_d // 5): continue
+                if ti1 - ti < max(10, min_d // 5):
+                    continue               # too short a cycle
 
-                # ── Reference code logic, applied per season ──
-                ndvi   = sub.values          # np.array equivalent
-                t      = sub.index           # time axis
+                cycle_vals = sm_vals[ti:ti1 + 1]   # NDVI values in this cycle
+                cycle_t    = t_all[ti:ti1 + 1]      # corresponding dates
 
-                ndvi_min = np.min(ndvi)      # base value
-                ndvi_max = np.max(ndvi)      # peak value
-                A = ndvi_max - ndvi_min      # amplitude
+                # ── Base value = NDVI at the LEFT trough (previous cycle valley) ──
+                ndvi_min = float(sm_vals[ti])        # valley before this season
 
-                if A < 1e-6:                 # flat signal — skip
+                # ── Peak = maximum within the cycle ──
+                ndvi_max = float(np.max(cycle_vals))
+                A = ndvi_max - ndvi_min
+
+                if A < 1e-6:
                     continue
 
-                # Per-season thresholds (SOS and EOS can differ if slider differs)
+                # ── Per-cycle amplitude thresholds ──
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
 
-                # SOS: np.where(ndvi >= threshold)[0][0]  — first index above threshold
-                sos_candidates = np.where(ndvi >= sos_threshold)[0]
-                if len(sos_candidates) == 0: continue
-                sos_index = int(sos_candidates[0])
+                # ── SOS: first point AFTER left trough rising above sos_threshold ──
+                # Search from index 1 onward (skip the trough itself)
+                sos_cands = np.where(cycle_vals[1:] >= sos_threshold)[0] + 1
+                if len(sos_cands) == 0:
+                    continue
+                sos_idx_local = int(sos_cands[0])
 
-                # EOS: np.where(ndvi >= threshold)[0][-1] — last index above threshold
-                eos_candidates = np.where(ndvi >= eos_threshold)[0]
-                if len(eos_candidates) == 0: continue
-                eos_index = int(eos_candidates[-1])
+                # ── EOS: last point BEFORE right trough falling below eos_threshold ──
+                # Search up to the last point (skip the right trough itself)
+                eos_cands = np.where(cycle_vals[:-1] >= eos_threshold)[0]
+                if len(eos_cands) == 0:
+                    continue
+                eos_idx_local = int(eos_cands[-1])
 
-                if eos_index <= sos_index: continue   # degenerate season
+                if eos_idx_local <= sos_idx_local:
+                    continue
 
-                # POS: sos_index + np.argmax(ndvi[sos_index:eos_index+1])
-                pos_index = sos_index + int(np.argmax(ndvi[sos_index:eos_index + 1]))
+                # ── POS: argmax between SOS and EOS ──
+                pos_idx_local = sos_idx_local + int(
+                    np.argmax(cycle_vals[sos_idx_local:eos_idx_local + 1]))
 
-                sos = t[sos_index]
-                pos = t[pos_index]
-                eos = t[eos_index]
+                sos = cycle_t[sos_idx_local]
+                pos = cycle_t[pos_idx_local]
+                eos = cycle_t[eos_idx_local]
 
-                season_start = pd.Timestamp(s)
+                # Assign year = calendar year of POS (most meaningful label)
+                yr = pos.year
+
+                # Season start anchor for relative-DOY calculation
+                # Use start of the calendar year containing the left trough
+                season_start = pd.Timestamp(f"{t_all[ti].year}-{sm:02d}-01")
+
                 rows.append({
-                    "Year":         yr,
-                    "SOS_Date":     sos,  "SOS_DOY": sos.dayofyear,
-                    "SOS_Target":   (sos - season_start).days,
-                    "SOS_Method":   "amplitude_threshold",
-                    "POS_Date":     pos,  "POS_DOY": pos.dayofyear,
-                    "POS_Target":   (pos - season_start).days,
-                    "EOS_Date":     eos,  "EOS_DOY": eos.dayofyear,
-                    "EOS_Target":   (eos - season_start).days,
-                    "EOS_Method":   "amplitude_threshold",
-                    "LOS_Days":     (eos - sos).days,
-                    "Season_Start": season_start,
-                    "Peak_NDVI":    float(ndvi[pos_index]),
-                    "Amplitude":    float(A),
+                    "Year":          yr,
+                    "SOS_Date":      sos,  "SOS_DOY":  sos.dayofyear,
+                    "SOS_Target":    (sos - season_start).days,
+                    "SOS_Method":    "valley_amplitude_threshold",
+                    "POS_Date":      pos,  "POS_DOY":  pos.dayofyear,
+                    "POS_Target":    (pos - season_start).days,
+                    "EOS_Date":      eos,  "EOS_DOY":  eos.dayofyear,
+                    "EOS_Target":    (eos - season_start).days,
+                    "EOS_Method":    "valley_amplitude_threshold",
+                    "LOS_Days":      (eos - sos).days,
+                    "Season_Start":  season_start,
+                    "Peak_NDVI":     float(cycle_vals[pos_idx_local]),
+                    "Amplitude":     float(A),
+                    "Base_NDVI":     float(ndvi_min),
                     "Threshold_SOS": float(sos_threshold),
                     "Threshold_EOS": float(eos_threshold),
-                    "Season":       season_type,
+                    "Trough_Date":   t_all[ti],
+                    "Season":        season_type,
                 })
             except Exception:
                 continue
 
         if not rows:
             return None, "No complete seasons found — check season window / threshold"
-        return pd.DataFrame(rows), None
+
+        df_out = pd.DataFrame(rows).drop_duplicates(subset="Year", keep="first")
+        return df_out.sort_values("Year").reset_index(drop=True), None
 
     except Exception as e:
         return None, str(e)
@@ -949,42 +1054,84 @@ class UniversalPredictor:
 
 # ─── PLOTS ───────────────────────────────────────────────────
 def plot_ndvi_phenology(ndvi_raw, pheno_df):
-    fig, ax = plt.subplots(figsize=(14, 4.8))
+    fig, ax = plt.subplots(figsize=(14, 5.2))
     dates = pd.to_datetime(ndvi_raw['Date'])
     ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
                label='NDVI (raw obs)', zorder=3)
-    ndvi_s = ndvi_raw.set_index('Date')['NDVI'].resample('D').interpolate(method='time')
+
+    # Smoothed line (same 5-day grid used in extraction)
+    ndvi_s = (ndvi_raw.set_index('Date')['NDVI']
+              .resample('5D').interpolate(method='time'))
     n = len(ndvi_s)
-    # Adaptive SG window: ~5% of series length, minimum 11, always odd
-    wl_target = max(11, int(n * 0.05))
+    wl_target = max(7, int(n * 0.05))
     wl = wl_target if wl_target % 2 == 1 else wl_target + 1
-    wl = min(wl, n - 1 if (n - 1) % 2 == 1 else n - 2)
-    if wl >= 7:
-        sm_arr = savgol_filter(ndvi_s.ffill().bfill().values, wl, 3)
-        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})', zorder=5)
+    wl = min(wl, n - 1 if n > 1 else 1)
+    if wl % 2 == 0: wl = max(7, wl - 1)
+    poly = min(2, wl - 1)
+    if wl >= 5:
+        sm_arr = savgol_filter(ndvi_s.ffill().bfill().values, wl, poly)
+        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.2,
+                label=f'Smoothed (SG w={wl})', zorder=5)
+
+    # ── Draw per-cycle threshold band (Base NDVI → threshold) ──
+    # Shown as a horizontal span per season so the valley-anchoring is visible
+    trough_plotted = False
+    for _, row in pheno_df.iterrows():
+        base  = row.get('Base_NDVI',  np.nan)
+        t_sos = row.get('Threshold_SOS', np.nan)
+        t_eos = row.get('Threshold_EOS', np.nan)
+        trough_d = row.get('Trough_Date', pd.NaT)
+        sos_d = row.get('SOS_Date', pd.NaT)
+        eos_d = row.get('EOS_Date', pd.NaT)
+
+        if pd.notna(sos_d) and pd.notna(eos_d):
+            # Shaded band: from base to SOS threshold
+            if not np.isnan(base) and not np.isnan(t_sos):
+                ax.axhspan(base, t_sos,
+                           xmin=max(0, (pd.Timestamp(sos_d) - ndvi_s.index[0]).days /
+                                    max(1, (ndvi_s.index[-1] - ndvi_s.index[0]).days)),
+                           xmax=min(1, (pd.Timestamp(eos_d) - ndvi_s.index[0]).days /
+                                    max(1, (ndvi_s.index[-1] - ndvi_s.index[0]).days)),
+                           alpha=0.07, color='#F9A825',
+                           label='Base→Threshold band' if not trough_plotted else '')
+                trough_plotted = True
+
+        # Trough marker (valley anchor)
+        if pd.notna(trough_d) and not np.isnan(base):
+            ax.plot(trough_d, base, 'v', color='#6A1B9A', ms=7, zorder=6,
+                    label='Valley anchor (base NDVI)' if _ == pheno_df.index[0] else '')
+
+    # SOS / POS / EOS vertical lines
     ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
-    ev_labels = {'SOS': 'SOS', 'POS': 'POS', 'EOS': 'EOS'}
+    ev_labels_map = {
+        'SOS': 'SOS — Green-up start',
+        'POS': 'POS — Peak greenness',
+        'EOS': 'EOS — Senescence end'
+    }
     plotted = set()
     for _, row in pheno_df.iterrows():
         for ev, col in ev_colors.items():
             d = row.get(f'{ev}_Date')
             if pd.notna(d):
-                ax.axvline(d, color=col, lw=1.4, alpha=0.50, ls='--',
-                           label=ev_labels.pop(ev) if ev not in plotted else '')
+                lbl = ev_labels_map[ev] if ev not in plotted else ''
+                ax.axvline(d, color=col, lw=1.4, alpha=0.55, ls='--', label=lbl)
                 plotted.add(ev)
+
     handles = [
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
-        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})'),
+        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl if wl>=5 else "n/a"})'),
+        Line2D([0],[0], color='#6A1B9A', marker='v', ms=7, lw=0, label='Valley anchor (base NDVI)'),
         Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
     ]
-    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events',
-                 fontsize=12, fontweight='bold', color='#1B5E20')
+    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events\n'
+                 '(Valley-anchored amplitude threshold — base = previous cycle trough)',
+                 fontsize=11, fontweight='bold', color='#1B5E20')
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-    ax.legend(handles=handles, ncol=5, fontsize=8.5, loc='upper left', framealpha=0.88)
+    ax.legend(handles=handles, ncol=3, fontsize=8.0, loc='upper left', framealpha=0.88)
     ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
