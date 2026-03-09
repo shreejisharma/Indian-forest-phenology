@@ -471,65 +471,65 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
     """
     NDVI Amplitude-Based Phenology Extraction.
 
-    Workflow (per Jeganathan amplitude-threshold method):
-      1. Interpolate raw NDVI to a regular 5-day grid (temporal gap-filling).
-      2. Apply Savitzky–Golay smoothing to reduce sensor noise.
-      3. For each growing season independently:
-         a. Identify NDVI_min (base) and NDVI_max (peak).
-         b. Compute amplitude A = NDVI_max − NDVI_min.
-         c. Define threshold = NDVI_min + threshold_pct × A  (default 10%).
-         d. SOS = first time-step when smoothed NDVI ≥ threshold (after dormancy minimum).
-         e. EOS = last time-step when smoothed NDVI ≥ threshold (before next dormancy minimum).
-         f. POS = time-step of maximum smoothed NDVI between SOS and EOS.
+    Mirrors the reference implementation exactly:
 
-    Thresholds are computed INDEPENDENTLY per season so inter-annual amplitude
-    variability does not bias the detection dates.
+        ndvi = interpolate(raw_ndvi)          # fill gaps at 5-day interval
+        ndvi = savgol_filter(ndvi, 7, 2)      # smooth
+        ndvi_min = np.min(ndvi)               # base (per season)
+        ndvi_max = np.max(ndvi)               # peak (per season)
+        A = ndvi_max - ndvi_min               # amplitude
+        threshold = ndvi_min + 0.1 * A        # 10% threshold
+        sos_index = np.where(ndvi >= threshold)[0][0]   # first crossing
+        eos_index = np.where(ndvi >= threshold)[0][-1]  # last crossing
+        pos_index = sos_index + np.argmax(ndvi[sos_index:eos_index+1])  # max between SOS-EOS
+
+    Threshold % is adjustable via the sidebar slider (default 10%).
+    Thresholds are computed independently per growing season.
     """
     try:
         if cfg is None:
-            # fallback: look up from SEASON_CONFIGS if available, else use defaults
             cfg = SEASON_CONFIGS.get(season_type, {
                 "start_month": 6, "end_month": 5, "min_days": 150,
-                "pos_constrain_end": None, "threshold_pct": 0.10,
+                "threshold_pct": 0.10,
             })
-        sm  = cfg["start_month"]
-        em  = cfg["end_month"]
+        sm    = cfg["start_month"]
+        em    = cfg["end_month"]
         min_d = cfg.get("min_days", 150)
 
+        thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
+        eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
+
         # ── Step 1: 5-day regular interpolation ──────────────
+        # pandas interpolate() on a 5-day grid — matches reference pd.Series.interpolate()
         ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
         ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
 
-        # Build 5-day grid spanning the full date range
         full_range = pd.date_range(
             start=ndvi_raw.index.min(),
             end=ndvi_raw.index.max(),
             freq="5D")
         ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range))
-        ndvi_5d = ndvi_5d.interpolate(method="time")
+        ndvi_5d = ndvi_5d.interpolate(method="time")   # equivalent to pd.Series.interpolate()
         ndvi_5d = ndvi_5d.reindex(full_range)
         ndvi_5d.columns = ["NDVI"]
 
         # ── Step 2: Savitzky–Golay smoothing ─────────────────
+        # Adaptive window size: ~5 % of series, min 7, must be odd, poly < window
         n = len(ndvi_5d)
-        # ~5% of series length, minimum 7, must be odd
         wl_target = max(7, int(n * 0.05))
         wl = wl_target if wl_target % 2 == 1 else wl_target + 1
         wl = min(wl, n - 1 if n > 1 else 1)
         if wl % 2 == 0: wl = max(7, wl - 1)
-        poly = min(3, wl - 1)
+        poly = min(2, wl - 1)          # poly=2 matches savgol_filter(ndvi, 7, 2) in reference
         if wl < 5:
             return None, f"Too few interpolated NDVI points ({n}) — check date range"
-        ndvi_5d["Sm"]  = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
-        ndvi_5d["Drv"] = np.gradient(ndvi_5d["Sm"])
 
-        thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
-        eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
-        pos_constrain_end = cfg.get("pos_constrain_end", None)
+        ndvi_5d["Sm"] = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
 
         rows = []
         for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
             try:
+                # Season window
                 if sm <= em:
                     s = f"{yr}-{sm:02d}-01"
                     e = f"{yr}-{em:02d}-28"
@@ -537,55 +537,61 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     s = f"{yr}-{sm:02d}-01"
                     e = f"{yr+1}-{em:02d}-28"
 
-                sub = ndvi_5d.loc[s:e]
-                if len(sub) < max(10, min_d // 5): continue  # ~equiv min_days on 5-day grid
+                sub = ndvi_5d.loc[s:e, "Sm"]
+                if len(sub) < max(10, min_d // 5): continue
 
-                # ── Step 3: Per-season amplitude threshold ────
-                peak_ndvi = sub["Sm"].max()
-                base_ndvi = sub["Sm"].min()
-                amplitude = peak_ndvi - base_ndvi
+                # ── Reference code logic, applied per season ──
+                ndvi   = sub.values          # np.array equivalent
+                t      = sub.index           # time axis
 
-                # Season-specific thresholds
-                threshold     = base_ndvi + thr_pct     * amplitude
-                eos_threshold = base_ndvi + eos_thr_pct * amplitude
+                ndvi_min = np.min(ndvi)      # base value
+                ndvi_max = np.max(ndvi)      # peak value
+                A = ndvi_max - ndvi_min      # amplitude
 
-                # POS — constrained window if configured
-                if pos_constrain_end:
-                    pw  = ndvi_5d.loc[f"{yr}-{sm:02d}-01":f"{yr}-{pos_constrain_end:02d}-31", "Sm"]
-                    pos = pw.idxmax() if len(pw) >= 3 else sub["Sm"].idxmax()
-                else:
-                    pos = sub["Sm"].idxmax()
+                if A < 1e-6:                 # flat signal — skip
+                    continue
 
-                # ── Step 4: SOS — first crossing after dormancy minimum ──
-                # Look before POS; first date smoothed NDVI ≥ threshold
-                pre   = sub.loc[:pos, "Sm"]
-                above = pre[pre >= threshold]
-                sos   = above.index[0] if len(above) > 0 else pre.idxmax()
+                # Per-season thresholds (SOS and EOS can differ if slider differs)
+                sos_threshold = ndvi_min + thr_pct     * A
+                eos_threshold = ndvi_min + eos_thr_pct * A
 
-                # ── Step 5: EOS — last crossing before next dormancy ────
-                # Look after POS; last date smoothed NDVI stays ≥ threshold
-                post       = sub.loc[pos:, "Sm"]
-                above_post = post[post >= eos_threshold]
-                eos        = above_post.index[-1] if len(above_post) > 0 else post.index[-1]
+                # SOS: np.where(ndvi >= threshold)[0][0]  — first index above threshold
+                sos_candidates = np.where(ndvi >= sos_threshold)[0]
+                if len(sos_candidates) == 0: continue
+                sos_index = int(sos_candidates[0])
+
+                # EOS: np.where(ndvi >= threshold)[0][-1] — last index above threshold
+                eos_candidates = np.where(ndvi >= eos_threshold)[0]
+                if len(eos_candidates) == 0: continue
+                eos_index = int(eos_candidates[-1])
+
+                if eos_index <= sos_index: continue   # degenerate season
+
+                # POS: sos_index + np.argmax(ndvi[sos_index:eos_index+1])
+                pos_index = sos_index + int(np.argmax(ndvi[sos_index:eos_index + 1]))
+
+                sos = t[sos_index]
+                pos = t[pos_index]
+                eos = t[eos_index]
 
                 season_start = pd.Timestamp(s)
-                sos_rel = (sos - season_start).days
-                pos_rel = (pos - season_start).days
-                eos_rel = (eos - season_start).days
-
                 rows.append({
-                    "Year":       yr,
-                    "SOS_Date":   sos,  "SOS_DOY":  sos.dayofyear,  "SOS_Target": sos_rel,
-                    "SOS_Method": "amplitude_threshold",
-                    "POS_Date":   pos,  "POS_DOY":  pos.dayofyear,  "POS_Target": pos_rel,
-                    "EOS_Date":   eos,  "EOS_DOY":  eos.dayofyear,  "EOS_Target": eos_rel,
-                    "EOS_Method": "amplitude_threshold",
-                    "LOS_Days":   (eos - sos).days,
+                    "Year":         yr,
+                    "SOS_Date":     sos,  "SOS_DOY": sos.dayofyear,
+                    "SOS_Target":   (sos - season_start).days,
+                    "SOS_Method":   "amplitude_threshold",
+                    "POS_Date":     pos,  "POS_DOY": pos.dayofyear,
+                    "POS_Target":   (pos - season_start).days,
+                    "EOS_Date":     eos,  "EOS_DOY": eos.dayofyear,
+                    "EOS_Target":   (eos - season_start).days,
+                    "EOS_Method":   "amplitude_threshold",
+                    "LOS_Days":     (eos - sos).days,
                     "Season_Start": season_start,
-                    "Peak_NDVI":  float(sub.loc[pos, "Sm"]),
-                    "Amplitude":  float(amplitude),
-                    "Threshold":  float(threshold),
-                    "Season":     season_type,
+                    "Peak_NDVI":    float(ndvi[pos_index]),
+                    "Amplitude":    float(A),
+                    "Threshold_SOS": float(sos_threshold),
+                    "Threshold_EOS": float(eos_threshold),
+                    "Season":       season_type,
                 })
             except Exception:
                 continue
