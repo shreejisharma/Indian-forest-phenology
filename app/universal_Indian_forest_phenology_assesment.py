@@ -1,20 +1,28 @@
 """
-🌲 UNIVERSAL INDIAN FOREST PHENOLOGY PREDICTOR 🌲
-===================================================
+🌲 UNIVERSAL VEGETATION PHENOLOGY PREDICTOR 🌲
+================================================
 
 Upload:
   1. NDVI CSV  — any CSV with Date + NDVI columns
   2. NASA POWER Met CSV — daily export, headers auto-skipped
 
-Predicts SOS / POS / EOS / LOS for 11 Indian forest types using:
-  • Pearson |r| >= 0.40 feature filter
-  • Multi-feature Ridge (up to n−2 features; collinearity-filtered; all significant drivers shown)
-  • Ridge Regression with auto-tuned alpha (RidgeCV)
-  • Leave-One-Out cross-validation (honest R² for small samples)
-  • Threshold-based phenology extraction (robust for multi-hump NDVI)
-  • Optional IMD monsoon onset date as SOS predictor
+Phenology extraction method:
+  • NDVI interpolated to a regular 5-day grid (fills irregular satellite gaps)
+  • SOS = first date NDVI ≥ base + threshold% × amplitude AFTER seasonal minimum
+  • POS = date of maximum NDVI within growing season window
+  • EOS = last date NDVI ≥ base + threshold% × amplitude AFTER POS
+  • Threshold default: 10% of NDVI amplitude (user-adjustable 5–30%)
+  • Savitzky-Golay applied for visual display only — NOT used for metrics
 
-pip install streamlit pandas numpy scipy scikit-learn matplotlib
+Regression models:
+  • Ridge (Linear) — LOO cross-validated, interpretable equation
+  • Ridge + Polynomial (deg 2) — captures non-linear met-phenology relationships
+  • LOWESS-smoothed + Ridge — smooths inter-annual noise before fitting
+
+Feature selection:
+  • Pearson |r| ≥ 0.40 filter; multi-feature Ridge with collinearity control
+
+pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
 streamlit run app/universal_Indian_forest_phenology_assesment.py
 """
 
@@ -23,11 +31,12 @@ import pandas as pd
 import numpy as np
 from scipy.signal import savgol_filter
 from scipy.stats import pearsonr
+from scipy.interpolate import UnivariateSpline
 from sklearn.linear_model import Ridge, RidgeCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import LeaveOneOut
+from sklearn.model_selection import LeaveOneOut, cross_val_predict
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.lines import Line2D
@@ -35,6 +44,17 @@ from datetime import datetime, timedelta
 from io import StringIO
 import warnings
 warnings.filterwarnings('ignore')
+
+# ── Optional: statsmodels LOWESS ─────────────────────────────
+try:
+    from statsmodels.nonparametric.smoothers_lowess import lowess as sm_lowess
+    _HAS_STATSMODELS = True
+except ImportError:
+    _HAS_STATSMODELS = False
+
+# ── Regression model type — set per session in sidebar ───────
+# Options: "Ridge (Linear)", "Ridge + Polynomial (deg 2)", "LOWESS + Ridge"
+_MODEL_TYPES = ["Ridge (Linear)", "Ridge + Polynomial (deg 2)", "LOWESS-smoothed + Ridge"]
 
 st.set_page_config(
     page_title="🌲 Indian Forest Phenology",
@@ -447,86 +467,129 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                       eos_threshold_override=None,
                       met_df_for_sos=None, sos_method="auto", rain_thresh=8.0, roll_days=7,
                       eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14):
+    """
+    NDVI Phenology Extraction — 5-day interpolation + amplitude-threshold method.
+
+    Method (as specified):
+    1. Interpolate NDVI to a regular 5-day grid (fills irregular satellite gaps).
+    2. For each growing season:
+       a. base_ndvi  = minimum NDVI in the season window
+       b. peak_ndvi  = maximum NDVI in the season window
+       c. amplitude  = peak_ndvi - base_ndvi
+       d. threshold  = base_ndvi + threshold_pct × amplitude   (default 10% = 0.10)
+       e. SOS = first date NDVI rises above threshold AFTER the seasonal minimum
+       f. POS = date of maximum NDVI
+       g. EOS = last date NDVI stays above threshold BEFORE the next seasonal minimum
+    3. Savitzky-Golay is applied ONLY as a light visual smoother for the plot;
+       ALL phenology metrics are extracted from the 5-day interpolated series directly.
+    """
     try:
         cfg = SEASON_CONFIGS[season_type]
-        sm=cfg["start_month"]; em=cfg["end_month"]; min_d=cfg["min_days"]
-        ndvi_s = (ndvi_df[["Date","NDVI"]].copy().set_index("Date")
-                  .resample("D").interpolate(method="time"))
-        n=len(ndvi_s)
-        # Adaptive SG window: larger for dense data, minimal for sparse monthly data.
-        # Rule: ~5% of series length, minimum 7, must be odd, poly_order < window.
-        wl_target = max(7, int(n * 0.05))
+        sm = cfg["start_month"]; em = cfg["end_month"]; min_d = cfg["min_days"]
+
+        # ── Step 1: Interpolate to regular 5-day grid ────────────
+        ndvi_raw = (ndvi_df[["Date", "NDVI"]].copy()
+                    .set_index("Date")
+                    .sort_index())
+        # Resample daily, then forward/back fill short gaps before 5-day resample
+        ndvi_daily = ndvi_raw.resample("D").interpolate(method="time")
+        # 5-day regular grid — the primary analysis series
+        ndvi_5d = ndvi_daily.resample("5D").mean()
+        ndvi_5d["NDVI"] = ndvi_5d["NDVI"].ffill().bfill()
+
+        # Light SG smooth for visual plotting only (not used for metrics)
+        n = len(ndvi_5d)
+        wl_target = max(7, int(n * 0.08))
         wl = wl_target if wl_target % 2 == 1 else wl_target + 1
         wl = min(wl, n - 1 if n > 1 else 1)
         if wl % 2 == 0: wl = max(7, wl - 1)
-        poly = min(3, wl - 1)  # poly_order must be < window_length
-        if wl < 5: return None, f"Too few interpolated NDVI points ({n}) — check date range"
-        ndvi_s["Sm"] = savgol_filter(ndvi_s["NDVI"].ffill().bfill(), wl, poly)
-        ndvi_s["Drv"] = np.gradient(ndvi_s["Sm"])
-        resolved_sos = sos_method if sos_method != "auto" else cfg.get("sos_method","threshold")
-        thr_pct = threshold_override if threshold_override is not None else cfg.get("threshold_pct",0.30)
+        poly = min(3, wl - 1)
+        if n >= 7:
+            ndvi_5d["Sm"] = savgol_filter(ndvi_5d["NDVI"].values, wl, poly)
+        else:
+            ndvi_5d["Sm"] = ndvi_5d["NDVI"]
+
+        thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
         eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
-        pos_constrain_end = cfg.get("pos_constrain_end", None)
+
         rows = []
-        for yr in range(ndvi_s.index.year.min(), ndvi_s.index.year.max()+1):
+        for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
             try:
-                if sm <= em: s=f"{yr}-{sm:02d}-01"; e=f"{yr}-{em:02d}-28"
-                else: s=f"{yr}-{sm:02d}-01"; e=f"{yr+1}-{em:02d}-28"
-                sub = ndvi_s.loc[s:e]
-                if len(sub) < min_d: continue
-                if pos_constrain_end:
-                    pw = ndvi_s.loc[f"{yr}-{sm:02d}-01":f"{yr}-{pos_constrain_end:02d}-31","Sm"]
-                    # Use constrained window if it has reasonable data (>= 2 obs worth of days)
-                    pos = pw.idxmax() if len(pw) >= 14 else sub["Sm"].idxmax()
-                else: pos = sub["Sm"].idxmax()
-                peak_ndvi=sub["Sm"].max(); base_ndvi=sub["Sm"].min()
-                threshold = base_ndvi+thr_pct*(peak_ndvi-base_ndvi)
-                eos_threshold = base_ndvi+eos_thr_pct*(peak_ndvi-base_ndvi)
-                sos = None
-                if resolved_sos=="rainfall" and met_df_for_sos is not None:
-                    sos = _sos_from_rainfall(met_df_for_sos, yr, sm, rain_thresh, roll_days)
-                if resolved_sos=="derivative": sos = sub.loc[:pos,"Drv"].idxmax()
-                if sos is None:
-                    pre=sub.loc[:pos,"Sm"]; above=pre[pre>threshold]
-                    sos = above.index[0] if len(above)>0 else pre.idxmax()
-                post=sub.loc[pos:,"Sm"]; above_post=post[post>eos_threshold]
-                # EOS detection based on selected method
-                if eos_method == "derivative":
-                    # Maximum rate of NDVI decline after POS
-                    post_drv = sub.loc[pos:,"Drv"]
-                    eos = post_drv.idxmin() if len(post_drv) > 1 else (above_post.index[-1] if len(above_post)>0 else post.index[-1])
-                elif eos_method == "drought" and met_df_for_sos is not None:
-                    # First sustained dry period after POS
-                    try:
-                        pos_date = pos.date() if hasattr(pos,'date') else pos
-                        met_post = met_df_for_sos[met_df_for_sos['Date'] >= pd.Timestamp(pos_date)].copy()
-                        met_post['roll_rain'] = met_post['PRECTOTCORR'].fillna(0).rolling(eos_roll_days).sum()
-                        dry = met_post[met_post['roll_rain'] <= eos_rain_thresh]
-                        eos = pd.Timestamp(dry['Date'].iloc[0]) if len(dry)>0 else (above_post.index[-1] if len(above_post)>0 else post.index[-1])
-                    except Exception:
-                        eos = above_post.index[-1] if len(above_post)>0 else post.index[-1]
+                if sm <= em:
+                    s = f"{yr}-{sm:02d}-01"; e = f"{yr}-{em:02d}-28"
                 else:
-                    # Threshold method (default): last date above EOS threshold after POS
-                    eos = above_post.index[-1] if len(above_post)>0 else post.index[-1]
+                    s = f"{yr}-{sm:02d}-01"; e = f"{yr+1}-{em:02d}-28"
+                sub = ndvi_5d.loc[s:e]
+                if len(sub) < max(10, min_d // 5):
+                    continue
+
+                # ── Step 2: amplitude-based thresholds ──────────────
+                base_ndvi  = float(sub["NDVI"].min())
+                peak_ndvi  = float(sub["NDVI"].max())
+                amplitude  = peak_ndvi - base_ndvi
+
+                if amplitude < 0.02:
+                    # Flat signal — cannot extract meaningful phenology
+                    continue
+
+                sos_threshold = base_ndvi + thr_pct     * amplitude
+                eos_threshold = base_ndvi + eos_thr_pct * amplitude
+
+                # ── Step 3: POS — date of maximum NDVI ──────────────
+                pos = sub["NDVI"].idxmax()
+
+                # ── Step 4: SOS — first date AFTER seasonal minimum
+                #    that NDVI rises above sos_threshold ──────────────
+                # Find the date of the seasonal minimum
+                min_date = sub["NDVI"].idxmin()
+                # Look for the first crossing after the minimum
+                after_min = sub.loc[min_date:pos, "NDVI"]
+                above_sos = after_min[after_min >= sos_threshold]
+                if len(above_sos) > 0:
+                    sos = above_sos.index[0]
+                else:
+                    # Fallback: earliest date in first quarter of season
+                    sos = sub.index[len(sub)//4]
+
+                # ── Step 5: EOS — last date AFTER POS that NDVI
+                #    stays above eos_threshold (before next minimum) ──
+                after_pos = sub.loc[pos:, "NDVI"]
+                above_eos = after_pos[after_pos >= eos_threshold]
+                if len(above_eos) > 0:
+                    eos = above_eos.index[-1]
+                else:
+                    eos = after_pos.index[-1] if len(after_pos) > 0 else pos
+
                 season_start = pd.Timestamp(s)
-                # Season-relative DOY: days since season start (handles Jun-May cross-year correctly)
                 sos_rel = (sos - season_start).days
                 pos_rel = (pos - season_start).days
                 eos_rel = (eos - season_start).days
+
                 rows.append({
-                    "Year":yr,
-                    "SOS_Date":sos,"SOS_DOY":sos.dayofyear,"SOS_Target":sos_rel,"SOS_Method":resolved_sos,
-                    "POS_Date":pos,"POS_DOY":pos.dayofyear,"POS_Target":pos_rel,
-                    "EOS_Date":eos,"EOS_DOY":eos.dayofyear,"EOS_Target":eos_rel,"EOS_Method":eos_method,
-                    "LOS_Days":(eos-sos).days,
-                    "Season_Start":season_start,
-                    "Peak_NDVI":float(sub.loc[pos,"Sm"]),
-                    "Amplitude":float(sub["Sm"].max()-sub["Sm"].min()),
-                    "Season":season_type})
-            except Exception: continue
-        if not rows: return None, "No complete seasons found — check forest type / threshold"
+                    "Year": yr,
+                    "SOS_Date": sos, "SOS_DOY": sos.dayofyear, "SOS_Target": sos_rel,
+                    "SOS_Method": "amplitude_threshold",
+                    "POS_Date": pos, "POS_DOY": pos.dayofyear, "POS_Target": pos_rel,
+                    "EOS_Date": eos, "EOS_DOY": eos.dayofyear, "EOS_Target": eos_rel,
+                    "EOS_Method": "amplitude_threshold",
+                    "LOS_Days": (eos - sos).days,
+                    "Season_Start": season_start,
+                    "Peak_NDVI":   peak_ndvi,
+                    "Base_NDVI":   base_ndvi,
+                    "Amplitude":   amplitude,
+                    "SOS_Threshold": sos_threshold,
+                    "Season": season_type,
+                })
+            except Exception:
+                continue
+
+        if not rows:
+            return None, "No complete seasons found — check season window or threshold. " \
+                         "If your NDVI signal is flat (evergreen), try lowering the threshold to 5%."
         return pd.DataFrame(rows), None
-    except Exception as e: return None, str(e)
+
+    except Exception as e:
+        return None, str(e)
 
 
 # ─── FEATURE SELECTION & CORRELATIONS ────────────────────────
@@ -665,29 +728,94 @@ def loo_ridge(X_vals, y_vals, alpha):
     return float(np.clip(1-ss_res/ss_tot,-1.0,1.0)), float(mean_absolute_error(y_vals,preds))
 
 
-def fit_event_model(X_all, y, event):
-    """Multi-feature Ridge regression with collinearity filtering and LOO CV."""
+def fit_event_model(X_all, y, event, model_type="Ridge (Linear)"):
+    """
+    Fit phenology model for a single event.
+
+    model_type options:
+      "Ridge (Linear)"              — standard Ridge regression (LOO CV)
+      "Ridge + Polynomial (deg 2)"  — Ridge on degree-2 polynomial features
+      "LOWESS-smoothed + Ridge"     — LOWESS smooths y residuals; Ridge on met features
+    """
     yt = y.values; n = len(yt)
 
-    # max_features capped at n-2 inside select_multi_features; allow up to 5 candidates
     features = select_multi_features(X_all, y, event, max_features=5)
 
     if not features:
         md = float(yt.mean())
         return {'mode':'mean','features':[],'r2':0.0,
                 'mae':float(np.mean(np.abs(yt-md))),
-                'alpha':None,'coef':[],'intercept':md,'best_r':0.0,'mean_doy':md,'n':n,'pipe':None}
+                'alpha':None,'coef':[],'intercept':md,'best_r':0.0,
+                'mean_doy':md,'n':n,'pipe':None,'model_type':model_type}
 
     Xf = X_all[features].fillna(X_all[features].median())
     Xv = Xf.values
 
-    rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
-    rcv.fit(StandardScaler().fit_transform(Xv), yt)
-    best_alpha = float(rcv.alpha_)
+    # ── Choose fitting strategy ────────────────────────────────
+    if model_type == "Ridge + Polynomial (deg 2)":
+        # Polynomial feature expansion then Ridge
+        poly_tf = PolynomialFeatures(degree=2, include_bias=False)
+        Xv_poly = poly_tf.fit_transform(StandardScaler().fit_transform(Xv))
+        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
+        rcv.fit(Xv_poly, yt)
+        best_alpha = float(rcv.alpha_)
+        pipe = Pipeline([
+            ('sc', StandardScaler()),
+            ('poly', PolynomialFeatures(degree=2, include_bias=False)),
+            ('r', Ridge(alpha=best_alpha))
+        ])
+        pipe.fit(Xv, yt)
+        # LOO R² via manual loop
+        loo = LeaveOneOut(); preds = []
+        for tr, te in loo.split(Xv):
+            p = Pipeline([('sc', StandardScaler()),
+                          ('poly', PolynomialFeatures(degree=2, include_bias=False)),
+                          ('r', Ridge(alpha=best_alpha))])
+            p.fit(Xv[tr], yt[tr]); preds.append(float(p.predict(Xv[te])[0]))
+        preds = np.array(preds)
+        ss_res = np.sum((yt - preds)**2)
+        ss_tot = np.sum((yt - yt.mean())**2) + 1e-12
+        r2  = float(np.clip(1 - ss_res/ss_tot, -1.0, 1.0))
+        mae = float(mean_absolute_error(yt, preds))
+        coef_unstd = []  # polynomial coefs not directly interpretable
+        intercept_unstd = float(pipe.named_steps['r'].intercept_)
 
-    pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
-    pipe.fit(Xv, yt)
-    r2, mae = loo_ridge(Xv, yt, best_alpha)
+    elif model_type == "LOWESS-smoothed + Ridge" and _HAS_STATSMODELS:
+        # Smooth y with LOWESS to reduce noise, then Ridge on met features
+        years_idx = np.arange(n, dtype=float)
+        smoothed_yt = sm_lowess(yt, years_idx, frac=0.6, return_sorted=False)
+        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
+        sc  = StandardScaler()
+        rcv.fit(sc.fit_transform(Xv), smoothed_yt)
+        best_alpha = float(rcv.alpha_)
+        pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
+        pipe.fit(Xv, smoothed_yt)
+        # LOO R² on original (un-smoothed) y
+        preds = []
+        loo = LeaveOneOut()
+        for tr, te in loo.split(Xv):
+            p = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
+            p.fit(Xv[tr], smoothed_yt[tr]); preds.append(float(p.predict(Xv[te])[0]))
+        preds = np.array(preds)
+        ss_res = np.sum((yt - preds)**2)
+        ss_tot = np.sum((yt - yt.mean())**2) + 1e-12
+        r2  = float(np.clip(1 - ss_res/ss_tot, -1.0, 1.0))
+        mae = float(mean_absolute_error(yt, preds))
+        sc2 = pipe.named_steps['sc']; r2_coef = pipe.named_steps['r']
+        coef_unstd  = list(r2_coef.coef_ / sc2.scale_)
+        intercept_unstd = float(r2_coef.intercept_ - np.dot(r2_coef.coef_ / sc2.scale_, sc2.mean_))
+
+    else:
+        # Default: standard Ridge (Linear)
+        rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
+        rcv.fit(StandardScaler().fit_transform(Xv), yt)
+        best_alpha = float(rcv.alpha_)
+        pipe = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
+        pipe.fit(Xv, yt)
+        r2, mae = loo_ridge(Xv, yt, best_alpha)
+        sc2 = pipe.named_steps['sc']; ridge = pipe.named_steps['r']
+        coef_unstd      = list(ridge.coef_ / sc2.scale_)
+        intercept_unstd = float(ridge.intercept_ - np.dot(ridge.coef_ / sc2.scale_, sc2.mean_))
 
     best_single_r = 0.0
     for f in features:
@@ -696,13 +824,9 @@ def fit_event_model(X_all, y, event):
             if abs(r_val) > best_single_r: best_single_r = abs(r_val)
         except Exception: pass
 
-    sc = pipe.named_steps['sc']; ridge = pipe.named_steps['r']
-    coef_unstd = list(ridge.coef_ / sc.scale_)
-    intercept_unstd = float(ridge.intercept_ - np.dot(ridge.coef_ / sc.scale_, sc.mean_))
-
     return {'mode':'ridge','features':features,'r2':r2,'mae':mae,
             'alpha':best_alpha,'coef':coef_unstd,'intercept':intercept_unstd,
-            'best_r':best_single_r,'n':n,'pipe':pipe}
+            'best_r':best_single_r,'n':n,'pipe':pipe,'model_type':model_type}
 
 
 
@@ -712,7 +836,7 @@ class UniversalPredictor:
     def __init__(self):
         self._fits={}; self.r2={}; self.mae={}; self.n_seasons={}; self.corr_tables={}
 
-    def train(self, train_df, all_params):
+    def train(self, train_df, all_params, model_type="Ridge (Linear)"):
         meta={'Year','Event','Target_DOY','LOS_Days','Peak_NDVI'}
         feat_cols=[c for c in train_df.columns if c not in meta
                    and pd.api.types.is_numeric_dtype(train_df[c]) and train_df[c].std()>1e-8]
@@ -721,7 +845,7 @@ class UniversalPredictor:
             if len(sub)<3: continue
             X=sub[feat_cols].fillna(sub[feat_cols].median()); y=sub['Target_DOY']
             self.corr_tables[event]=get_all_correlations(X, y)
-            fit=fit_event_model(X, y, event)
+            fit=fit_event_model(X, y, event, model_type=model_type)
             self._fits[event]=fit; self.r2[event]=fit['r2']; self.mae[event]=fit['mae']
 
     def predict(self, inputs, event, year=2026, season_start_month=6):
@@ -802,40 +926,60 @@ class UniversalPredictor:
 def plot_ndvi_phenology(ndvi_raw, pheno_df):
     fig, ax = plt.subplots(figsize=(14, 4.8))
     dates = pd.to_datetime(ndvi_raw['Date'])
-    ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
-               label='NDVI (raw obs)', zorder=3)
-    ndvi_s = ndvi_raw.set_index('Date')['NDVI'].resample('D').interpolate(method='time')
+    ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=22, alpha=0.60,
+               label='NDVI (raw observations)', zorder=3)
+
+    # 5-day interpolated series (the series used for ALL phenology metrics)
+    ndvi_s = (ndvi_raw.set_index('Date')['NDVI']
+              .resample('D').interpolate(method='time')
+              .resample('5D').mean()
+              .ffill().bfill())
+    ax.plot(ndvi_s.index, ndvi_s.values, color='#2E7D32', lw=1.6,
+            alpha=0.70, label='5-day interpolated (analysis series)', zorder=4)
+
+    # Light SG smooth for visual clarity only
     n = len(ndvi_s)
-    # Adaptive SG window: ~5% of series length, minimum 11, always odd
-    wl_target = max(11, int(n * 0.05))
+    wl_target = max(7, int(n * 0.08))
     wl = wl_target if wl_target % 2 == 1 else wl_target + 1
     wl = min(wl, n - 1 if (n - 1) % 2 == 1 else n - 2)
     if wl >= 7:
         sm_arr = savgol_filter(ndvi_s.ffill().bfill().values, wl, 3)
-        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})', zorder=5)
+        ax.plot(ndvi_s.index, sm_arr, color='#1B5E20', lw=2.4,
+                label=f'SG-smoothed (visual only, w={wl})', zorder=5)
+
     ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
-    ev_labels = {'SOS': 'SOS', 'POS': 'POS', 'EOS': 'EOS'}
     plotted = set()
     for _, row in pheno_df.iterrows():
         for ev, col in ev_colors.items():
             d = row.get(f'{ev}_Date')
             if pd.notna(d):
-                ax.axvline(d, color=col, lw=1.4, alpha=0.50, ls='--',
-                           label=ev_labels.pop(ev) if ev not in plotted else '')
+                ax.axvline(d, color=col, lw=1.6, alpha=0.55, ls='--',
+                           label=ev if ev not in plotted else '')
                 plotted.add(ev)
+        # Shade the amplitude threshold for the first season
+        thr = row.get('SOS_Threshold')
+        base = row.get('Base_NDVI')
+        if thr is not None and base is not None:
+            ax.axhline(thr, color='#FF6F00', lw=1.0, ls=':', alpha=0.55,
+                       label='Amplitude threshold' if 'thresh' not in plotted else '')
+            plotted.add('thresh')
+            break
+
     handles = [
-        Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
-        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl})'),
+        Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='Raw NDVI observations'),
+        Line2D([0],[0], color='#2E7D32', lw=1.6, alpha=0.70, label='5-day interpolated (metrics basis)'),
+        Line2D([0],[0], color='#1B5E20', lw=2.4, label='SG-smoothed (visual only)'),
         Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
+        Line2D([0],[0], color='#FF6F00', lw=1.0, ls=':', label='Amplitude threshold'),
     ]
-    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events',
+    ax.set_title('NDVI Time Series — 5-Day Interpolated + Phenology Events',
                  fontsize=12, fontweight='bold', color='#1B5E20')
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-    ax.legend(handles=handles, ncol=5, fontsize=8.5, loc='upper left', framealpha=0.88)
+    ax.legend(handles=handles, ncol=4, fontsize=8.0, loc='upper left', framealpha=0.88)
     ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
@@ -1299,18 +1443,25 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
 # MAIN APP
 # ─────────────────────────────────────────────────────────────
 def main():
-    st.markdown('<p class="main-header">🌲 Universal Indian Forest Phenology Predictor</p>',
+    st.markdown('<p class="main-header">🌲 Universal Vegetation Phenology Predictor</p>',
                 unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">11 Forest Types · Upload NDVI + NASA POWER Met · '
-                'Ridge Regression · LOO CV · SOS / POS / EOS / LOS</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Any Vegetation · Upload NDVI + NASA POWER Met · '
+                '5-Day Interpolation · Amplitude Threshold · Ridge / Polynomial / LOWESS Models · LOO CV</p>',
+                unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="info-box">
-    <b>📋 How to use:</b> Upload your <b>NDVI CSV</b> and <b>NASA POWER Met CSV</b> →
-    Select forest type → App extracts phenology, fits models, shows correlations &amp; equations →
-    Use <b>Predict</b> tab to forecast events for any year<br>
-    <b>Model:</b> Pearson |r|≥{MIN_CORR_THRESHOLD} feature filter &nbsp;·&nbsp;
-    Single best feature per event &nbsp;·&nbsp; Ridge α auto-tuned &nbsp;·&nbsp; LOO cross-validation
+    <b>📋 How to use:</b>
+    <ol style="margin:6px 0 0 16px;padding:0">
+    <li>Upload your <b>NDVI CSV</b> and <b>NASA POWER Met CSV</b> in the sidebar</li>
+    <li>Set the <b>season window</b> (start and end month for your growing season)</li>
+    <li>Adjust the <b>amplitude threshold</b> — default 10% works for most vegetation types</li>
+    <li>Choose a <b>regression model</b> (Ridge / Polynomial / LOWESS)</li>
+    <li>App extracts SOS / POS / EOS, fits models, shows correlations &amp; equations</li>
+    </ol>
+    <b>Phenology method:</b> 5-day interpolation → base + threshold% × amplitude → SOS / POS / EOS&nbsp;&nbsp;·&nbsp;&nbsp;
+    <b>Feature filter:</b> Pearson |r| ≥ {MIN_CORR_THRESHOLD}&nbsp;&nbsp;·&nbsp;&nbsp;
+    <b>Validation:</b> Leave-One-Out CV
     </div>
     """, unsafe_allow_html=True)
 
@@ -1336,340 +1487,114 @@ def main():
         st.session_state['_file_fingerprint'] = _cur_fp
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## 🌱 Forest Type Selection")
+    st.sidebar.markdown("## ⚙️ Phenology Settings")
 
-    # ══════════════════════════════════════════════════════════
-    # COORDINATE-BASED AUTO-DETECTOR
-    # ══════════════════════════════════════════════════════════
-    # Known reference sites with correct forest type mapping
-    # Source: Champion & Seth (1968), FSI India State of Forest Report 2023,
-    #         Rodgers & Panwar (1988), Pascal (1988), Meher-Homji (1991)
-    KNOWN_SITES = [
-        # ── Tropical Dry Deciduous ────────────────────────────
-        {"name":"Tirupati (Seshachalam)",   "lat":13.63,"lon":79.40,"elev":200,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Mudumalai (TN)",           "lat":11.57,"lon":76.57,"elev":1000, "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Bandipur (Karnataka)",      "lat":11.67,"lon":76.63,"elev":800,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Pench (MP)",               "lat":21.75,"lon":79.28,"elev":450,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Kanha (MP)",               "lat":22.33,"lon":80.61,"elev":520,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Tadoba (Maharashtra)",     "lat":20.22,"lon":79.33,"elev":200,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Nagarahole (Karnataka)",   "lat":12.03,"lon":76.11,"elev":750,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Ranthambore (Rajasthan)",  "lat":26.01,"lon":76.50,"elev":350,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Sariska (Rajasthan)",      "lat":27.33,"lon":76.44,"elev":400,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        {"name":"Warangal (Telangana)",     "lat":18.00,"lon":79.58,"elev":270,  "type":"Tropical Dry Deciduous — Monsoon (Jun-May)"},
-        # ── Tropical Moist Deciduous ──────────────────────────
-        {"name":"Kaziranga (Assam)",        "lat":26.58,"lon":93.17,"elev":80,   "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Simlipal (Odisha)",        "lat":21.83,"lon":86.50,"elev":900,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Bastar (Chhattisgarh)",    "lat":19.10,"lon":81.95,"elev":560,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Cuttack (Odisha)",         "lat":20.46,"lon":85.88,"elev":30,   "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Hazaribagh (Jharkhand)",   "lat":23.99,"lon":85.37,"elev":600,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Dehing Patkai (Assam)",    "lat":27.30,"lon":95.60,"elev":120,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        {"name":"Achanakmar (CG)",          "lat":22.27,"lon":81.55,"elev":420,  "type":"Tropical Moist Deciduous — Monsoon (Jun-May)"},
-        # ── Tropical Wet Evergreen ────────────────────────────
-        {"name":"Agumbe (Karnataka)",       "lat":13.51,"lon":75.10,"elev":640,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Silent Valley (Kerala)",   "lat":11.08,"lon":76.47,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Periyar (Kerala)",         "lat":9.58, "lon":77.22,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Kudremukh (Karnataka)",    "lat":13.22,"lon":75.24,"elev":1800, "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Coorg (Karnataka)",        "lat":12.33,"lon":75.83,"elev":900,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Wayanad (Kerala)",         "lat":11.60,"lon":76.08,"elev":750,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Andaman (Port Blair)",     "lat":11.67,"lon":92.73,"elev":10,   "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        {"name":"Bhagwan Mahaveer (Goa)",   "lat":15.40,"lon":74.33,"elev":200,  "type":"Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"},
-        # ── Tropical Dry Evergreen ────────────────────────────
-        {"name":"Pichavaram (Tamil Nadu)",  "lat":11.43,"lon":79.78,"elev":5,    "type":"Tropical Dry Evergreen (Jan-Dec)"},
-        {"name":"Point Calimere (TN)",      "lat":10.30,"lon":79.85,"elev":5,    "type":"Tropical Dry Evergreen (Jan-Dec)"},
-        {"name":"Vedanthangal (TN)",        "lat":12.52,"lon":79.87,"elev":30,   "type":"Tropical Dry Evergreen (Jan-Dec)"},
-        # ── Tropical Thorn / Scrub ────────────────────────────
-        {"name":"Jaisalmer (Rajasthan)",    "lat":26.91,"lon":70.91,"elev":220,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
-        {"name":"Rann of Kutch (Gujarat)",  "lat":23.75,"lon":70.22,"elev":30,   "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
-        {"name":"Hisar (Haryana)",          "lat":29.15,"lon":75.72,"elev":215,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
-        {"name":"Jodhpur (Rajasthan)",      "lat":26.29,"lon":73.02,"elev":231,  "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
-        {"name":"Naliya (Gujarat)",         "lat":23.27,"lon":68.83,"elev":35,   "type":"Tropical Thorn Forest / Scrub (Jun-May)"},
-        # ── Subtropical Hill Forest ───────────────────────────
-        {"name":"Rajaji NP (Uttarakhand)", "lat":30.00,"lon":78.17,"elev":900,   "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
-        {"name":"Manas (Assam foothills)", "lat":26.67,"lon":90.73,"elev":150,   "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
-        {"name":"Darjeeling (W Bengal)",   "lat":27.04,"lon":88.27,"elev":1200,  "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
-        {"name":"Shillong (Meghalaya)",    "lat":25.58,"lon":91.88,"elev":1400,  "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
-        {"name":"Jim Corbett (Ramnagar)", "lat":29.53,"lon":79.07,"elev":500,    "type":"Subtropical Broadleaved Hill Forest (Apr-Mar)"},
-        # ── Montane Temperate ─────────────────────────────────
-        {"name":"Kedarnath WLS",           "lat":30.73,"lon":79.07,"elev":2500,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        {"name":"Great Himalayan NP",      "lat":31.75,"lon":77.60,"elev":2500,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        {"name":"Deodar forest Manali",    "lat":32.23,"lon":77.19,"elev":2050,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        {"name":"Chopta (Uttarakhand)",    "lat":30.46,"lon":79.25,"elev":2680,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        {"name":"Munsiyari (Uttarakhand)", "lat":30.07,"lon":80.24,"elev":2200,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        {"name":"Tirthan Valley (HP)",     "lat":31.67,"lon":77.45,"elev":1700,  "type":"Montane Temperate Forest (Apr-Nov)"},
-        # ── Alpine / Subalpine ────────────────────────────────
-        {"name":"Valley of Flowers (UK)",  "lat":30.73,"lon":79.60,"elev":3600,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        {"name":"Spiti (Pin Valley)",      "lat":31.96,"lon":78.16,"elev":3800,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        {"name":"Ladakh (Nubra Valley)",   "lat":34.63,"lon":77.43,"elev":3100,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        {"name":"Zanskar (J&K)",           "lat":33.47,"lon":76.80,"elev":3700,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        {"name":"Rohtang Pass (HP)",       "lat":32.37,"lon":77.24,"elev":3980,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        {"name":"Hemkund Sahib (UK)",      "lat":30.70,"lon":79.65,"elev":4320,  "type":"Alpine / Subalpine Forest and Meadow (May-Oct)"},
-        # ── Shola ─────────────────────────────────────────────
-        {"name":"Eravikulam (Munnar)",     "lat":10.17,"lon":77.05,"elev":2100,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
-        {"name":"Mukurthi NP (Nilgiris)",  "lat":11.23,"lon":76.52,"elev":2600,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
-        {"name":"Kodaikanal (Tamil Nadu)", "lat":10.24,"lon":77.49,"elev":2133,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
-        {"name":"Valparai (Tamil Nadu)",   "lat":10.33,"lon":76.96,"elev":1800,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
-        {"name":"Devikulam (Kerala)",      "lat":10.02,"lon":77.11,"elev":1800,  "type":"Shola Forest — Southern Montane (Jan-Dec)"},
-        # ── Mangrove ──────────────────────────────────────────
-        {"name":"Sundarbans (W Bengal)",   "lat":21.95,"lon":88.88,"elev":5,     "type":"Mangrove Forest (Jan-Dec)"},
-        {"name":"Bhitarkanika (Odisha)",   "lat":20.73,"lon":86.88,"elev":5,     "type":"Mangrove Forest (Jan-Dec)"},
-        {"name":"Pichavaram Mangrove",     "lat":11.43,"lon":79.78,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
-        {"name":"Coringa (Andhra Pradesh)","lat":16.72,"lon":82.25,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
-        {"name":"Gulf of Kutch (Gujarat)", "lat":22.60,"lon":69.80,"elev":2,     "type":"Mangrove Forest (Jan-Dec)"},
-        # ── NE India Evergreen ────────────────────────────────
-        {"name":"Cherrapunji (Meghalaya)", "lat":25.27,"lon":91.73,"elev":1300,  "type":"NE India Moist Evergreen (Jan-Dec)"},
-        {"name":"Namdapha (Arunachal)",    "lat":27.40,"lon":96.38,"elev":500,   "type":"NE India Moist Evergreen (Jan-Dec)"},
-        {"name":"Dibru-Saikhowa (Assam)",  "lat":27.67,"lon":95.22,"elev":110,   "type":"NE India Moist Evergreen (Jan-Dec)"},
-        {"name":"Dampa TR (Mizoram)",      "lat":23.47,"lon":92.67,"elev":900,   "type":"NE India Moist Evergreen (Jan-Dec)"},
-        {"name":"Nokrek (Meghalaya)",      "lat":25.50,"lon":90.47,"elev":1400,  "type":"NE India Moist Evergreen (Jan-Dec)"},
-    ]
+    # ── UNIVERSAL SEASON WINDOW ───────────────────────────────
+    st.sidebar.markdown("### 📅 Season Window")
+    st.sidebar.caption(
+        "Define the growing season start and end month. "
+        "All phenology metrics are extracted within this window."
+    )
+    _month_names = ["Jan","Feb","Mar","Apr","May","Jun",
+                    "Jul","Aug","Sep","Oct","Nov","Dec"]
+    season_start_mo = st.sidebar.selectbox(
+        "Season start month", options=list(range(1,13)),
+        format_func=lambda m: _month_names[m-1], index=5,   # default Jun
+        key="season_start_mo",
+        help="First month of the growing season (e.g. Jun for monsoon forests)")
+    season_end_mo = st.sidebar.selectbox(
+        "Season end month", options=list(range(1,13)),
+        format_func=lambda m: _month_names[m-1], index=4,   # default May
+        key="season_end_mo",
+        help="Last month of the growing season. Can be in the next calendar year (e.g. May for Jun-May)")
 
-    def _suggest_forest_type(lat, lon, elev_m):
-        """Rule-based forest type suggestion from lat/lon/elevation.
-        Rules derived from Champion & Seth (1968) and FSI SFR 2023."""
-        # Tidal/coastal mangrove zones
-        if (20.5 < lat < 23.0 and 87.5 < lon < 89.5): return "Mangrove Forest (Jan-Dec)"
-        if (19.5 < lat < 22.0 and 85.5 < lon < 87.5): return "Mangrove Forest (Jan-Dec)"
-        if (10.5 < lat < 12.0 and 79.3 < lon < 80.2): return "Tropical Dry Evergreen (Jan-Dec)"
-        # NE India high-rain evergreen
-        if lat > 24.0 and lon > 89.5: return "NE India Moist Evergreen (Jan-Dec)"
-        # Alpine / High Himalaya >3000m
-        if elev_m and elev_m > 3000: return "Alpine / Subalpine Forest and Meadow (May-Oct)"
-        # Montane temperate 1500-3000m in Himalayas
-        if elev_m and 1500 < elev_m <= 3000 and lat > 29.0: return "Montane Temperate Forest (Apr-Nov)"
-        # Shola: Western Ghats / Nilgiris >1500m
-        if elev_m and elev_m > 1500 and lat < 13.0 and lon < 78.0: return "Shola Forest — Southern Montane (Jan-Dec)"
-        # Subtropical hill forest: Himalayan foothills 500-1500m
-        if elev_m and 500 < elev_m <= 1500 and lat > 26.0: return "Subtropical Broadleaved Hill Forest (Apr-Mar)"
-        # Thorn/scrub: Rajasthan, Kutch, semi-arid NW India
-        if lat > 23.0 and lon < 76.0: return "Tropical Thorn Forest / Scrub (Jun-May)"
-        # Wet evergreen: W Ghats, Andamans <1500m
-        if lon < 77.5 and lat < 16.0 and lat > 8.0: return "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"
-        if lon > 91.5 and lat < 14.0: return "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)"
-        # Moist deciduous: >1000mm rainfall belt
-        if 18.0 < lat < 26.0 and 77.0 < lon < 87.0: return "Tropical Moist Deciduous — Monsoon (Jun-May)"
-        # Dry deciduous: Deccan, Central India
-        if 12.0 < lat < 22.0 and 74.0 < lon < 82.0: return "Tropical Dry Deciduous — Monsoon (Jun-May)"
-        return None  # cannot determine
-
-    with st.sidebar.expander("🎯 Auto-suggest forest type from coordinates", expanded=False):
-        st.caption("Enter your site coordinates to get an instant suggestion")
-        col_lat, col_lon = st.columns(2)
-        with col_lat:
-            user_lat = st.number_input("Latitude (°N)", min_value=5.0, max_value=38.0,
-                                        value=13.51, step=0.01, format="%.2f", key="user_lat")
-        with col_lon:
-            user_lon = st.number_input("Longitude (°E)", min_value=68.0, max_value=98.0,
-                                        value=75.10, step=0.01, format="%.2f", key="user_lon")
-        user_elev = st.number_input("Elevation (m) — enter 0 if unknown",
-                                     min_value=0, max_value=6000, value=0, step=50, key="user_elev")
-        elev_for_rule = user_elev if user_elev > 0 else None
-
-        if st.button("🔍 Find nearest sites & suggest forest type", key="coord_btn"):
-            # Find 3 nearest known sites by Euclidean distance in lat/lon
-            dists = []
-            for s in KNOWN_SITES:
-                d = ((s["lat"] - user_lat)**2 + (s["lon"] - user_lon)**2)**0.5
-                dists.append((d, s))
-            dists.sort(key=lambda x: x[0])
-            nearest = dists[:4]
-
-            st.markdown("**📍 Nearest reference sites:**")
-            for d, s in nearest:
-                km = d * 111
-                st.markdown(f"- **{s['name']}** — {km:.0f} km away  \n"
-                            f"  Elev: {s['elev']}m · `{s['type'].split('—')[0].strip()}`")
-
-            suggested = _suggest_forest_type(user_lat, user_lon, elev_for_rule)
-            if suggested:
-                st.success(f"✅ **Suggested forest type:**\n\n**{suggested}**")
-                st.caption("Select this in the dropdown below. Verify against the Forest Guide tab.")
-            else:
-                st.info("Could not auto-suggest — check the Forest Guide tab or use the nearest site above.")
-
-    # ── QUICK DECISION GUIDE ──────────────────────────────────
-    with st.sidebar.expander("❓ Step-by-step: How to choose forest type", expanded=False):
-        st.markdown("""
-**Answer these 4 questions in order:**
-
-**1️⃣ What is your elevation?**
-- Above 3000 m → ⛰️ **Alpine / Subalpine**
-- 1500–3000 m + Himalayas → 🏔️ **Montane Temperate**
-- Above 1500 m + Nilgiris/W Ghats → 🌫️ **Shola**
-- 500–1500 m + Himalayan foothills → 🌳 **Subtropical Hill**
-- Below 500 m → go to Q2
-
-**2️⃣ Is your site coastal/tidal?**
-- Yes, tidal mudflat → 🌊 **Mangrove**
-- Yes, Tamil Nadu east coast → 🌴 **Tropical Dry Evergreen**
-- Yes, NE India (Assam, Meghalaya) → 🌿 **NE India Moist Evergreen**
-- No → go to Q3
-
-**3️⃣ What is your annual rainfall?**
-- Below 700 mm → 🌵 **Tropical Thorn / Scrub**
-- 700–1200 mm → 🍂 **Tropical Dry Deciduous**
-- 1200–2000 mm → 🌿 **Tropical Moist Deciduous**
-- Above 2000 mm + W Ghats / Andamans → 🌲 **Tropical Wet Evergreen**
-- Above 2000 mm + NE India → 🌿 **NE India Moist Evergreen**
-
-**4️⃣ Does your forest shed ALL leaves in April–May?**
-- Yes → Deciduous type confirmed (Q3 above)
-- No → Evergreen type confirmed (Q3 above)
-
----
-**🗺️ Quick city/site reference:**
-
-| Site | Forest Type |
-|---|---|
-| Tirupati, Kanha, Pench, Bandipur | 🍂 Tropical Dry Deciduous |
-| Simlipal, Kaziranga, Bastar | 🌿 Tropical Moist Deciduous |
-| Agumbe, Silent Valley, Coorg | 🌲 Tropical Wet Evergreen |
-| Pichavaram, Point Calimere | 🌴 Tropical Dry Evergreen |
-| Jaisalmer, Rann of Kutch, Hisar | 🌵 Thorn / Scrub |
-| Rajaji, Corbett, Manas (foothills) | 🌳 Subtropical Hill |
-| Kedarnath, Manali, Chopta | 🏔️ Montane Temperate |
-| Valley of Flowers, Spiti, Ladakh | ⛰️ Alpine / Subalpine |
-| Eravikulam, Kodaikanal, Mukurthi | 🌫️ Shola Montane |
-| Sundarbans, Bhitarkanika | 🌊 Mangrove |
-| Cherrapunji, Namdapha | 🌿 NE India Evergreen |
-        """)
-
-    # ── FOREST TYPE DROPDOWN WITH RICHER HELP TEXT ────────────
-    # Build dropdown labels with region hints for clarity
-    _forest_labels = {
-        "Tropical Dry Deciduous — Monsoon (Jun-May)":       "🍂 Tropical Dry Deciduous  [Tirupati, Deccan, Eastern Ghats]",
-        "Tropical Moist Deciduous — Monsoon (Jun-May)":     "🌿 Tropical Moist Deciduous  [MP, Odisha, NE slopes]",
-        "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)":"🌲 Tropical Wet Evergreen  [W Ghats, Andamans]",
-        "Tropical Dry Evergreen (Jan-Dec)":                  "🌴 Tropical Dry Evergreen  [Tamil Nadu coast]",
-        "Tropical Thorn Forest / Scrub (Jun-May)":           "🌵 Tropical Thorn / Scrub  [Rajasthan, Gujarat]",
-        "Subtropical Broadleaved Hill Forest (Apr-Mar)":     "🌳 Subtropical Hill Forest  [Himalayan foothills]",
-        "Montane Temperate Forest (Apr-Nov)":                "🏔️ Montane Temperate  [W Himalayas 1500–3000m]",
-        "Alpine / Subalpine Forest and Meadow (May-Oct)":   "⛰️ Alpine / Subalpine  [Ladakh, Spiti, >3000m]",
-        "Shola Forest — Southern Montane (Jan-Dec)":        "🌫️ Shola Montane  [Nilgiris, Munnar, Kodaikanal]",
-        "Mangrove Forest (Jan-Dec)":                         "🌊 Mangrove  [Sundarbans, Bhitarkanika]",
-        "NE India Moist Evergreen (Jan-Dec)":               "🌿 NE India Moist Evergreen  [Assam, Meghalaya, NE States]",
-    }
-    forest_keys = list(SEASON_CONFIGS.keys())
-    forest_display = [_forest_labels.get(k, k) for k in forest_keys]
-
-    _sel_idx = st.sidebar.selectbox(
-        "Select forest type",
-        options=range(len(forest_keys)),
-        index=0,
-        format_func=lambda i: forest_display[i],
-        help="11 Indian forest types — Champion & Seth (1968). Use the ❓ guide above if unsure.")
-    season_type = forest_keys[_sel_idx]
+    # Build a minimal universal SEASON_CONFIG entry from user choice
+    season_type = f"Custom ({_month_names[season_start_mo-1]}–{_month_names[season_end_mo-1]})"
+    if season_type not in SEASON_CONFIGS:
+        SEASON_CONFIGS[season_type] = {
+            "start_month": season_start_mo,
+            "end_month":   season_end_mo,
+            "min_days":    60,
+            "threshold_pct": 0.10,
+            "sos_method":  "threshold",
+            "icon": "🌿",
+            "regions": "User-defined",
+            "species": "—", "states": "—",
+            "rainfall": "—", "ndvi_peak": "—", "key_drivers": "—",
+            "desc": "User-defined season window.",
+            "pos_constrain_end": None,
+        }
+    else:
+        SEASON_CONFIGS[season_type]["start_month"] = season_start_mo
+        SEASON_CONFIGS[season_type]["end_month"]   = season_end_mo
 
     cfg = SEASON_CONFIGS[season_type]
 
-    # ── RICHER INFO CARD ──────────────────────────────────────
-    # Deciduousness indicator
-    _amp_hint = {"High (0.40–0.55)": ["Tropical Dry Deciduous","Tropical Moist Deciduous","Tropical Thorn"],
-                 "Medium (0.25–0.40)": ["Subtropical","Montane Temperate","Alpine"],
-                 "Low (0.10–0.25)":  ["Wet Evergreen","Dry Evergreen","Shola","Mangrove","NE India"]}
-    _deciduous = "High" if any(k in season_type for k in ["Dry Deciduous","Moist Deciduous","Thorn"]) \
-        else "Low" if any(k in season_type for k in ["Evergreen","Shola","Mangrove","NE India"]) else "Medium"
-    _monsoon_type = "SW Monsoon (Jun–Sep)" if cfg.get("start_month") in [4,5,6] \
-        else "NE Monsoon (Oct–Dec)" if "Dry Evergreen" in season_type \
-        else "Both SW + NE Monsoons" if any(k in season_type for k in ["Shola","NE India"]) \
-        else "Snowmelt + SW Monsoon"
+    # ── AMPLITUDE THRESHOLD SLIDER (5–30%) ───────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 Amplitude Threshold")
+    st.sidebar.caption(
+        "**SOS** = first date NDVI ≥ base + threshold% × amplitude after minimum  \n"
+        "**EOS** = last date NDVI ≥ base + threshold% × amplitude before next minimum  \n"
+        "**POS** = date of maximum NDVI"
+    )
+    threshold_pct_val = st.sidebar.slider(
+        "Threshold (% of NDVI amplitude)", 5, 30, 10, 1,
+        key="thr_slider",
+        help="10% is the standard amplitude method. Lower values detect earlier SOS / later EOS."
+    )
+    sos_threshold_pct     = threshold_pct_val / 100.0
+    eos_threshold_pct     = sos_threshold_pct
+    threshold_pct_override = sos_threshold_pct
 
     st.sidebar.info(
-        f"**{cfg.get('icon','')} {season_type}**\n\n"
-        f"📅 Growing window: **{SM_NAME[cfg['start_month']]} → {SM_NAME[cfg['end_month']]}**\n"
-        f"🌧️ Annual rainfall: {cfg.get('rainfall','')}\n"
-        f"☔ Primary trigger: {_monsoon_type}\n"
-        f"📍 States: {cfg.get('states','')}\n"
-        f"🌿 Species: {cfg.get('species','')}\n"
-        f"📈 NDVI peak month: {cfg.get('ndvi_peak','')}\n"
-        f"📊 NDVI seasonality: {_deciduous} amplitude\n"
-        f"🔑 Key met drivers: {cfg.get('key_drivers','')}\n"
-        f"📝 {cfg.get('desc','')}"
+        f"Threshold = base NDVI + **{threshold_pct_val}%** × amplitude\n\n"
+        f"5-day interpolated series used for all phenology metrics."
     )
 
-    # ── WHY THESE MET PARAMETERS BOX ──────────────────────────
-    _driver_explain = {
-        "Tropical Dry Deciduous — Monsoon (Jun-May)":
-            "PRECTOTCORR (first monsoon rain → SOS) · GWETTOP (surface soil moisture → leaf flush) · T2M_MIN (pre-monsoon warmth → timing of bud break)",
-        "Tropical Moist Deciduous — Monsoon (Jun-May)":
-            "RH2M (humidity rise signals monsoon → SOS) · PRECTOTCORR (monsoon intensity → POS) · T2M / GWETROOT (soil moisture sustains canopy)",
-        "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)":
-            "RH2M (near-constant humidity → weak SOS) · ALLSKY_SFC_SW_DWN (radiation controls photosynthesis) · GWETROOT (deep moisture → POS timing)",
-        "Tropical Dry Evergreen (Jan-Dec)":
-            "PRECTOTCORR Oct–Dec (NE monsoon is the primary growth trigger) · T2M (temperature modulates leaf expansion pace)",
-        "Tropical Thorn Forest / Scrub (Jun-May)":
-            "PRECTOTCORR (single monsoon pulse = only SOS driver) · GWETTOP (shallow roots; surface moisture controls entire season)",
-        "Subtropical Broadleaved Hill Forest (Apr-Mar)":
-            "T2M_MIN (spring warming threshold → bud break) · GDD_10 (heat accumulation → POS) · PRECTOTCORR (monsoon sustains canopy)",
-        "Montane Temperate Forest (Apr-Nov)":
-            "T2M_MIN (snowmelt temperature → SOS) · GDD_10 (heat accumulation → POS) · ALLSKY_SFC_SW_DWN (solar radiation at altitude)",
-        "Alpine / Subalpine Forest and Meadow (May-Oct)":
-            "T2M_MIN (snowmelt → SOS; strongest predictor in dataset) · ALLSKY_SFC_SW_DWN (high-altitude radiation) · GDD_5 (low base for cold-adapted species)",
-        "Shola Forest — Southern Montane (Jan-Dec)":
-            "RH2M (cloud forest = humidity controls canopy) · ALLSKY_SFC_SW_DWN (intermittent sunlight is limiting) · GWETROOT (deep soil moisture buffer)",
-        "Mangrove Forest (Jan-Dec)":
-            "PRECTOTCORR (monsoon freshwater input) · RH2M (tidal humidity sustains evergreen canopy) · T2M (temperature modulates tidal forest metabolism)",
-        "NE India Moist Evergreen (Jan-Dec)":
-            "PRECTOTCORR (world's highest rainfall → POS control) · RH2M (year-round humidity → low SOS signal) · T2M (temperature fine-tunes dual-peak timing)",
-    }
-    _exp = _driver_explain.get(season_type, cfg.get('key_drivers',''))
+    # Variables that old code expects — set to dummy values (methods removed)
+    sos_method_sel     = "threshold"
+    eos_method_sel     = "threshold"
+    rain_thresh_sel    = 8.0
+    roll_days_sel      = 7
+    eos_rain_thresh_sel = 3.0
+    eos_roll_days_sel  = 14
+
+    # ── REGRESSION MODEL TYPE ─────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🤖 Regression Model")
+    _lowess_note = "" if _HAS_STATSMODELS else " (install statsmodels to enable)"
+    _model_opts  = [
+        "Ridge (Linear)",
+        "Ridge + Polynomial (deg 2)",
+        f"LOWESS-smoothed + Ridge{_lowess_note}",
+    ]
+    model_type_sel = st.sidebar.radio(
+        "Model type", options=_model_opts, index=0, key="model_type_sel",
+        help=(
+            "**Ridge (Linear):** Standard Ridge regression — interpretable equation, "
+            "LOO cross-validated R².\n\n"
+            "**Ridge + Polynomial (deg 2):** Adds squared and interaction terms — "
+            "captures non-linear responses between met variables and phenology.\n\n"
+            "**LOWESS-smoothed + Ridge:** LOWESS first smooths inter-annual variability "
+            "in phenology dates, then Ridge fits the met predictors — reduces noise "
+            "influence on model fitting."
+        )
+    )
+    # Strip the note suffix for internal use
+    model_type_clean = model_type_sel.replace(_lowess_note, "").strip()
+    if "LOWESS" in model_type_clean and not _HAS_STATSMODELS:
+        st.sidebar.warning("⚠️ statsmodels not installed — falling back to Ridge (Linear). "
+                           "Run: `pip install statsmodels`")
+        model_type_clean = "Ridge (Linear)"
+
     st.sidebar.markdown(
-        f"<div style='background:#E8F5E9;padding:10px 12px;border-radius:8px;"
-        f"border-left:4px solid #2E7D32;font-size:0.78rem;margin-top:4px'>"
-        f"<b>🔬 Why these met parameters?</b><br>{_exp}</div>",
+        "<div style='background:#E8F5E9;padding:10px 12px;border-radius:8px;"
+        "border-left:4px solid #2E7D32;font-size:0.77rem;margin-top:4px'>"
+        "<b>ℹ️ Model note:</b> All models use Pearson |r| ≥ 0.40 feature filter "
+        "and Leave-One-Out cross-validation for honest R² on small samples.</div>",
         unsafe_allow_html=True
     )
-
-    # SOS method
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ SOS Detection Method")
-    default_sos = cfg.get("sos_method","threshold")
-    sos_labels = {"rainfall":"🌧️ First Sustained Rainfall  ← monsoon forests",
-                  "threshold":"📈 NDVI Threshold            ← standard",
-                  "derivative":"📉 Max NDVI Rate             ← temperate/alpine"}
-    sos_opts = list(sos_labels.keys())
-    sos_method_sel = st.sidebar.radio("SOS method", options=sos_opts,
-        index=sos_opts.index(default_sos) if default_sos in sos_opts else 0,
-        format_func=lambda x: sos_labels[x])
-    rain_thresh_sel, roll_days_sel = 8.0, 7
-    if sos_method_sel=="rainfall":
-        rain_thresh_sel = st.sidebar.slider("Min rainfall (mm) in window", 3, 30, 8, 1)
-        roll_days_sel   = st.sidebar.slider("Rolling window (days)", 3, 14, 7, 1)
-        st.sidebar.success(f"First {roll_days_sel}-day period with ≥{rain_thresh_sel}mm → SOS")
-
-    # EOS method
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ EOS Detection Method")
-    eos_labels = {"threshold": "📉 NDVI Threshold            ← standard",
-                  "derivative": "📈 Max NDVI Decline Rate    ← temperate/alpine",
-                  "drought":    "🌵 Dry Season Onset          ← drought-driven"}
-    # default EOS method based on forest type
-    default_eos_method = "derivative" if cfg.get("sos_method") == "derivative" else "threshold"
-    eos_opts = list(eos_labels.keys())
-    eos_method_sel = st.sidebar.radio("EOS method", options=eos_opts,
-        index=eos_opts.index(default_eos_method),
-        format_func=lambda x: eos_labels[x])
-    eos_rain_thresh_sel, eos_roll_days_sel = 3.0, 14
-    if eos_method_sel == "drought":
-        eos_rain_thresh_sel = st.sidebar.slider("Max rainfall (mm) in window (drought onset)", 1, 15, 3, 1)
-        eos_roll_days_sel   = st.sidebar.slider("Dry window length (days)", 7, 30, 14, 1)
-        st.sidebar.success(f"First {eos_roll_days_sel}-day dry period with ≤{eos_rain_thresh_sel}mm → EOS")
-
-    # NDVI threshold — separate for SOS and EOS
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ NDVI Thresholds")
-    default_thr = int(cfg.get("threshold_pct",0.30)*100)
-    sos_threshold_pct = st.sidebar.slider(
-        "SOS threshold (% of NDVI amplitude)", 5, 60, default_thr, 5,
-        help=f"First date NDVI rises above: base + threshold% x amplitude. Forest default: {default_thr}%"
-    ) / 100.0
-    eos_threshold_pct = st.sidebar.slider(
-        "EOS threshold (% of NDVI amplitude)", 5, 60, default_thr, 5,
-        help=f"Last date NDVI stays above: base + threshold% x amplitude after POS. Forest default: {default_thr}%"
-    ) / 100.0
-    st.sidebar.caption(
-        f"SOS: **{int(sos_threshold_pct*100)}%** | EOS: **{int(eos_threshold_pct*100)}%** | Forest default: {default_thr}%"
-    )
-    threshold_pct_override = sos_threshold_pct  # backward-compat alias
 
     # ── GATE ─────────────────────────────────────────────────
     if not (ndvi_file and met_file):
@@ -1718,7 +1643,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         met_df, raw_params, met_err = parse_nasa_power(met_file)
         if met_df is None: st.error(f"❌ Met: {met_err}"); return
 
-    met_df     = add_derived_features(met_df, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
+    met_df     = add_derived_features(met_df, season_start_month=season_start_mo)
     all_params = [c for c in met_df.columns
                   if c not in {'Date','YEAR','MO','DY','DOY','LON','LAT','ELEV'}
                   and pd.api.types.is_numeric_dtype(met_df[c])]
@@ -1767,32 +1692,10 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
             st.error(f"❌ Only {n_seasons} season(s) detected. Minimum 3 required. Upload ≥3 years of NDVI.")
             return
 
-        # ── Forest type sanity check ───────────────────────────
-        # Warn if extracted SOS/EOS dates look inconsistent with selected forest type
-        cfg_check = SEASON_CONFIGS[season_type]
-        sm_check  = cfg_check['start_month']
-        # Compute median SOS month from extracted data
-        sos_months = [r['SOS_Date'].month for _, r in pheno_df.iterrows()
-                      if 'SOS_Date' in r and pd.notna(r.get('SOS_Date'))]
-        if sos_months:
-            median_sos_month = int(np.median(sos_months))
-            # Alert if median SOS is more than 2 months away from season start
-            month_gap = min(abs(median_sos_month - sm_check),
-                            12 - abs(median_sos_month - sm_check))
-            if month_gap > 2:
-                mo_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
-                            7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
-                st.warning(
-                    f"⚠️ **Forest type check:** Your NDVI data shows SOS typically in "
-                    f"**{mo_names[median_sos_month]}** but the selected forest type "
-                    f"**'{season_type}'** has a season start of **{mo_names[sm_check]}**. "
-                    f"This mismatch can produce wrong equation intercepts and incorrect "
-                    f"predictions.\n\n"
-                    f"💡 **For Valley of Flowers (Uttarakhand):** Select "
-                    f"**'⛰️ Alpine / Subalpine Forest and Meadow (May-Oct)'** for best results."
-                )
-
-        st.success(f"✅ **{n_seasons} growing seasons** extracted")
+        st.success(f"✅ **{n_seasons} growing seasons** extracted  |  "
+                   f"Season window: **{_month_names[season_start_mo-1]} → {_month_names[season_end_mo-1]}**  |  "
+                   f"Threshold: **{threshold_pct_val}% amplitude**  |  "
+                   f"Method: **5-day interpolation + amplitude threshold**")
 
         c_left, c_right = st.columns([2,1])
         with c_left: st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df))
@@ -1821,28 +1724,25 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         fig_t = plot_pheno_trends(pheno_df)
         if fig_t: st.pyplot(fig_t)
 
-        # Monsoon onset
-        monsoon_relevant = any(k in season_type for k in
-            ['Monsoon','Dry Deciduous','Moist Deciduous','Thorn','NE India'])
+        # Monsoon onset — always available (user decides if relevant for their site)
         monsoon_onset_doys = {}
         years_in_data = sorted(pheno_df['Year'].unique().tolist())
 
-        if monsoon_relevant:
-            with st.expander("🌧️ Optional: Enter IMD Monsoon Onset Dates — Strengthens SOS Model", expanded=False):
-                st.markdown(
-                    "**SW Monsoon onset DOY** is the primary SOS driver for monsoon forests "
-                    "and is NOT in NASA POWER. Entering it adds `Monsoon_Onset_DOY` as a SOS predictor.\n\n"
-                    "**Source:** [IMD Monsoon Reports](https://mausam.imd.gov.in/). Enter 0 to skip a year.")
-                mc1, mc2 = st.columns(2)
-                for i, yr in enumerate(years_in_data):
-                    c = mc1 if i%2==0 else mc2
-                    val = c.number_input(f"Onset DOY — {yr}", 0, 220, 0, 1, key=f"onset_{yr}",
-                                         help="Typical: 152 (Jun 1) to 196 (Jul 15). 0 = skip.")
-                    if val > 0: monsoon_onset_doys[yr] = val
-                if monsoon_onset_doys:
-                    st.success(f"✅ Onset dates entered for {len(monsoon_onset_doys)} seasons.")
-                else:
-                    st.info("No onset dates entered. Typical SOS R² without this: 0.0–0.35 for monsoon forests.")
+        with st.expander("🌧️ Optional: Enter IMD Monsoon Onset Dates — Strengthens SOS Model", expanded=False):
+            st.markdown(
+                "**SW Monsoon onset DOY** is the primary SOS driver for monsoon-driven vegetation "
+                "and is NOT in NASA POWER. Entering it adds `Monsoon_Onset_DOY` as a SOS predictor.\n\n"
+                "**Source:** [IMD Monsoon Reports](https://mausam.imd.gov.in/). Enter 0 to skip a year.")
+            mc1, mc2 = st.columns(2)
+            for i, yr in enumerate(years_in_data):
+                c = mc1 if i%2==0 else mc2
+                val = c.number_input(f"Onset DOY — {yr}", 0, 220, 0, 1, key=f"onset_{yr}",
+                                     help="Typical: 152 (Jun 1) to 196 (Jul 15). 0 = skip.")
+                if val > 0: monsoon_onset_doys[yr] = val
+            if monsoon_onset_doys:
+                st.success(f"✅ Onset dates entered for {len(monsoon_onset_doys)} seasons.")
+            else:
+                st.info("No onset dates entered. Typical SOS R² without this: 0.0–0.35 for monsoon forests.")
 
         # Train
         with st.spinner("Building training features and fitting Ridge models…"):
@@ -1850,7 +1750,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
                                               monsoon_onset_doys=monsoon_onset_doys if monsoon_onset_doys else None)
             extra_params = all_params + (['Monsoon_Onset_DOY'] if monsoon_onset_doys else [])
             predictor = UniversalPredictor()
-            predictor.train(train_df, extra_params)
+            predictor.train(train_df, extra_params, model_type=model_type_clean)
 
         st.session_state.update({
             'pheno_df':pheno_df, 'met_df':met_df, 'train_df':train_df,
@@ -1859,7 +1759,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 
         # Performance cards
         st.markdown("---")
-        st.markdown("### 📊 Model Performance  (LOO Cross-Validated R²)")
+        st.markdown(f"### 📊 Model Performance  (LOO Cross-Validated R²)  ·  Model: `{model_type_clean}`")
         c1, c2, c3 = st.columns(3)
 
         def _card(col, ev):
@@ -1911,7 +1811,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
 
         for ui_tab, ev in zip([ev_tab_sos, ev_tab_pos, ev_tab_eos], ['SOS', 'POS', 'EOS']):
             with ui_tab:
-                sm_val = SEASON_CONFIGS[season_type]['start_month']
+                sm_val = season_start_mo
                 raw_eq = predictor.equation_str(ev, season_start_month=sm_val)
                 eq_html = raw_eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
                 st.markdown(f'<div class="eq-box">{eq_html}</div>', unsafe_allow_html=True)
@@ -2073,7 +1973,7 @@ The scatter plots on the right show the best single predictor vs observed event 
         ndvi_df_ss = st.session_state.get('ndvi_df')
         if met_df_ss is not None and raw_params_ss and ndvi_df_ss is not None:
             figs_list = plot_met_with_ndvi(met_df_ss, ndvi_df_ss, raw_params_ss,
-                                           season_cfg=SEASON_CONFIGS.get(season_type),
+                                           season_cfg=SEASON_CONFIGS.get(season_type, cfg),
                                            pheno_df=pheno_df_ss,
                                            predictor=st.session_state.get('predictor'))
             if figs_list:
@@ -2092,7 +1992,7 @@ The scatter plots on the right show the best single predictor vs observed event 
         predictor=st.session_state.get('predictor'); train_df=st.session_state.get('train_df')
         if predictor is None: st.info("Train models first (Tab 1)."); return
 
-        pred_sm = SEASON_CONFIGS[season_type]['start_month']
+        pred_sm = season_start_mo
 
         # ── Build per-event feature inputs ────────────────────
         # Each event uses its OWN features — show them grouped by event
@@ -2270,7 +2170,7 @@ Defaults are pre-filled from training data means — change them to forecast fut
                 st.markdown("---")
                 st.markdown("**Equations used for this prediction:**")
                 for ev in list(results.keys()):
-                    raw_eq = predictor.equation_str(ev, season_start_month=SEASON_CONFIGS[season_type]['start_month'])
+                    raw_eq = predictor.equation_str(ev, season_start_month=season_start_mo)
                     eq_line = raw_eq.split('\n')[0]   # show equation line only — clean, no feature table
                     st.markdown(f'<div class="eq-box"><b>{icons[ev]} {ev}:</b>&nbsp;&nbsp;{eq_line}</div>',
                                 unsafe_allow_html=True)
@@ -2281,14 +2181,70 @@ Defaults are pre-filled from training data means — change them to forecast fut
         st.caption("Based on: Champion & Seth (1968) · FSI State of Forest Report 2023 · "
                    "Pascal (1988) · Rodgers & Panwar (1988) · Jha et al. (2013)")
 
+        # ── CLARIFICATION: Forest Type Classification ──────────
+        with st.expander("❓ Important: Are the forest types connected to external data? Read this first.", expanded=True):
+            st.markdown("""
+<div style='background:#FFF3E0;padding:16px 20px;border-radius:12px;border-left:6px solid #E65100;margin-bottom:8px'>
+<b>🔍 What is the forest type classification? Is it connected to external data?</b><br><br>
+
+<b>Short answer: The forest type categories are static reference information — they are NOT connected
+to any external database, API, vegetation classification model, or GIS layer.</b><br><br>
+
+<b>Detailed explanation:</b><br>
+<ul>
+<li><b>Source:</b> The 11 forest types used in this app are based on the
+<b>Champion & Seth (1968)</b> classification — <i>A Revised Survey of the Forest Types of India</i>,
+published by the Government of India Press. This is the standard authoritative reference for
+Indian forest classification, also adopted by the Forest Survey of India (FSI).</li>
+
+<li><b>What is hardcoded:</b> The season window (start/end month), default NDVI threshold percentage,
+ecological descriptions, species lists, typical NDVI peak timing, and key meteorological drivers
+are all <b>hardcoded reference values</b> derived from published literature. They are static
+interface elements that guide the user toward an appropriate season window for their site.</li>
+
+<li><b>What is NOT hardcoded:</b> The actual Pearson correlations, regression equations, R² values,
+and model coefficients are computed <b>entirely fresh from your uploaded NDVI and met CSV files</b>.
+No pre-built coefficients are used — the model trains on your data every time.</li>
+
+<li><b>No auto-assignment from NDVI:</b> When you upload NDVI data, the app does NOT automatically
+classify your vegetation type using spectral analysis, machine learning, or any lookup table.
+The user must select the forest type (or season window) manually based on their knowledge
+of the study site.</li>
+
+<li><b>No external API or database:</b> There is no call to a remote server, no GIS polygon overlay,
+no link to NASA LPDAAC, MODIS land cover products, or any other external classification service.
+The coordinate-based suggestion tool (in this version, shown in the sidebar in the v8 build)
+uses only a simple rule-based function based on known site coordinates — it is also fully
+local and hardcoded, not connected to any external service.</li>
+
+<li><b>In the current version (v10):</b> Forest type selection has been <b>removed from the
+analysis workflow</b>. You now directly set the season window (start month / end month)
+in the sidebar. The Forest Guide tab below is retained as an <b>educational reference</b>
+for users who want to understand what season window is appropriate for their site based
+on forest type literature.</li>
+</ul>
+
+<b>Summary table:</b>
+
+| Component | Hardcoded / Static? | Dynamic / From your data? |
+|---|---|---|
+| Season window (months) | ✅ Reference defaults | ✅ User-adjustable in sidebar |
+| NDVI threshold % | ✅ Reference defaults | ✅ User-adjustable slider |
+| Pearson correlations | ❌ | ✅ Computed from your CSV |
+| Regression equations | ❌ | ✅ Fitted to your CSV |
+| Forest type assignment | ❌ Not automatic | 👤 Manual by user |
+| External API / GIS link | ❌ None | ❌ None |
+</div>
+            """, unsafe_allow_html=True)
+
         # ── TOP BANNER ────────────────────────────────────────
         st.markdown("""
 <div style='background:linear-gradient(135deg,#E8F5E9,#C8E6C9);padding:18px 22px;
 border-radius:14px;border-left:6px solid #2E7D32;margin-bottom:18px'>
-<b>🧭 How to identify the correct forest type for your site — 3 steps:</b><br>
-<b>Step 1</b> — Use the coordinate tool in the sidebar (enter lat/lon → click suggest)<br>
-<b>Step 2</b> — Check the type-specific cards below (NDVI signature, elevation, rainfall, species)<br>
-<b>Step 3</b> — Confirm against the phenology calendar — does your NDVI time series match the pattern?
+<b>🧭 How to use this reference guide:</b><br>
+Find your site's forest type → note its typical season window (start/end month) →
+set those same months in the sidebar Season Window selector. The phenology extraction
+will then use that window with your uploaded NDVI data.
 </div>
         """, unsafe_allow_html=True)
 
