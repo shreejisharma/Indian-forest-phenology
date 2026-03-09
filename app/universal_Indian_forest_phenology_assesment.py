@@ -536,9 +536,15 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 # ── Step 3a: POS = date of maximum NDVI ─────────────
                 pos = sub.idxmax()
 
-                # ── Step 3b: SOS = first date >= sos_threshold AFTER base_ndvi date ──
-                # "NDVI rises to (Minimum NDVI + threshold% of amplitude)" after the seasonal minimum
-                min_date = sub.idxmin()
+                # ── Step 3b: SOS = first date >= sos_threshold AFTER the pre-POS minimum ──
+                # KEY FIX: use the minimum of the PRE-POS slice, not the whole season minimum.
+                # Reason: for evergreen forests (e.g. Kaziranga, Agumbe) NDVI continues
+                # declining into Dec/Jan — the whole-season minimum often falls at the LAST
+                # date of the window, which is AFTER pos, making sub.loc[min_date:pos] empty
+                # and SOS=NONE for that year. Using the pre-POS minimum guarantees the trough
+                # is always before pos, so the rising limb is always non-empty.
+                pre_pos  = sub.loc[:pos]
+                min_date = pre_pos.idxmin()   # true green-up trough (always before POS)
                 rising   = sub.loc[min_date:pos]
                 above    = rising[rising >= sos_threshold]
                 sos = above.index[0] if len(above) > 0 else rising.index[min(1, len(rising) - 1)]
