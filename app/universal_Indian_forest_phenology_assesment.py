@@ -1,26 +1,24 @@
 """
-🌲 UNIVERSAL VEGETATION PHENOLOGY PREDICTOR 🌲
-================================================
+Universal Vegetation Phenology Predictor
+==========================================
 
-Upload:
-  1. NDVI CSV  — any CSV with Date + NDVI columns
-  2. NASA POWER Met CSV — daily export, headers auto-skipped
+Phenology extraction: NDVI Amplitude-Based Method (per reference document)
+  Workflow:
+    1. Interpolate NDVI to a regular 5-day grid
+    2. Apply Savitzky-Golay smoothing filter to the 5-day series
+    3. Compute NDVImin (dormancy) and NDVImax (peak)
+    4. Amplitude  A = NDVImax - NDVImin
+    5. Threshold  = NDVImin + threshold% x A  (default 10%)
+    6. SOS = first t where Sm(t) >= threshold
+       EOS = last  t where Sm(t) >= threshold
+       POS = max Sm(t) between SOS and EOS
 
-Phenology extraction method:
-  • NDVI interpolated to a regular 5-day grid (fills irregular satellite gaps)
-  • SOS = first date NDVI ≥ base + threshold% × amplitude AFTER seasonal minimum
-  • POS = date of maximum NDVI within growing season window
-  • EOS = last date NDVI ≥ base + threshold% × amplitude AFTER POS
-  • Threshold default: 10% of NDVI amplitude (user-adjustable 5–30%)
-  • Savitzky-Golay applied for visual display only — NOT used for metrics
+Regression models (user-selectable):
+  - Ridge (Linear)             LOO cross-validated
+  - Ridge + Polynomial deg 2   non-linear met-phenology relationships
+  - LOWESS-smoothed + Ridge    reduces inter-annual noise before fitting
 
-Regression models:
-  • Ridge (Linear) — LOO cross-validated, interpretable equation
-  • Ridge + Polynomial (deg 2) — captures non-linear met-phenology relationships
-  • LOWESS-smoothed + Ridge — smooths inter-annual noise before fitting
-
-Feature selection:
-  • Pearson |r| ≥ 0.40 filter; multi-feature Ridge with collinearity control
+Feature selection: Pearson |r| >= 0.40 filter, collinearity-controlled Ridge
 
 pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
 streamlit run app/universal_Indian_forest_phenology_assesment.py
@@ -468,92 +466,82 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                       met_df_for_sos=None, sos_method="auto", rain_thresh=8.0, roll_days=7,
                       eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14):
     """
-    NDVI Phenology Extraction
-    ==========================
-    Method: 5-day temporal interpolation + NDVI amplitude threshold.
-    NO Savitzky-Golay or any other smoothing filter is applied to the data
-    used for phenology metric extraction.
+    NDVI Amplitude-Based Phenology Extraction
+    ==========================================
+    Implements the method exactly as defined in the reference document:
 
-    Step 1 - Interpolate NDVI to a regular 5-day grid
-        Raw NDVI (any cadence) -> linear time interpolation (daily) -> 5-day resample.
-        Fills cloud gaps and irregular satellite revisit intervals.
+    Processing Workflow (PDF Step 1-6):
+        1. Interpolate NDVI to a regular 5-day grid (fills gaps from clouds / irregular cadence)
+        2. Apply Savitzky-Golay smoothing filter to the 5-day series
+        3. Compute NDVImin (dormancy minimum) and NDVImax (growing season peak)
+        4. Calculate amplitude:  A = NDVImax - NDVImin
+        5. Determine threshold:  NDVIthreshold = NDVImin + 0.10 * A
+        6. Extract metrics:
+              SOS = first  t  where  Sm(t) >= NDVIthreshold
+              EOS = last   t  where  Sm(t) >= NDVIthreshold
+              POS = maximum of Sm(t) between SOS and EOS
 
-    Step 2 - For each growing season window [start_month to end_month]:
-        base_ndvi  = minimum NDVI in the 5-day series for that season
-        peak_ndvi  = maximum NDVI in the 5-day series for that season
-        amplitude  = peak_ndvi - base_ndvi
-        threshold  = base_ndvi + threshold_pct x amplitude   (default 10% = 0.10)
-
-    Step 3 - Extract phenology events directly from the 5-day values:
-        SOS = first 5-day date where NDVI >= threshold, AFTER the date of base_ndvi
-              (NDVI rises to: minimum NDVI + 10% of amplitude)
-        POS = date of maximum NDVI (peak_ndvi)
-        EOS = last  5-day date where NDVI >= threshold, AFTER POS
-              (NDVI falls to: minimum NDVI + 10% of amplitude)
-
-    All three events are extracted from the same unsmoothed 5-day interpolated series.
+    The threshold percentage is user-adjustable (default 10% per the document).
+    All metrics are extracted from the SG-smoothed series, as specified.
     """
     try:
-        cfg = SEASON_CONFIGS[season_type]
-        sm = cfg["start_month"]; em = cfg["end_month"]; min_d = cfg["min_days"]
+        cfg   = SEASON_CONFIGS[season_type]
+        sm    = cfg["start_month"]; em = cfg["end_month"]; min_d = cfg["min_days"]
+        thr_pct = threshold_override if threshold_override is not None else cfg.get("threshold_pct", 0.10)
 
-        # ── Step 1: 5-day regular interpolation (no smoothing) ──────
+        # ── Step 1: Interpolate to regular 5-day grid ───────────────
         ndvi_input = (ndvi_df[["Date", "NDVI"]].copy()
-                      .set_index("Date")
-                      .sort_index())
-        # Linear interpolation to daily first fills short gaps cleanly
+                      .set_index("Date").sort_index())
         ndvi_daily = ndvi_input.resample("D").interpolate(method="time")
-        # Resample to 5-day grid -- the ONLY series used for all metric extraction
-        ndvi_5d = ndvi_daily.resample("5D").mean()
+        ndvi_5d    = ndvi_daily.resample("5D").mean()
         ndvi_5d["NDVI"] = ndvi_5d["NDVI"].ffill().bfill()
 
-        thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
-        eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
+        # ── Step 2: Savitzky-Golay smoothing of the FULL time series ──
+        # Window = ~8% of series length, minimum 7, always odd; poly <= window-1
+        n          = len(ndvi_5d)
+        wl_target  = max(7, int(n * 0.08))
+        wl         = wl_target if wl_target % 2 == 1 else wl_target + 1
+        wl         = min(wl, n - 1 if n > 1 else 1)
+        if wl % 2 == 0: wl = max(7, wl - 1)
+        poly       = min(3, wl - 1)
+        if n >= 7:
+            ndvi_5d["Sm"] = savgol_filter(ndvi_5d["NDVI"].values, wl, poly)
+        else:
+            ndvi_5d["Sm"] = ndvi_5d["NDVI"]
 
         rows = []
         for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
             try:
                 if sm <= em:
-                    s = f"{yr}-{sm:02d}-01"; e = f"{yr}-{em:02d}-28"
+                    s = f"{yr}-{sm:02d}-01";  e = f"{yr}-{em:02d}-28"
                 else:
-                    s = f"{yr}-{sm:02d}-01"; e = f"{yr+1}-{em:02d}-28"
+                    s = f"{yr}-{sm:02d}-01";  e = f"{yr+1}-{em:02d}-28"
 
-                sub = ndvi_5d.loc[s:e, "NDVI"]
+                sub = ndvi_5d.loc[s:e, "Sm"]      # smoothed series for this season
                 if len(sub) < max(8, min_d // 5):
                     continue
 
-                # ── Step 2: compute amplitude-based threshold ────────
-                base_ndvi  = float(sub.min())
-                peak_ndvi  = float(sub.max())
-                amplitude  = peak_ndvi - base_ndvi
+                # ── Steps 3-5: amplitude & threshold ────────────────────
+                ndvi_min  = float(sub.min())
+                ndvi_max  = float(sub.max())
+                amplitude = ndvi_max - ndvi_min
 
                 if amplitude < 0.02:
-                    continue   # signal too flat -- no meaningful phenology
+                    continue   # signal too flat for reliable phenology
 
-                sos_threshold = base_ndvi + thr_pct     * amplitude
-                eos_threshold = base_ndvi + eos_thr_pct * amplitude
+                threshold = ndvi_min + thr_pct * amplitude
 
-                # ── Step 3a: POS = date of maximum NDVI ─────────────
-                pos = sub.idxmax()
+                # ── Step 6a: SOS = first t where Sm(t) >= threshold ─────
+                above_all = sub[sub >= threshold]
+                if len(above_all) == 0:
+                    continue
+                sos = above_all.index[0]
 
-                # ── Step 3b: SOS = first date >= sos_threshold AFTER the pre-POS minimum ──
-                # KEY FIX: use the minimum of the PRE-POS slice, not the whole season minimum.
-                # Reason: for evergreen forests (e.g. Kaziranga, Agumbe) NDVI continues
-                # declining into Dec/Jan — the whole-season minimum often falls at the LAST
-                # date of the window, which is AFTER pos, making sub.loc[min_date:pos] empty
-                # and SOS=NONE for that year. Using the pre-POS minimum guarantees the trough
-                # is always before pos, so the rising limb is always non-empty.
-                pre_pos  = sub.loc[:pos]
-                min_date = pre_pos.idxmin()   # true green-up trough (always before POS)
-                rising   = sub.loc[min_date:pos]
-                above    = rising[rising >= sos_threshold]
-                sos = above.index[0] if len(above) > 0 else rising.index[min(1, len(rising) - 1)]
+                # ── Step 6b: EOS = last t where Sm(t) >= threshold ──────
+                eos = above_all.index[-1]
 
-                # ── Step 3c: EOS = last date >= eos_threshold AFTER POS ──
-                # "NDVI falls to (Minimum NDVI + threshold% of amplitude)" before next minimum
-                falling    = sub.loc[pos:]
-                above_fall = falling[falling >= eos_threshold]
-                eos = above_fall.index[-1] if len(above_fall) > 0 else falling.index[-1]
+                # ── Step 6c: POS = max Sm between SOS and EOS ───────────
+                pos = sub.loc[sos:eos].idxmax()
 
                 season_start = pd.Timestamp(s)
                 sos_rel = (sos - season_start).days
@@ -569,10 +557,10 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     "EOS_Method":    "amplitude_threshold",
                     "LOS_Days":      (eos - sos).days,
                     "Season_Start":  season_start,
-                    "Peak_NDVI":     peak_ndvi,
-                    "Base_NDVI":     base_ndvi,
+                    "Peak_NDVI":     ndvi_max,
+                    "Base_NDVI":     ndvi_min,
                     "Amplitude":     amplitude,
-                    "SOS_Threshold": sos_threshold,
+                    "SOS_Threshold": threshold,
                     "Season":        season_type,
                 })
             except Exception:
@@ -581,9 +569,9 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         if not rows:
             return None, (
                 "No complete seasons found. Tips:\n"
-                "- Check that season start/end months cover your NDVI peak dates.\n"
-                "- Lower the threshold (e.g. 5%) if your site is evergreen (low NDVI amplitude).\n"
-                "- Ensure your NDVI CSV covers at least one full season window."
+                "- Check that season start/end months match your NDVI data dates.\n"
+                "- Lower threshold (5%) if signal amplitude is very small (evergreen sites).\n"
+                "- Ensure NDVI CSV covers at least one full season window."
             )
         return pd.DataFrame(rows), None
 
@@ -924,76 +912,96 @@ class UniversalPredictor:
 # ─── PLOTS ───────────────────────────────────────────────────
 def plot_ndvi_phenology(ndvi_raw, pheno_df):
     """
-    Plot NDVI time series showing:
-      - Raw observations (scatter)
-      - 5-day interpolated series (the ONLY series used for SOS/POS/EOS extraction)
-      - SOS / POS / EOS vertical lines
-      - Amplitude threshold horizontal line
-    No Savitzky-Golay or smoothing curve is shown.
+    NDVI plot following the PDF processing workflow:
+      - Raw observations shown as scatter (original data)
+      - 5-day interpolated series shown as thin line
+      - SG-smoothed series shown as bold line (this is what SOS/POS/EOS are extracted from)
+      - Amplitude threshold shown as horizontal dotted line
+      - SOS / POS / EOS shown as vertical dashed lines
     """
-    fig, ax = plt.subplots(figsize=(14, 5.0))
+    fig, ax = plt.subplots(figsize=(14, 5.2))
 
-    # Raw observations
+    # ── 1. Raw observations ──────────────────────────────────
     dates = pd.to_datetime(ndvi_raw["Date"])
-    ax.scatter(dates, ndvi_raw["NDVI"], color="#A5D6A7", s=24, alpha=0.65,
-               label="Raw NDVI observations", zorder=3)
+    ax.scatter(dates, ndvi_raw["NDVI"], color="#A5D6A7", s=22, alpha=0.65,
+               zorder=3, label="Raw NDVI observations")
 
-    # 5-day interpolated series -- identical to the series used inside extract_phenology
+    # ── 2. 5-day interpolated series ─────────────────────────
     ndvi_5d = (ndvi_raw.set_index("Date")["NDVI"]
                .resample("D").interpolate(method="time")
                .resample("5D").mean()
                .ffill().bfill())
     ax.plot(ndvi_5d.index, ndvi_5d.values,
-            color="#1B5E20", lw=2.2, zorder=5,
-            label="5-day interpolated (SOS/POS/EOS extracted from this)")
+            color="#81C784", lw=1.2, alpha=0.60, zorder=4,
+            label="5-day interpolated")
 
-    # SOS / POS / EOS vertical lines
-    ev_colors  = {"SOS": "#43A047", "POS": "#1565C0", "EOS": "#E65100"}
-    ev_labels  = {"SOS": "SOS  Green-up start", "POS": "POS  Peak greenness",
-                  "EOS": "EOS  Senescence end"}
-    plotted_ev    = set()
-    thresh_drawn  = False
+    # ── 3. SG-smoothed series (the analysis series) ──────────
+    n = len(ndvi_5d)
+    wl_target = max(7, int(n * 0.08))
+    wl = wl_target if wl_target % 2 == 1 else wl_target + 1
+    wl = min(wl, n - 1 if n > 1 else 1)
+    if wl % 2 == 0: wl = max(7, wl - 1)
+    poly = min(3, wl - 1)
+    if n >= 7:
+        sm_vals = savgol_filter(ndvi_5d.ffill().bfill().values, wl, poly)
+        ax.plot(ndvi_5d.index, sm_vals, color="#1B5E20", lw=2.4, zorder=5,
+                label=f"SG-smoothed (w={wl})  — SOS / POS / EOS extracted from this")
 
+    # ── 4. Amplitude threshold horizontal line ───────────────
+    thresh_drawn = False
     for _, row in pheno_df.iterrows():
-        for ev, col in ev_colors.items():
-            d = row.get(f"{ev}_Date")
-            if pd.notna(d):
-                lbl = ev_labels[ev] if ev not in plotted_ev else ""
-                ax.axvline(pd.Timestamp(d), color=col, lw=1.8, alpha=0.60,
-                           ls="--", label=lbl, zorder=6)
-                plotted_ev.add(ev)
-
         if not thresh_drawn:
             thr  = row.get("SOS_Threshold")
             base = row.get("Base_NDVI")
             amp  = row.get("Amplitude")
-            if thr is not None and base is not None and amp:
-                pct = round((thr - base) / amp * 100)
-                ax.axhline(thr, color="#FF6F00", lw=1.4, ls=":", alpha=0.75, zorder=4,
-                           label=f"Threshold = base + {pct}% x amplitude")
+            if thr is not None and amp:
+                pct = round(thr_pct_label := (thr - base) / amp * 100) if base is not None else 10
+                ax.axhline(thr, color="#FF6F00", lw=1.5, ls=":", alpha=0.80, zorder=4,
+                           label=f"NDVIthreshold = NDVImin + {round((thr-base)/amp*100) if amp and base is not None else 10}% x amplitude")
                 thresh_drawn = True
 
-    title_line1 = "NDVI Time Series  |  5-Day Interpolation  |  Amplitude Threshold Method"
-    title_line2 = ("SOS = NDVI rises to (min + threshold% x amplitude)  *  "
-                   "POS = max NDVI  *  "
-                   "EOS = NDVI falls to (min + threshold% x amplitude)")
-    ax.set_title(title_line1 + "\n" + title_line2,
-                 fontsize=10.0, fontweight="bold", color="#1B5E20")
+    # ── 5. SOS / POS / EOS vertical lines ────────────────────
+    ev_colors = {"SOS": "#43A047", "POS": "#1565C0", "EOS": "#E65100"}
+    ev_labels = {"SOS": "SOS  (first t: NDVI >= threshold)",
+                 "POS": "POS  (max NDVI between SOS and EOS)",
+                 "EOS": "EOS  (last t: NDVI >= threshold)"}
+    plotted = set()
+    for _, row in pheno_df.iterrows():
+        for ev, col in ev_colors.items():
+            d = row.get(f"{ev}_Date")
+            if pd.notna(d):
+                lbl = ev_labels[ev] if ev not in plotted else ""
+                ax.axvline(pd.Timestamp(d), color=col, lw=1.8,
+                           alpha=0.55, ls="--", label=lbl, zorder=6)
+                plotted.add(ev)
 
+    # ── Legend & formatting ───────────────────────────────────
     handles = [
-        Line2D([0],[0], color="#A5D6A7", marker="o", ms=6, lw=0,
+        Line2D([0],[0], color="#A5D6A7", marker="o", ms=5, lw=0,
                label="Raw NDVI observations"),
-        Line2D([0],[0], color="#1B5E20", lw=2.2,
-               label="5-day interpolated (analysis series)"),
-        Line2D([0],[0], color="#43A047", lw=1.8, ls="--", label="SOS  Green-up start"),
-        Line2D([0],[0], color="#1565C0", lw=1.8, ls="--", label="POS  Peak greenness"),
-        Line2D([0],[0], color="#E65100", lw=1.8, ls="--", label="EOS  Senescence end"),
-        Line2D([0],[0], color="#FF6F00", lw=1.4, ls=":", label="Amplitude threshold"),
+        Line2D([0],[0], color="#81C784", lw=1.2, alpha=0.60,
+               label="5-day interpolated"),
+        Line2D([0],[0], color="#1B5E20", lw=2.4,
+               label=f"SG-smoothed (w={wl if n>=7 else 'N/A'})  — SOS/POS/EOS from this"),
+        Line2D([0],[0], color="#FF6F00", lw=1.5, ls=":",
+               label="NDVIthreshold = NDVImin + threshold% x amplitude"),
+        Line2D([0],[0], color="#43A047", lw=1.8, ls="--",
+               label="SOS  first t: NDVI >= threshold"),
+        Line2D([0],[0], color="#1565C0", lw=1.8, ls="--",
+               label="POS  max NDVI between SOS and EOS"),
+        Line2D([0],[0], color="#E65100", lw=1.8, ls="--",
+               label="EOS  last t: NDVI >= threshold"),
     ]
+    ax.set_title(
+        "NDVI Amplitude-Based Phenology Extraction\n"
+        "Workflow: Interpolate  ->  SG-smooth  ->  NDVImin + threshold% x A  "
+        "->  SOS / POS / EOS",
+        fontsize=10.5, fontweight="bold", color="#1B5E20"
+    )
     ax.set_xlabel("Date"); ax.set_ylabel("NDVI")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
-    ax.legend(handles=handles, ncol=3, fontsize=8.2, loc="upper left", framealpha=0.90)
+    ax.legend(handles=handles, ncol=2, fontsize=7.8, loc="upper left", framealpha=0.92)
     ax.grid(True, alpha=0.22, ls="--"); ax.set_facecolor("#FAFFF8")
     fig.tight_layout()
     return fig
