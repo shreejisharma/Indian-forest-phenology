@@ -22,7 +22,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.signal import savgol_filter
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 from scipy.interpolate import interp1d
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
@@ -854,16 +854,16 @@ def _loo_r2_quick(X_vals, y_vals, alpha=0.01):
 
 def select_multi_features(X, y, event, max_features=5, min_r=MIN_CORR_THRESHOLD):
     """
-    Select features for multi-feature Ridge with LOO CV:
-      1. Exclude EVENT_EXCLUDE features (ecologically spurious)
-      2. Keep only |Pearson r| >= min_r with target
-      3. Remove collinear pairs (|r_pair| > 0.85) — keep higher |r| with target
-      4. Incremental LOO R² check: only add feature k if it IMPROVES LOO R² by ≥ 0.03
-         (prevents overfitting with small n, e.g. n=4 with 2 correlated features)
-      5. Cap at min(max_features, n-2) for regularisation safety
+    Select features using combined Pearson + Spearman ranking (more robust for n<10).
+    1. Exclude ecologically spurious features
+    2. Score = 0.5*|Pearson r| + 0.5*|Spearman rho| — both must pass min_r threshold
+    3. Remove collinear pairs (|r| > 0.85) — keep higher composite score
+    4. Incremental LOO R² check: add feature only if it improves LOO R² by ≥ 0.03
+    5. Cap at min(max_features, n-2) for regularisation safety
     """
     excluded = EVENT_EXCLUDE.get(event, set())
     usable = []
+    n_obs = len(y.dropna())
     for col in X.columns:
         if col in excluded: continue
         vals = X[col].dropna()
@@ -871,16 +871,20 @@ def select_multi_features(X, y, event, max_features=5, min_r=MIN_CORR_THRESHOLD)
         idx = vals.index.intersection(y.dropna().index)
         if len(idx) < 3: continue
         try:
-            r, _ = pearsonr(vals[idx].astype(float), y[idx].astype(float))
+            rp, _ = pearsonr(vals[idx].astype(float), y[idx].astype(float))
+            rs, _ = spearmanr(vals[idx].astype(float), y[idx].astype(float))
         except Exception: continue
-        if abs(r) >= min_r:
-            usable.append((col, abs(r)))
+        # For small n, use the MAX of the two as the score (more lenient / robust)
+        composite = max(abs(rp), abs(rs))
+        if composite >= min_r:
+            usable.append((col, composite, abs(rp), abs(float(rs))))
     if not usable: return []
+    # Sort by composite score descending
     usable.sort(key=lambda x: -x[1])
 
-    # Greedy collinearity removal (pairwise |r| > 0.85 → drop lower-correlated one)
+    # Greedy collinearity removal
     collinear_filtered = []
-    for feat, r_feat in usable:
+    for feat, score, rp_abs, rs_abs in usable:
         collinear = False
         for sel in collinear_filtered:
             xi = X[feat].fillna(X[feat].median())
@@ -895,16 +899,15 @@ def select_multi_features(X, y, event, max_features=5, min_r=MIN_CORR_THRESHOLD)
         if not collinear:
             collinear_filtered.append(feat)
 
-    n_obs = len(y.dropna())
     max_safe = max(2, n_obs - 2)
     candidates = collinear_filtered[:min(max_features, max_safe)]
 
     if len(candidates) <= 1:
         return candidates
 
-    # Incremental LOO R² selection: only add feature if it genuinely helps
+    # Incremental LOO R² selection
     y_vals = y.values.astype(float)
-    selected = [candidates[0]]  # always include best feature
+    selected = [candidates[0]]
     best_r2 = _loo_r2_quick(X[selected].fillna(X[selected[0]].median()).values.reshape(-1,1), y_vals)
 
     for feat in candidates[1:]:
@@ -914,7 +917,7 @@ def select_multi_features(X, y, event, max_features=5, min_r=MIN_CORR_THRESHOLD)
             trial_r2 = _loo_r2_quick(Xt, y_vals)
         except Exception:
             continue
-        if trial_r2 > best_r2 + 0.03:   # must improve LOO R² by at least 3%
+        if trial_r2 > best_r2 + 0.03:
             selected.append(feat)
             best_r2 = trial_r2
 
@@ -982,8 +985,9 @@ def loo_poly(X_vals, y_vals, degree=2):
 
 
 def fit_event_model(X_all, y, event, model_key="ridge"):
-    """Multi-feature Ridge / LOESS / Polynomial regression with LOO CV.
-    model_key: 'ridge' | 'loess' | 'poly2' | 'poly3'
+    """Multi-feature Ridge / LOESS / Polynomial / Gaussian Process regression with LOO CV.
+    model_key: 'ridge' | 'loess' | 'poly2' | 'poly3' | 'gpr'
+    GPR is recommended for small datasets (n < 10) — handles uncertainty natively.
     """
     yt = y.values; n = len(yt)
 
@@ -1011,7 +1015,6 @@ def fit_event_model(X_all, y, event, model_key="ridge"):
         feat = features[0]
         x1d  = Xf[feat].values.astype(float)
         r2, mae = fit_loess(x1d, yt.astype(float))
-        # Store training data for prediction interpolation
         sort_idx = np.argsort(x1d)
         loess_data = np.column_stack([x1d[sort_idx], yt.astype(float)[sort_idx]])
         return {'mode': 'loess', 'features': [feat], 'r2': r2, 'mae': mae,
@@ -1034,6 +1037,36 @@ def fit_event_model(X_all, y, event, model_key="ridge"):
                 'alpha': 1.0, 'coef': [], 'intercept': 0.0,
                 'best_r': best_single_r, 'mean_doy': float(yt.mean()), 'n': n,
                 'pipe': pipe, 'model_key': model_key}
+
+    # ── Gaussian Process Regression (best for n < 10) ─────────
+    if model_key == "gpr":
+        sc = StandardScaler()
+        Xvs = sc.fit_transform(Xv)
+        yt_f = yt.astype(float)
+        # RBF + WhiteKernel: captures smooth trends + observation noise
+        kernel = RBF(length_scale=1.0, length_scale_bounds=(1e-2, 10.0)) \
+                 + WhiteKernel(noise_level=1.0, noise_level_bounds=(1e-3, 1e3))
+        gpr = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5,
+                                       normalize_y=True, random_state=42)
+        # LOO cross-validation
+        loo = LeaveOneOut()
+        preds_loo = np.zeros(n)
+        for tr, te in loo.split(Xvs):
+            gpr_cv = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=2,
+                                               normalize_y=True, random_state=42)
+            gpr_cv.fit(Xvs[tr], yt_f[tr])
+            preds_loo[te] = gpr_cv.predict(Xvs[te])
+        ss_res = np.sum((yt_f - preds_loo) ** 2)
+        ss_tot = np.sum((yt_f - yt_f.mean()) ** 2) + 1e-12
+        r2  = float(np.clip(1 - ss_res / ss_tot, -1, 1))
+        mae = float(np.mean(np.abs(yt_f - preds_loo)))
+        # Fit final model on all data
+        gpr.fit(Xvs, yt_f)
+        return {'mode': 'gpr', 'features': features, 'r2': r2, 'mae': mae,
+                'alpha': None, 'coef': [], 'intercept': 0.0,
+                'best_r': best_single_r, 'mean_doy': float(yt.mean()), 'n': n,
+                'pipe': None, 'gpr_model': gpr, 'gpr_scaler': sc,
+                'model_key': model_key}
 
     # ── Default: Ridge Regression ─────────────────────────────
     rcv = RidgeCV(alphas=ALPHAS, cv=LeaveOneOut())
@@ -1086,6 +1119,16 @@ class UniversalPredictor:
                 rel_days = int(np.clip(round(float(pred)), 0, 500))
             else:
                 rel_days = int(round(fit['mean_doy']))
+        elif fit['mode'] == 'gpr':
+            vals = np.array([[inputs.get(f, 0.0) for f in fit['features']]])
+            sc   = fit.get('gpr_scaler')
+            gpr  = fit.get('gpr_model')
+            if sc is not None and gpr is not None:
+                vals_s = sc.transform(vals)
+                pred   = gpr.predict(vals_s)[0]
+                rel_days = int(np.clip(round(float(pred)), 0, 500))
+            else:
+                rel_days = int(round(fit['mean_doy']))
         else:
             vals = np.array([[inputs.get(f, 0.0) for f in fit['features']]])
             rel_days = int(np.clip(round(float(fit['pipe'].predict(vals)[0])), 0, 500))
@@ -1108,6 +1151,17 @@ class UniversalPredictor:
         if fit['mode'] == 'mean':
             return (f"{target_label} ≈ {fit['mean_doy']:.0f}  "
                     f"[No feature |r|≥{MIN_CORR_THRESHOLD} — mean prediction only]")
+
+        if fit['mode'] == 'gpr':
+            feats_str = ", ".join(fit['features'])
+            return (f"{target_label}  =  GPR({feats_str})\n"
+                    f"    [Gaussian Process, RBF+WhiteKernel, {len(fit['features'])} feature(s), "
+                    f"R²(LOO)={fit['r2']:.3f}, MAE=±{fit['mae']:.1f} d]")
+
+        if fit['mode'] == 'loess':
+            feat = fit['features'][0] if fit['features'] else '?'
+            return (f"{target_label}  =  LOESS({feat})\n"
+                    f"    [Locally weighted smoothing, R²(LOO)={fit['r2']:.3f}, MAE=±{fit['mae']:.1f} d]")
 
         intercept = fit.get('intercept', 0.0)
         terms = [f"{intercept:.3f}"]
@@ -1501,22 +1555,16 @@ def plot_correlation_summary(predictor, pheno_df):
 def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
                        pheno_df=None, predictor=None):
     """
-    Year-by-year figures: for each growing season, plot 2 sub-panels:
-      Top    — NDVI + Air params (RH2M, T2M_MAX, T2M_MIN, PRECTOTCORR)
-      Bottom — NDVI + Soil params (GWETTOP, GWETROOT, GWETPROF, WS2M)
-
-    If pheno_df and predictor are supplied, vertical dashed lines for SOS/POS/EOS
-    are drawn on both panels, with an annotation showing:
-      • the event date
-      • the model feature name and its 15-day pre-event mean value
-      • the equation term used for prediction
-    This directly links the seasonal climate context to the model equations.
-    Returns a list of (title, fig) tuples — one per season.
+    One figure per extracted growing season in pheno_df.
+    Season window = Trough_Date -> EOS_Date+30d (exactly matching extraction).
+    No SOS/POS/EOS lines drawn.
+    Top panel  : NDVI + Air params
+    Bottom panel: NDVI + Soil params
     """
     AIR_PARAMS = [
         ('RH2M',        '#212121', 'RH2M (%)'),
-        ('T2M_MAX',     '#E53935', 'Max T (°C)'),
-        ('T2M_MIN',     '#1E88E5', 'Min T (°C)'),
+        ('T2M_MAX',     '#E53935', 'Max T (\u00b0C)'),
+        ('T2M_MIN',     '#1E88E5', 'Min T (\u00b0C)'),
         ('PRECTOTCORR', '#8E24AA', 'Rain (mm)'),
     ]
     SOIL_PARAMS = [
@@ -1526,156 +1574,122 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
         ('WS2M',     '#546E7A', 'Wind Speed (m/s)'),
     ]
 
-    # ── Build daily NDVI ──────────────────────────────────────
-    ndvi_daily = (ndvi_df.set_index('Date')['NDVI']
-                  .resample('D').interpolate(method='time'))
+    # Build 5-day NDVI grid (identical pipeline to extraction)
+    ndvi_idx = ndvi_df.set_index('Date')['NDVI'].sort_index()
+    ndvi_idx = ndvi_idx[~ndvi_idx.index.duplicated(keep='first')]
+    full_range = pd.date_range(start=ndvi_idx.index.min(),
+                               end=ndvi_idx.index.max(), freq='5D')
+    ndvi_5d = (ndvi_idx.reindex(ndvi_idx.index.union(full_range))
+                       .interpolate(method='time')
+                       .reindex(full_range))
 
-    # ── Determine seasons ─────────────────────────────────────
-    if season_cfg:
-        sm = season_cfg.get('start_month', 6)
-        em = season_cfg.get('end_month', 5)
-    else:
-        sm, em = 6, 5  # default Jun-May
+    if pheno_df is None or len(pheno_df) == 0:
+        return []
 
-    years = sorted(met_df['Date'].dt.year.unique())
     figs = []
+    for _, row in pheno_df.sort_values('Year').iterrows():
+        try:
+            yr       = int(row['Year'])
+            trough_d = row.get('Trough_Date', pd.NaT)
+            sos_d    = row.get('SOS_Date',    pd.NaT)
+            eos_d    = row.get('EOS_Date',    pd.NaT)
 
-    for yr in years:
-        if sm <= em:
-            s = pd.Timestamp(f"{yr}-{sm:02d}-01")
-            e = pd.Timestamp(f"{yr}-{em:02d}-28")
-        else:
-            s = pd.Timestamp(f"{yr}-{sm:02d}-01")
-            e = pd.Timestamp(f"{yr+1}-{em:02d}-28")
+            # Window start = trough (valley before green-up), fallback SOS-60d
+            if pd.notna(trough_d):
+                s = pd.Timestamp(trough_d)
+            elif pd.notna(sos_d):
+                s = pd.Timestamp(sos_d) - pd.Timedelta(days=60)
+            else:
+                continue
 
-        df_met = met_df[(met_df['Date'] >= s) & (met_df['Date'] <= e)].copy()
-        if len(df_met) < 30: continue
-        ndvi_seg = ndvi_daily.reindex(df_met['Date'].values, method='nearest', tolerance='5D')
+            # Window end = EOS + 30d buffer
+            if pd.notna(eos_d):
+                e = pd.Timestamp(eos_d) + pd.Timedelta(days=30)
+            else:
+                continue
 
-        season_label = f"{yr}–{yr+1}" if sm > em else str(yr)
-        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 11), sharex=True)
-        fig.patch.set_facecolor('#FAFFF8')
-        fig.suptitle(f"NDVI + Meteorology — Growing Season {season_label}",
-                     fontsize=16, fontweight='bold', y=0.98)
+            df_met = met_df[(met_df['Date'] >= s) & (met_df['Date'] <= e)].copy()
+            if len(df_met) < 20:
+                continue
 
-        def _draw_panel(ax, param_list, panel_title, bar_params=('PRECTOTCORR','PRECTOT','RAIN')):
-            """Draw NDVI on left axis + each met param on successive right axes."""
-            # NDVI left axis
-            ax.fill_between(df_met['Date'], ndvi_seg, alpha=0.15, color='#2E7D32')
-            ax.plot(df_met['Date'], ndvi_seg, color='#2E7D32', lw=2.5,
-                    label='NDVI', zorder=5)
-            ax.set_ylabel('NDVI', color='#2E7D32', fontsize=12, fontweight='bold')
-            ax.set_ylim(0, 1.0)
-            ax.tick_params(axis='y', labelcolor='#2E7D32', labelsize=9)
-            ax.grid(True, linestyle='--', alpha=0.30)
-            ax.set_facecolor('#FAFFF8')
-            ax.set_title(panel_title, fontsize=13, fontweight='bold', pad=18, loc='center')
+            # NDVI over exact same window
+            ndvi_seg = ndvi_5d.reindex(df_met['Date'].values,
+                                       method='nearest',
+                                       tolerance=pd.Timedelta('8D'))
+            ndvi_seg = ndvi_seg.fillna(method='ffill').fillna(method='bfill')
 
-            twin_axes = []
-            present = [(p, c, l) for p, c, l in param_list if p in df_met.columns]
-            for i, (var, col, lab) in enumerate(present):
-                axr = ax.twinx()
-                offset = 1.0 + 0.10 * i
-                if i > 0:
-                    axr.spines['right'].set_position(('axes', offset))
-                    axr.spines['right'].set_visible(True)
+            sos_str = pd.Timestamp(sos_d).strftime('%d %b') if pd.notna(sos_d) else '?'
+            eos_str = pd.Timestamp(eos_d).strftime('%d %b %Y') if pd.notna(eos_d) else '?'
 
-                if var in bar_params:
-                    axr.bar(df_met['Date'], df_met[var], color=col, alpha=0.50,
-                            width=1.0, label=lab, zorder=3)
-                else:
-                    axr.plot(df_met['Date'], df_met[var], color=col, lw=1.6,
-                             alpha=0.85, label=lab)
+            fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 11), sharex=True)
+            fig.patch.set_facecolor('#FAFFF8')
+            fig.suptitle(
+                f"NDVI + Meteorology  \u2014  Growing Season {yr}   "
+                f"[ {sos_str} \u2192 {eos_str} ]",
+                fontsize=15, fontweight='bold', y=0.98)
 
-                axr.set_ylabel(lab, color=col, fontsize=9, rotation=270, labelpad=18)
-                axr.tick_params(axis='y', labelcolor=col, labelsize=8)
-                axr.spines['right'].set_color(col)
-                axr.yaxis.label.set_color(col)
-                twin_axes.append(axr)
+            def _draw_panel(ax, param_list, panel_title,
+                            bar_params=('PRECTOTCORR', 'PRECTOT', 'RAIN')):
+                ax.fill_between(df_met['Date'], ndvi_seg, alpha=0.18, color='#2E7D32')
+                ax.plot(df_met['Date'], ndvi_seg, color='#2E7D32', lw=2.5,
+                        label='NDVI', zorder=5)
+                ax.set_ylabel('NDVI', color='#2E7D32', fontsize=12, fontweight='bold')
+                ax.set_ylim(0, 1.05)
+                ax.tick_params(axis='y', labelcolor='#2E7D32', labelsize=9)
+                ax.grid(True, linestyle='--', alpha=0.30)
+                ax.set_facecolor('#FAFFF8')
+                ax.set_title(panel_title, fontsize=13, fontweight='bold', pad=14, loc='center')
 
-            # Legend: combine NDVI + all met params
-            h, l = ax.get_legend_handles_labels()
-            for axr in twin_axes:
-                hh, ll = axr.get_legend_handles_labels()
-                h.extend(hh); l.extend(ll)
-            return h, l
+                twin_axes = []
+                present = [(p, c, l) for p, c, l in param_list if p in df_met.columns]
+                for i, (var, col, lab) in enumerate(present):
+                    axr = ax.twinx()
+                    if i > 0:
+                        axr.spines['right'].set_position(('axes', 1.0 + 0.10 * i))
+                        axr.spines['right'].set_visible(True)
+                    if var in bar_params:
+                        axr.bar(df_met['Date'], df_met[var], color=col,
+                                alpha=0.50, width=1.0, label=lab, zorder=3)
+                    else:
+                        axr.plot(df_met['Date'], df_met[var], color=col,
+                                 lw=1.6, alpha=0.85, label=lab)
+                    axr.set_ylabel(lab, color=col, fontsize=9, rotation=270, labelpad=18)
+                    axr.tick_params(axis='y', labelcolor=col, labelsize=8)
+                    axr.spines['right'].set_color(col)
+                    twin_axes.append(axr)
 
-        # ── Top panel: Air ────────────────────────────────────
-        h_air, l_air = _draw_panel(ax_top, AIR_PARAMS,
-                                    "Air Parameters  (RH, Tmax, Tmin, Precip)")
-        fig.legend(h_air, l_air, loc='upper center', bbox_to_anchor=(0.5, 0.97),
-                   ncol=len(h_air), fontsize=9, framealpha=0.95,
-                   title='Air Parameters', title_fontsize=9)
+                h, l = ax.get_legend_handles_labels()
+                for axr in twin_axes:
+                    hh, ll = axr.get_legend_handles_labels()
+                    h.extend(hh); l.extend(ll)
+                return h, l
 
-        # ── Bottom panel: Soil ────────────────────────────────
-        h_soil, l_soil = _draw_panel(ax_bot, SOIL_PARAMS,
-                                      "Soil Parameters  (GWETs, Wind Speed)")
-        fig.legend(h_soil, l_soil, loc='center left', bbox_to_anchor=(0.01, 0.28),
-                   ncol=1, fontsize=9, framealpha=0.95,
-                   title='Soil Parameters', title_fontsize=9)
+            h_air, l_air = _draw_panel(
+                ax_top, AIR_PARAMS, "Air Parameters  (RH, Tmax, Tmin, Precip)")
+            fig.legend(h_air, l_air, loc='upper center', bbox_to_anchor=(0.5, 0.975),
+                       ncol=len(h_air), fontsize=9, framealpha=0.95,
+                       title='Air Parameters', title_fontsize=9)
 
-        # ── Draw SOS / POS / EOS vertical lines if pheno_df provided ──
-        EV_STYLE = {
-            'SOS': ('#2E7D32', '🌱', 'SOS'),
-            'POS': ('#1565C0', '🌿', 'POS'),
-            'EOS': ('#E65100', '🍂', 'EOS'),
-        }
-        if pheno_df is not None:
-            # Find the row for this year
-            yr_row = pheno_df[pheno_df['Year'] == yr] if 'Year' in pheno_df.columns else pd.DataFrame()
-            if len(yr_row) == 0 and sm > em:
-                # Cross-year season: try yr-1 as the season start year
-                yr_row = pheno_df[pheno_df['Year'] == yr - 1] if 'Year' in pheno_df.columns else pd.DataFrame()
+            h_soil, l_soil = _draw_panel(
+                ax_bot, SOIL_PARAMS, "Soil Parameters  (GWETs, Wind Speed)")
+            fig.legend(h_soil, l_soil, loc='center left', bbox_to_anchor=(0.01, 0.25),
+                       ncol=1, fontsize=9, framealpha=0.95,
+                       title='Soil Parameters', title_fontsize=9)
 
-            if len(yr_row) > 0:
-                row = yr_row.iloc[0]
-                for ev, (col, icon, label) in EV_STYLE.items():
-                    ev_date = row.get(f'{ev}_Date', pd.NaT)
-                    if pd.isna(ev_date): continue
-                    if not (s <= ev_date <= e): continue
+            ax_bot.set_xlabel('Date', fontsize=13, fontweight='bold')
+            ax_bot.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax_bot.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+            plt.setp(ax_bot.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
-                    # Draw vertical line on both panels
-                    for ax in [ax_top, ax_bot]:
-                        ax.axvline(ev_date, color=col, lw=2.0, ls='--', alpha=0.85, zorder=10)
+            fig.tight_layout(rect=[0.10, 0.0, 1.0, 0.93])
+            figs.append((str(yr), fig))
 
-                    # Build annotation: feature name + 15-day pre-event mean
-                    annot_lines = [f"{icon} {label}  {ev_date.strftime('%b %d')}"]
-                    if predictor is not None:
-                        fit = predictor._fits.get(ev, {})
-                        feats = fit.get('features', [])
-                        for f_name in feats[:2]:  # show up to 2 features
-                            if f_name in met_df.columns:
-                                win = met_df[(met_df['Date'] >= ev_date - timedelta(days=15)) &
-                                             (met_df['Date'] <= ev_date)]
-                                val = win[f_name].mean() if len(win) > 0 else np.nan
-                                if not np.isnan(val):
-                                    unit = '°C' if 'T2M' in f_name else ('%' if 'RH' in f_name else '')
-                                    annot_lines.append(f"{f_name}: {val:.1f}{unit}")
-
-                    annot_txt = '\n'.join(annot_lines)
-                    # Place label just above NDVI area (y=0.92 in axes coords)
-                    ax_top.text(ev_date, 0.96, annot_txt,
-                                transform=ax_top.get_xaxis_transform(),
-                                fontsize=7.5, color=col, fontweight='bold',
-                                ha='center', va='top',
-                                bbox=dict(boxstyle='round,pad=0.25', fc='white', ec=col, alpha=0.85),
-                                zorder=15)
-
-        # ── X-axis ────────────────────────────────────────────
-        ax_bot.set_xlabel('Date', fontsize=13, fontweight='bold')
-        ax_bot.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-        ax_bot.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        plt.setp(ax_bot.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-        fig.tight_layout(rect=[0.10, 0.0, 1.0, 0.93])
-        figs.append((season_label, fig))
+        except Exception:
+            continue
 
     return figs
 
 
-# ─────────────────────────────────────────────────────────────
-# MAIN APP
-# ─────────────────────────────────────────────────────────────
 def main():
     # Safe defaults — prevent UnboundLocalError if any widget section is skipped
     regression_model_key = "ridge"
@@ -1793,16 +1807,23 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📈 Regression Model")
     model_options = {
-        "Ridge Regression (Linear)":    "ridge",
-        "LOESS / LOWESS Smoothing":     "loess",
-        "Polynomial Regression (deg 2)":"poly2",
-        "Polynomial Regression (deg 3)":"poly3",
+        "Ridge Regression (Linear)":          "ridge",
+        "LOESS / LOWESS Smoothing":           "loess",
+        "Polynomial Regression (deg 2)":      "poly2",
+        "Polynomial Regression (deg 3)":      "poly3",
+        "Gaussian Process (best for n<10)":   "gpr",
     }
     regression_model_sel = st.sidebar.radio(
         "Select fitting model",
         options=list(model_options.keys()),
         index=0,
-        help="Ridge = L2-regularised linear regression (default). LOESS = locally weighted smoothing. Polynomial = non-linear fit."
+        help=(
+            "**Ridge** — L2-regularised linear (default).\n\n"
+            "**LOESS** — locally weighted smoothing.\n\n"
+            "**Polynomial** — non-linear fit (deg 2/3).\n\n"
+            "**Gaussian Process** — probabilistic, ideal for small datasets (n<10). "
+            "Uses RBF kernel + noise term. Recommended when you have <8 seasons."
+        )
     )
     regression_model_key = model_options[regression_model_sel]
 
@@ -1983,7 +2004,7 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
                 feat_str = ', '.join(feats) if feats else '—'
                 n_feats = len(feats)
                 mkey = fit.get('model_key', 'ridge')
-                model_tag = {'ridge':'Ridge','loess':'LOESS','poly2':'Poly-2','poly3':'Poly-3'}.get(mkey, mkey)
+                model_tag = {'ridge':'Ridge','loess':'LOESS','poly2':'Poly-2','poly3':'Poly-3','gpr':'GPR'}.get(mkey, mkey)
                 col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
                              f'<h1 style="color:{clr}">{r2*100:.1f}%</h1>'
                              f'<p>{model_tag} | LOO | {n} seasons<br>'
