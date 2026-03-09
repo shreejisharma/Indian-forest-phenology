@@ -1779,18 +1779,7 @@ def main():
     eos_rain_thresh_sel  = 3.0
     eos_roll_days_sel    = 14
 
-    # ── Full fingerprint: files + ALL sidebar parameters ──────
-    # Any change to thresholds, season window, or model triggers a fresh run
-    _cur_fp = (f"{_ndvi_fp}|{_met_fp}"
-               f"|sm={start_month_sel}|em={end_month_sel}|md={min_days_sel}"
-               f"|sos={sos_threshold_pct:.4f}|eos={eos_threshold_pct:.4f}"
-               f"|model={regression_model_key}")
-    if st.session_state.get('_file_fingerprint') != _cur_fp:
-        for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
-            st.session_state[_k] = None
-        st.session_state['_file_fingerprint'] = _cur_fp
-
-    # Regression model selector
+    # Regression model selector (must be defined BEFORE fingerprint)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📈 Regression Model")
     model_options = {
@@ -1806,6 +1795,17 @@ def main():
         help="Ridge = L2-regularised linear regression (default). LOESS = locally weighted smoothing. Polynomial = non-linear fit."
     )
     regression_model_key = model_options[regression_model_sel]
+
+    # ── Full fingerprint: files + ALL sidebar parameters ──────
+    # Any change to thresholds, season window, or model triggers a fresh run
+    _cur_fp = (f"{_ndvi_fp}|{_met_fp}"
+               f"|sm={start_month_sel}|em={end_month_sel}|md={min_days_sel}"
+               f"|sos={sos_threshold_pct:.4f}|eos={eos_threshold_pct:.4f}"
+               f"|model={regression_model_key}")
+    if st.session_state.get('_file_fingerprint') != _cur_fp:
+        for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
+            st.session_state[_k] = None
+        st.session_state['_file_fingerprint'] = _cur_fp
 
     # ── GATE ─────────────────────────────────────────────────
     if not (ndvi_file and met_file):
