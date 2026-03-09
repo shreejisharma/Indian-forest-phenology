@@ -1677,6 +1677,16 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None,
 # MAIN APP
 # ─────────────────────────────────────────────────────────────
 def main():
+    # Safe defaults — prevent UnboundLocalError if any widget section is skipped
+    regression_model_key = "ridge"
+    regression_model_sel = "Ridge Regression (Linear)"
+    sos_threshold_pct    = 0.10
+    eos_threshold_pct    = 0.10
+    threshold_pct_override = 0.10
+    start_month_sel      = 6
+    end_month_sel        = 5
+    min_days_sel         = 150
+
     st.markdown('<p class="main-header">🌲 Universal Vegetation Phenology Predictor</p>',
                 unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Upload NDVI + NASA POWER Met · '
