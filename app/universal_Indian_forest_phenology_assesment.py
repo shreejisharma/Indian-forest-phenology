@@ -653,8 +653,23 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             window = slice(max(0, ti - 5), min(n, ti + 6))
             if nan_mask[window].any():
                 continue   # trough is at or adjacent to a gap — discard
-            trough_indices = trough_indices  # keep accumulating below
             trough_indices.append(ti)
+
+        # ── KEY FIX 2: discard "plateau troughs" ──────────────────────
+        # A real inter-season dormancy trough must be significantly below
+        # the surrounding NDVI peaks. If a detected trough has NDVI that
+        # is more than 70% of the way from the global minimum to the global
+        # maximum, it's a shoulder dip in the green season — not a true
+        # dormancy valley — and must be discarded.
+        if len(trough_indices) >= 2:
+            valid_sm = sm_for_troughs[~nan_mask]
+            global_min = float(np.percentile(valid_sm, 5))   # robust global low
+            global_max = float(np.percentile(valid_sm, 95))  # robust global high
+            global_amp = global_max - global_min
+            # A trough must be in the LOWER 60% of the NDVI range
+            trough_ceiling = global_min + 0.60 * global_amp
+            trough_indices = [ti for ti in trough_indices
+                              if sm_for_troughs[ti] <= trough_ceiling]
 
         def _cycle_has_gap(i_start, i_end):
             """Return True if more than 20% of the cycle falls inside a gap."""
