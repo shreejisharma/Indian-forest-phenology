@@ -1382,6 +1382,54 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
     if in_gap:
         ax.axvspan(gap_s, ndvi_5d.index[-1], color='#BDBDBD', alpha=0.30)
 
+    # ── Per-season threshold lines drawn directly on plot ─────
+    # Uses Base_NDVI, Threshold_SOS, Threshold_EOS, Trough_Date, EOS_Date from pheno_df
+    thr_sos_plotted = False
+    thr_eos_plotted = False
+    base_plotted    = False
+    for _, row in pheno_df.iterrows():
+        trough_d = row.get('Trough_Date')
+        eos_d    = row.get('EOS_Date')
+        base     = row.get('Base_NDVI')
+        thr_sos  = row.get('Threshold_SOS')
+        thr_eos  = row.get('Threshold_EOS')
+        peak     = row.get('Peak_NDVI')
+        amp      = row.get('Amplitude')
+        sos_d    = row.get('SOS_Date')
+        pos_d    = row.get('POS_Date')
+        if pd.isna(trough_d) or pd.isna(eos_d): continue
+        seg_start = pd.Timestamp(trough_d)
+        seg_end   = pd.Timestamp(eos_d) + pd.Timedelta(days=20)
+
+        # Base NDVI line (dormancy floor) — orange dashed
+        if pd.notna(base):
+            lbl_b = 'Base NDVI (dormancy valley)' if not base_plotted else ''
+            ax.hlines(base, seg_start, seg_end,
+                      colors='#F57F17', lw=1.1, ls=':', alpha=0.75, label=lbl_b, zorder=4)
+            base_plotted = True
+
+        # SOS threshold line — light green solid
+        if pd.notna(thr_sos):
+            lbl_s = f'SOS threshold (base + {int(round((thr_sos-base)/amp*100)) if pd.notna(amp) and amp>0 else "?"}% × A)' if not thr_sos_plotted else ''
+            ax.hlines(thr_sos, seg_start, seg_end,
+                      colors='#66BB6A', lw=1.2, ls='--', alpha=0.70, label=lbl_s, zorder=4)
+            thr_sos_plotted = True
+
+        # EOS threshold line (if different from SOS threshold) — amber solid
+        if pd.notna(thr_eos) and (not pd.notna(thr_sos) or abs(thr_eos - thr_sos) > 1e-4):
+            lbl_e = f'EOS threshold (base + {int(round((thr_eos-base)/amp*100)) if pd.notna(amp) and amp>0 else "?"}% × A)' if not thr_eos_plotted else ''
+            ax.hlines(thr_eos, seg_start, seg_end,
+                      colors='#FFA726', lw=1.2, ls='--', alpha=0.70, label=lbl_e, zorder=4)
+            thr_eos_plotted = True
+
+        # Amplitude bracket arrow: base → peak NDVI, at POS date
+        if pd.notna(pos_d) and pd.notna(base) and pd.notna(peak) and pd.notna(amp) and amp > 0.01:
+            px = pd.Timestamp(pos_d)
+            ax.annotate('', xy=(px, peak), xytext=(px, base),
+                        arrowprops=dict(arrowstyle='<->', color='#7B1FA2', lw=1.1))
+            ax.text(px, base + amp * 0.5, f'  A={amp:.3f}',
+                    fontsize=7, color='#7B1FA2', va='center', ha='left')
+
     # ── SOS / POS / EOS vertical lines ────────────────────────
     ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
     ev_labels_map = {
@@ -1402,19 +1450,25 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
         Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl_global})'),
         plt.Rectangle((0,0),1,1, fc='#BDBDBD', alpha=0.40, label='Data gap (not interpolated)'),
+        Line2D([0],[0], color='#F57F17', lw=1.1, ls=':', label='Base NDVI (dormancy valley)'),
+        Line2D([0],[0], color='#66BB6A', lw=1.2, ls='--', label='SOS threshold (base + thr% × A)'),
+        Line2D([0],[0], color='#FFA726', lw=1.2, ls='--', label='EOS threshold (base + thr% × A)'),
+        Line2D([0],[0], color='#7B1FA2', lw=1.1, label='A = amplitude (NDVI_max − base)'),
         Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
     ]
-    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events',
-                 fontsize=12, fontweight='bold', color='#1B5E20')
+    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events\n'
+                 'with per-season amplitude threshold definition',
+                 fontsize=11, fontweight='bold', color='#1B5E20')
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-    ax.legend(handles=handles, ncol=3, fontsize=8.5, loc='upper left', framealpha=0.88)
+    ax.legend(handles=handles, ncol=3, fontsize=7.5, loc='upper left', framealpha=0.88)
     ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
+
 
 
 def plot_pheno_trends(pheno_df):
@@ -2563,73 +2617,117 @@ Defaults are pre-filled from training data means — change them to forecast fut
         st.markdown(f"""
 ### 📖 Technical Guide
 
-#### Phenology Extraction Method
+---
 
-Phenological metrics are extracted using the **NDVI Amplitude-Based Threshold Method**:
+#### 🌿 Phenology Extraction Method — Valley-Anchored Amplitude Threshold
 
-1. **5-day interpolation** — raw NDVI observations are interpolated to a regular 5-day grid to fill temporal gaps.
-2. **Savitzky–Golay smoothing** — adaptive window (≈5% of series length, min 7 points) reduces noise.
-3. **Per-season amplitude** — for each growing season independently: A = NDVI_max − NDVI_min.
-4. **Threshold** = NDVI_min + threshold% × A  (default 10%, adjustable 5–30%).
-5. **SOS** = first 5-day step when smoothed NDVI ≥ threshold (after dormancy minimum).
-6. **EOS** = last 5-day step when smoothed NDVI ≥ threshold (before next dormancy minimum).
-7. **POS** = maximum smoothed NDVI value between SOS and EOS.
+Phenological metrics are extracted using the **per-season amplitude-based threshold method**, anchored to real trough valleys detected in the smoothed NDVI signal.
+
+##### Step-by-step pipeline:
+
+| Step | Process | Detail |
+|------|---------|--------|
+| 1 | **Gap detection** | Any gap > 60 days in original observations is flagged — no interpolation across missing seasons |
+| 2 | **5-day interpolation** | Raw NDVI interpolated to a regular 5-day grid **within segments only** (`limit_area='inside'`) |
+| 3 | **Per-segment SG smoothing** | Savitzky–Golay run **independently on each contiguous data segment** (window ≈ 10% of segment, min 7, poly=2) — never bridges across a gap |
+| 4 | **Valley (trough) detection** | Local minima found with `min_distance ≈ 145 days` on the 5-day grid — these are the real inter-season dormancy troughs |
+| 5 | **Amplitude per cycle** | For each trough-to-trough cycle: **A = NDVI_max − NDVI_min** where NDVI_min = value at the left trough (the actual dormancy valley) |
+| 6 | **Threshold line** | `Threshold = NDVI_min + threshold% × A` (default **10%**, adjustable 5–30%) |
+| 7 | **SOS** | First 5-day step when smoothed NDVI ≥ threshold (ascending phase after trough) |
+| 8 | **EOS** | Last 5-day step when smoothed NDVI ≥ threshold (descending phase before next trough) |
+| 9 | **POS** | Maximum smoothed NDVI between SOS and EOS |
+| 10 | **Gap cycle skip** | Any trough-to-trough cycle where >30% of 5-day points are NaN (fall in a data gap) is **skipped entirely** — no phantom seasons |
+
+##### Key formula:
+
+```
+A  =  NDVI_max  −  NDVI_min (valley anchor)
+SOS  =  first t : NDVI(t) ≥ NDVI_min + SOS_thr% × A
+EOS  =  last  t : NDVI(t) ≥ NDVI_min + EOS_thr% × A
+POS  =  argmax NDVI(t) for SOS ≤ t ≤ EOS
+LOS  =  EOS − SOS (days)
+```
 
 Thresholds are computed **independently per season** — inter-annual amplitude variability does not bias detection.
 
-#### Model Architecture
+---
 
-| Component | Detail |
-|-----------|--------|
-| Feature selection | Pearson |r| ≥ {MIN_CORR_THRESHOLD} required |
-| Regression options | **Ridge** (L2, RidgeCV), **LOESS** (locally weighted), **Polynomial deg 2/3** |
-| Cross-validation | **Leave-One-Out** (unbiased for small samples) |
-| Phenology extraction | NDVI amplitude threshold (per-season) |
+#### 📊 Threshold Sensitivity Guide
 
-#### Available Regression Models
+| Threshold % | Effect | Best used for |
+|------------|--------|---------------|
+| 5% | Very sensitive — detects earliest green flush / latest senescence | High-noise NDVI, sparse data |
+| **10%** | **Scientific default** — standard for Indian tropical forests | Most forest types |
+| 15–20% | Moderate — captures core growing period only | Dense evergreen canopy |
+| 25–30% | Conservative — detects only peak season | Low-amplitude ecosystems |
 
-| Model | Best for | Notes |
-|-------|---------|-------|
-| Ridge Regression | Most cases — reliable, regularised | α auto-tuned via RidgeCV LOO |
-| LOESS / LOWESS | Non-linear, unimodal relationships | Uses single best feature; frac=0.75 |
-| Polynomial deg 2 | Curved relationships | Ridge-regularised polynomial |
-| Polynomial deg 3 | Complex curves | Ridge-regularised; may overfit with few seasons |
+---
 
-#### R² Guide
+#### 🔬 Feature Selection — Pearson + Spearman Combined
+
+| Step | Detail |
+|------|--------|
+| Correlation score | **Composite = max(abs Pearson r, abs Spearman ρ)** — uses the higher of the two |
+| Why Spearman? | Detects monotone **nonlinear** relationships that Pearson misses (critical for n < 10) |
+| Threshold | Composite ≥ **{MIN_CORR_THRESHOLD}** required to enter model |
+| Collinearity removal | Pairwise r > 0.85 — keep higher-scoring feature |
+| Feature cap | max(5, n−2) features to prevent overfitting |
+
+---
+
+#### 📈 Available Regression Models
+
+| Model | Best for | Cross-validation | Notes |
+|-------|---------|-----------------|-------|
+| **Ridge Regression** | Most cases — robust, regularised linear | LOO | α auto-tuned via RidgeCV |
+| **LOESS / LOWESS** | Nonlinear unimodal relationships | LOO | Single best feature; frac=0.75 |
+| **Polynomial deg 2** | Curved (quadratic) relationships | LOO | Ridge-regularised |
+| **Polynomial deg 3** | Complex curves | LOO | May overfit with <8 seasons |
+| **Gaussian Process** | **Small datasets (n < 10)** — recommended | LOO | RBF + WhiteKernel; handles uncertainty natively |
+
+> 💡 **Recommendation:** With <8 seasons, always try **Gaussian Process** — it is the statistically optimal method for small phenology datasets and typically gives the highest LOO R².
+
+---
+
+#### 📉 R² (LOO Cross-Validated) Interpretation
 
 | R² | Meaning |
 |----|---------|
-| >0.70 | Strong signal — reliable prediction |
-| 0.40–0.70 | Moderate — adequate for trend analysis |
-| 0.10–0.40 | Weak — relative comparisons only |
-| 0.0 | No feature found — prediction = mean DOY |
-| <0 | Below mean baseline — increase seasons |
+| > 0.80 | Strong — publication-quality prediction |
+| 0.50–0.80 | Good — reliable for trend analysis |
+| 0.30–0.50 | Moderate — adequate with caveats |
+| 0.10–0.30 | Weak — relative comparison only |
+| 0.0 | No usable feature — prediction = mean DOY |
+| < 0 | Below mean baseline — add more seasons or try GPR |
 
-#### Threshold Sensitivity
+---
 
-The 5–30% range covers the full ecologically relevant spectrum:
-- **5–10%** — sensitive; picks up early green-up / late senescence; best for sparse or high-noise NDVI
-- **10–15%** — standard recommended range (this method's scientific default is 10%)
-- **15–30%** — conservative; detects only peak growing period
-
-#### Data Requirements
+#### 📂 Data Requirements
 
 | Seasons | Capability |
 |---------|-----------|
-| 3–4 | Minimum — high uncertainty |
+| 3–4 | Minimum — high uncertainty, use GPR |
 | 5–8 | Adequate — publishable with caveats |
-| 9–14 | Good — reliable LOO R² |
+| 9–14 | Good — reliable LOO R² for all models |
 | 15+ | Publication-quality |
 
-#### Recommended NASA POWER Parameters
+> **Gap data:** If your NDVI file has year-long gaps (e.g. missing data for one or more seasons), the app correctly detects these and skips any cycle that spans a gap. Smooth curves and phenology extraction are computed **independently per data segment**.
 
-Download daily data from [power.larc.nasa.gov](https://power.larc.nasa.gov/data-access-viewer/):
-T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
+---
 
-#### Scientific Description (for thesis / report)
+#### 🛰️ Recommended NASA POWER Parameters
 
-> *"Phenological metrics were extracted from the smoothed NDVI time series using an amplitude-based threshold method. Prior to extraction, the NDVI time series was interpolated to a regular 5-day grid and smoothed using the Savitzky–Golay filter to reduce sensor noise. The seasonal NDVI amplitude was calculated as the difference between the maximum and minimum NDVI values within each growing cycle. The Start of Season (SOS) was defined as the first time step when NDVI exceeded 10% of the seasonal amplitude above the base value (NDVI_min). Similarly, the End of Season (EOS) was defined as the last time step when NDVI remained above this threshold. The Peak of Season (POS) corresponded to the maximum NDVI value occurring between SOS and EOS. Thresholds were computed independently for each growing season to account for inter-annual amplitude variability."*
+Download daily data from [power.larc.nasa.gov](https://power.larc.nasa.gov/data-access-viewer/) → Daily → Point → your coordinates:
+
+`T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN`
+
+---
+
+#### 📝 Scientific Description (copy for thesis / report)
+
+> *"Phenological metrics were extracted from the smoothed NDVI time series using a valley-anchored amplitude-based threshold method. Prior to extraction, data gaps exceeding 60 days were identified and preserved as missing values — no interpolation was performed across missing seasons. Within each contiguous data segment, NDVI observations were interpolated to a regular 5-day grid and smoothed independently using the Savitzky–Golay filter (polynomial order 2, adaptive window ≈ 10% of segment length) to prevent artificial smoothing across gaps. Inter-season dormancy valleys (troughs) were detected as local minima with a minimum separation of ≈ 145 days on the 5-day grid. For each trough-to-trough growing cycle, the seasonal amplitude was calculated as A = NDVI_max − NDVI_min, where NDVI_min is the NDVI value at the left trough. The Start of Season (SOS) was defined as the first time step when NDVI exceeded NDVI_min + 10% × A; the End of Season (EOS) as the last such time step; and the Peak of Season (POS) as the maximum NDVI between SOS and EOS. Cycles where more than 30% of 5-day grid points fell within a data gap were excluded from analysis. Thresholds were computed independently for each growing season to account for inter-annual amplitude variability. Meteorological predictors were selected using a composite feature score combining Pearson r and Spearman ρ (composite = max(abs_r, abs_rho) ≥ 0.40), and models were fitted using Leave-One-Out cross-validation."*
         """)
+
 
 
 if __name__ == "__main__":
