@@ -542,16 +542,27 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
 
         # ── Step 1: 5-day regular interpolation (gap-aware) ──
-        # Any gap > MAX_INTERP_GAP_DAYS in original data is preserved as NaN —
-        # interpolation is NOT allowed to bridge across missing seasons.
-        MAX_INTERP_GAP_DAYS = 60  # gaps larger than this stay NaN
+        # MAX_INTERP_GAP_DAYS is auto-detected from the data's native cadence.
+        # MODIS 16-day data has cloud gaps up to ~100 days in monsoon months —
+        # these are NOT missing seasons, just cloud-obscured observations that
+        # must be interpolated through. We set the threshold to:
+        #   max(native_cadence × 8, 60)  — allows up to 8 missed observations
+        # This handles:
+        #   • 5-day data  → threshold ≈ 60 days
+        #   • 16-day MODIS → threshold ≈ 128 days  (covers monsoon gaps)
+        #   • 8-day MODIS  → threshold ≈ 64 days
 
         ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
         ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
 
         # Detect gap positions in the original observations
         orig_dates = ndvi_raw.index.sort_values()
-        orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+        orig_diffs  = orig_dates.to_series().diff().dt.days.fillna(0)
+
+        # Auto-detect native cadence: median of all observation spacings
+        typical_cadence = float(orig_diffs[orig_diffs > 0].median())
+        MAX_INTERP_GAP_DAYS = max(60, int(typical_cadence * 8))
+
         gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]  # first date AFTER each gap
 
         full_range = pd.date_range(
@@ -721,11 +732,70 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         all_troughs = list(trough_indices)
         rows = []
 
-        # NOTE: Opening segment (data-start → first trough) is intentionally
-        # NOT extracted here. If data starts mid-greenness (before the trough),
-        # the threshold is crossed on the descending limb, giving a pre-trough SOS.
-        # The tail-segment handler below correctly extracts each trough → segment-end
-        # cycle, which covers the real post-trough rising season.
+        # ── Head segment: data-start → first trough ──────────────
+        # Handles cases where data begins partway into a growing season
+        # BEFORE the first dormancy trough (e.g. Bastar data starts Mar 2016,
+        # first real trough is May 2017 → the 2016 monsoon season would be missed).
+        # We extract this only if:
+        #   (a) data runs far enough before the first trough (≥ min_d days)
+        #   (b) the segment is gap-free
+        #   (c) SOS is found on the ascending limb (after the minimum)
+        #   (d) POS falls inside the selected growing window
+        if all_troughs:
+            ti_first = all_troughs[0]
+            head_len = ti_first  # index = steps from data start to first trough
+            if head_len >= max(10, min_d // 5) and not _cycle_has_gap(0, ti_first):
+                try:
+                    seg   = sm_for_troughs[0:ti_first + 1]
+                    seg_t = t_all[0:ti_first + 1]
+                    if not nan_mask[0:ti_first + 1].any():
+                        # Base = the minimum value in this segment (true dormancy)
+                        base_idx = int(np.argmin(seg))
+                        ndvi_min  = float(seg[base_idx])
+                        ndvi_max  = float(np.max(seg))
+                        A = ndvi_max - ndvi_min
+                        if A >= max(1e-6, MIN_AMPLITUDE):
+                            sos_threshold = ndvi_min + thr_pct     * A
+                            eos_threshold = ndvi_min + eos_thr_pct * A
+                            # POS = global max in segment
+                            pi = int(np.argmax(seg))
+                            pos = seg_t[pi]
+                            if _date_in_window(pos):
+                                # SOS: first crossing AFTER the minimum (ascending limb)
+                                asc = seg[base_idx + 1:pi + 1]
+                                sc  = np.where(asc >= sos_threshold)[0]
+                                # EOS: last crossing on descending limb (POS → end)
+                                desc = seg[pi:]
+                                ec   = np.where(desc >= eos_threshold)[0]
+                                if len(sc) and len(ec):
+                                    si = base_idx + 1 + int(sc[0])
+                                    ei = pi + int(ec[-1])
+                                    if ei > si:
+                                        sos = seg_t[si]; eos = seg_t[ei]
+                                        yr  = pos.year
+                                        season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                        rows.append({
+                                            "Year": yr,
+                                            "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                            "SOS_Target": (sos - season_start).days,
+                                            "SOS_Method": "valley_amplitude_threshold",
+                                            "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                            "POS_Target": (pos - season_start).days,
+                                            "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                            "EOS_Target": (eos - season_start).days,
+                                            "EOS_Method": "valley_amplitude_threshold",
+                                            "LOS_Days": (eos - sos).days,
+                                            "Season_Start": season_start,
+                                            "Peak_NDVI": float(seg[pi]),
+                                            "Amplitude": float(A),
+                                            "Base_NDVI": float(ndvi_min),
+                                            "Threshold_SOS": float(sos_threshold),
+                                            "Threshold_EOS": float(eos_threshold),
+                                            "Trough_Date": seg_t[base_idx],
+                                            "Season": season_type,
+                                        })
+                except Exception:
+                    pass
 
         # ── Window filter helper ──────────────────────────────
         # Returns True if a given date falls within the user-selected
@@ -1338,7 +1408,6 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
                label='NDVI (raw obs)', zorder=3)
 
     # ── Same gap-aware pipeline as extract_phenology ─────────
-    MAX_INTERP_GAP_DAYS = 60
     ndvi_idx = ndvi_raw.copy()
     ndvi_idx['Date'] = pd.to_datetime(ndvi_idx['Date'])
     ndvi_s = ndvi_idx.set_index('Date')['NDVI'].sort_index()
@@ -1346,6 +1415,9 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
 
     orig_dates = ndvi_s.index.sort_values()
     orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+    # Auto-detect native cadence (same logic as extract_phenology)
+    typical_cadence = float(orig_diffs[orig_diffs > 0].median())
+    MAX_INTERP_GAP_DAYS = max(60, int(typical_cadence * 8))
     gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]
 
     full_range = pd.date_range(start=ndvi_s.index.min(),
