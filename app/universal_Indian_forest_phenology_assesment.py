@@ -541,48 +541,126 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         thr_pct     = threshold_override     if threshold_override     is not None else cfg.get("threshold_pct", 0.10)
         eos_thr_pct = eos_threshold_override if eos_threshold_override is not None else thr_pct
 
-        # ── Step 1: 5-day regular interpolation ──────────────
+        # ── Step 1: 5-day regular interpolation (gap-aware) ──
+        # Any gap > MAX_INTERP_GAP_DAYS in original data is preserved as NaN —
+        # interpolation is NOT allowed to bridge across missing seasons.
+        MAX_INTERP_GAP_DAYS = 60  # gaps larger than this stay NaN
+
         ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
         ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
+
+        # Detect gap positions in the original observations
+        orig_dates = ndvi_raw.index.sort_values()
+        orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+        gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]  # first date AFTER each gap
 
         full_range = pd.date_range(
             start=ndvi_raw.index.min(),
             end=ndvi_raw.index.max(),
             freq="5D")
+
+        # Interpolate only within segments between gaps
         ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range))
-        ndvi_5d = ndvi_5d.interpolate(method="time")
+        ndvi_5d = ndvi_5d.interpolate(method="time", limit_area="inside")
+
+        # Re-NaN any 5-day grid points that fall inside a gap
+        for gap_start in gap_starts:
+            # Find the last real observation before this gap
+            before = orig_dates[orig_dates < gap_start]
+            if len(before) == 0:
+                continue
+            gap_end_real = gap_start  # first obs after gap
+            gap_start_real = before[-1]  # last obs before gap
+            # Mask all interpolated 5-day points strictly between the two real obs
+            mask = (ndvi_5d.index > gap_start_real) & (ndvi_5d.index < gap_end_real)
+            ndvi_5d.loc[mask] = np.nan
+
         ndvi_5d = ndvi_5d.reindex(full_range)
         ndvi_5d.columns = ["NDVI"]
 
-        # ── Step 2: Savitzky–Golay smoothing ─────────────────
+        # ── Step 2: Per-segment Savitzky–Golay smoothing ─────
+        # Run SG independently on each contiguous non-NaN segment so it
+        # never smooths across a data gap.
         n = len(ndvi_5d)
-        wl_target = max(7, int(n * 0.05))
-        wl = wl_target if wl_target % 2 == 1 else wl_target + 1
+        ndvi_vals = ndvi_5d["NDVI"].values.copy()
+
+        # Find contiguous valid segments
+        valid_mask = ~np.isnan(ndvi_vals)
+        sm_vals = np.full(n, np.nan)
+
+        # Label segments
+        seg_labels = np.zeros(n, dtype=int)
+        seg_id = 0
+        in_seg = False
+        for i in range(n):
+            if valid_mask[i]:
+                if not in_seg:
+                    seg_id += 1
+                    in_seg = True
+                seg_labels[i] = seg_id
+            else:
+                in_seg = False
+
+        for sid in range(1, seg_id + 1):
+            idx_seg = np.where(seg_labels == sid)[0]
+            seg_n = len(idx_seg)
+            if seg_n < 5:
+                # Too short to smooth — copy raw values
+                sm_vals[idx_seg] = ndvi_vals[idx_seg]
+                continue
+            # Adaptive SG window for this segment
+            wl_t = max(7, int(seg_n * 0.10))  # 10% of segment (finer than global 5%)
+            wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
+            wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
+            if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
+            poly_s = min(2, wl_s - 1)
+            if wl_s < 5 or wl_s >= seg_n:
+                sm_vals[idx_seg] = ndvi_vals[idx_seg]
+                continue
+            seg_data = ndvi_vals[idx_seg]
+            sm_vals[idx_seg] = savgol_filter(seg_data, wl_s, poly_s)
+
+        # Record the global window used (for plot legend) — use most common segment wl
+        wl = max(7, int(n * 0.05)); wl = wl if wl % 2 == 1 else wl + 1
         wl = min(wl, n - 1 if n > 1 else 1)
         if wl % 2 == 0: wl = max(7, wl - 1)
         poly = min(2, wl - 1)
         if wl < 5:
             return None, f"Too few interpolated NDVI points ({n}) — check date range"
 
-        sm_vals = savgol_filter(ndvi_5d["NDVI"].ffill().bfill(), wl, poly)
-        ndvi_5d["Sm"] = sm_vals
-        t_all = ndvi_5d.index  # full DatetimeIndex
+        ndvi_5d["NDVI"] = ndvi_vals  # keep NaN gaps in NDVI column
+        ndvi_5d["Sm"]   = sm_vals    # NaN in gaps, smoothed in segments
+        t_all = ndvi_5d.index
+
+        # For trough detection: fill NaN gaps with linear bridge temporarily
+        # (so trough finder sees a continuous signal, but gaps won't be extracted as seasons)
+        sm_for_troughs = pd.Series(sm_vals, index=t_all).interpolate(method="linear",
+                                   limit_direction="both").values
 
         # ── Step 3: Find all inter-season troughs ─────────────
-        # min_distance ~ 1 year / 2 on a 5-day grid  ≈  36 steps
         min_dist = max(10, int((365 / 5) * 0.4))   # ~29 steps ≈ ~145 days
-        trough_indices = _find_troughs(sm_vals, min_distance=min_dist)
+        trough_indices = _find_troughs(sm_for_troughs, min_distance=min_dist)
+
+        # Build a set of 5-day grid indices that fall inside a data gap
+        # (used below to skip any cycle whose core data is missing)
+        nan_mask = np.isnan(sm_vals)   # True where gap NaNs are
+
+        def _cycle_has_gap(i_start, i_end):
+            """Return True if more than 30% of the cycle falls inside a gap."""
+            if i_end <= i_start: return True
+            seg_slice = nan_mask[i_start:i_end+1]
+            return seg_slice.mean() > 0.30
 
         # Fallback: if fewer than 2 troughs found, use season window boundaries
         if len(trough_indices) < 2:
-            # Original simple method as fallback
             rows = []
             for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
                 try:
                     s = f"{yr}-{sm:02d}-01"
                     e = f"{yr+1}-{em:02d}-28" if sm > em else f"{yr}-{em:02d}-28"
-                    sub_vals = ndvi_5d.loc[s:e, "Sm"].values
-                    sub_t    = ndvi_5d.loc[s:e, "Sm"].index
+                    sub_sm = ndvi_5d.loc[s:e, "Sm"]
+                    sub_vals = sub_sm.dropna().values  # skip NaN gap points
+                    sub_t    = sub_sm.dropna().index
                     if len(sub_vals) < 10: continue
                     ndvi_min = np.min(sub_vals); ndvi_max = np.max(sub_vals)
                     A = ndvi_max - ndvi_min
@@ -610,74 +688,72 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             return pd.DataFrame(rows), None
 
         # ── Step 4: Extract one phenology cycle per trough pair ──
-        # For the FIRST cycle: if data starts before the first real trough,
-        # use the global minimum of that opening segment as the base anchor.
-        # For all subsequent cycles: base = value at the left trough.
-
-        all_troughs = list(trough_indices)   # real troughs only
-
+        all_troughs = list(trough_indices)
         rows = []
 
         # ── Handle the opening segment (data start → first trough) ──
-        # This captures the first growing cycle which may start before any trough is found
         if all_troughs and all_troughs[0] > max(10, min_d // 5):
             try:
                 ti0  = 0
                 ti1  = all_troughs[0]
-                seg  = sm_vals[ti0:ti1 + 1]
-                seg_t = t_all[ti0:ti1 + 1]
-                if len(seg) >= max(10, min_d // 5):
-                    # Base = minimum of the opening segment (best proxy for the pre-data trough)
-                    ndvi_min = float(np.min(seg))
-                    ndvi_max = float(np.max(seg))
-                    A = ndvi_max - ndvi_min
-                    if A >= 1e-6:
-                        sos_threshold = ndvi_min + thr_pct     * A
-                        eos_threshold = ndvi_min + eos_thr_pct * A
-                        sos_cands = np.where(seg >= sos_threshold)[0]
-                        eos_cands = np.where(seg >= eos_threshold)[0]
-                        if len(sos_cands) and len(eos_cands):
-                            si = int(sos_cands[0])
-                            ei = int(eos_cands[-1])
-                            if ei > si:
-                                pi = si + int(np.argmax(seg[si:ei + 1]))
-                                sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
-                                yr = pos.year
-                                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
-                                rows.append({
-                                    "Year": yr,
-                                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                    "SOS_Target": (sos - season_start).days,
-                                    "SOS_Method": "valley_amplitude_threshold",
-                                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                    "POS_Target": (pos - season_start).days,
-                                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                    "EOS_Target": (eos - season_start).days,
-                                    "EOS_Method": "valley_amplitude_threshold",
-                                    "LOS_Days": (eos - sos).days,
-                                    "Season_Start": season_start,
-                                    "Peak_NDVI": float(seg[pi]),
-                                    "Amplitude": float(A),
-                                    "Base_NDVI": float(ndvi_min),
-                                    "Threshold_SOS": float(sos_threshold),
-                                    "Threshold_EOS": float(eos_threshold),
-                                    "Trough_Date": seg_t[int(np.argmin(seg))],
-                                    "Season": season_type,
-                                })
+                # Skip if this opening segment spans a gap
+                if not _cycle_has_gap(ti0, ti1):
+                    seg   = sm_for_troughs[ti0:ti1 + 1]
+                    seg_t = t_all[ti0:ti1 + 1]
+                    if len(seg) >= max(10, min_d // 5):
+                        ndvi_min = float(np.min(seg))
+                        ndvi_max = float(np.max(seg))
+                        A = ndvi_max - ndvi_min
+                        if A >= 1e-6:
+                            sos_threshold = ndvi_min + thr_pct     * A
+                            eos_threshold = ndvi_min + eos_thr_pct * A
+                            sos_cands = np.where(seg >= sos_threshold)[0]
+                            eos_cands = np.where(seg >= eos_threshold)[0]
+                            if len(sos_cands) and len(eos_cands):
+                                si = int(sos_cands[0]); ei = int(eos_cands[-1])
+                                if ei > si:
+                                    pi = si + int(np.argmax(seg[si:ei + 1]))
+                                    sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                                    yr = pos.year
+                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                    rows.append({
+                                        "Year": yr,
+                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                        "SOS_Target": (sos - season_start).days,
+                                        "SOS_Method": "valley_amplitude_threshold",
+                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                        "POS_Target": (pos - season_start).days,
+                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                        "EOS_Target": (eos - season_start).days,
+                                        "EOS_Method": "valley_amplitude_threshold",
+                                        "LOS_Days": (eos - sos).days,
+                                        "Season_Start": season_start,
+                                        "Peak_NDVI": float(seg[pi]),
+                                        "Amplitude": float(A),
+                                        "Base_NDVI": float(ndvi_min),
+                                        "Threshold_SOS": float(sos_threshold),
+                                        "Threshold_EOS": float(eos_threshold),
+                                        "Trough_Date": seg_t[int(np.argmin(seg))],
+                                        "Season": season_type,
+                                    })
             except Exception:
                 pass
 
         # ── Main loop: trough-to-trough cycles ──
         for i in range(len(all_troughs) - 1):
             try:
-                ti  = all_troughs[i]       # index of left  trough (season start valley)
-                ti1 = all_troughs[i + 1]   # index of right trough (season end   valley)
+                ti  = all_troughs[i]
+                ti1 = all_troughs[i + 1]
 
                 if ti1 - ti < max(10, min_d // 5):
-                    continue               # too short a cycle
+                    continue
 
-                cycle_vals = sm_vals[ti:ti1 + 1]   # NDVI values in this cycle
-                cycle_t    = t_all[ti:ti1 + 1]      # corresponding dates
+                # ── Skip cycle if it spans a data gap ──
+                if _cycle_has_gap(ti, ti1):
+                    continue
+
+                cycle_vals = sm_for_troughs[ti:ti1 + 1]  # gap-bridged for threshold math
+                cycle_t    = t_all[ti:ti1 + 1]
 
                 # ── Base value = NDVI at the LEFT trough (previous cycle valley) ──
                 ndvi_min = float(sm_vals[ti])        # valley before this season
@@ -752,44 +828,45 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         if all_troughs and all_troughs[-1] < n - max(10, min_d // 5):
             try:
                 ti0  = all_troughs[-1]
-                seg  = sm_vals[ti0:]
-                seg_t = t_all[ti0:]
-                if len(seg) >= max(10, min_d // 5):
-                    ndvi_min = float(sm_vals[ti0])   # base = last real trough
-                    ndvi_max = float(np.max(seg))
-                    A = ndvi_max - ndvi_min
-                    if A >= 1e-6:
-                        sos_threshold = ndvi_min + thr_pct     * A
-                        eos_threshold = ndvi_min + eos_thr_pct * A
-                        sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
-                        eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
-                        if len(sos_cands) and len(eos_cands):
-                            si = int(sos_cands[0]); ei = int(eos_cands[-1])
-                            if ei > si:
-                                pi = si + int(np.argmax(seg[si:ei + 1]))
-                                sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
-                                yr = pos.year
-                                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
-                                rows.append({
-                                    "Year": yr,
-                                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                    "SOS_Target": (sos - season_start).days,
-                                    "SOS_Method": "valley_amplitude_threshold",
-                                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                    "POS_Target": (pos - season_start).days,
-                                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                    "EOS_Target": (eos - season_start).days,
-                                    "EOS_Method": "valley_amplitude_threshold",
-                                    "LOS_Days": (eos - sos).days,
-                                    "Season_Start": season_start,
-                                    "Peak_NDVI": float(seg[pi]),
-                                    "Amplitude": float(A),
-                                    "Base_NDVI": float(ndvi_min),
-                                    "Threshold_SOS": float(sos_threshold),
-                                    "Threshold_EOS": float(eos_threshold),
-                                    "Trough_Date": t_all[ti0],
-                                    "Season": season_type,
-                                })
+                if not _cycle_has_gap(ti0, n - 1):
+                    seg   = sm_for_troughs[ti0:]
+                    seg_t = t_all[ti0:]
+                    if len(seg) >= max(10, min_d // 5):
+                        ndvi_min = float(sm_for_troughs[ti0])
+                        ndvi_max = float(np.max(seg))
+                        A = ndvi_max - ndvi_min
+                        if A >= 1e-6:
+                            sos_threshold = ndvi_min + thr_pct     * A
+                            eos_threshold = ndvi_min + eos_thr_pct * A
+                            sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
+                            eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
+                            if len(sos_cands) and len(eos_cands):
+                                si = int(sos_cands[0]); ei = int(eos_cands[-1])
+                                if ei > si:
+                                    pi = si + int(np.argmax(seg[si:ei + 1]))
+                                    sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                                    yr = pos.year
+                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                    rows.append({
+                                        "Year": yr,
+                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                        "SOS_Target": (sos - season_start).days,
+                                        "SOS_Method": "valley_amplitude_threshold",
+                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                        "POS_Target": (pos - season_start).days,
+                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                        "EOS_Target": (eos - season_start).days,
+                                        "EOS_Method": "valley_amplitude_threshold",
+                                        "LOS_Days": (eos - sos).days,
+                                        "Season_Start": season_start,
+                                        "Peak_NDVI": float(seg[pi]),
+                                        "Amplitude": float(A),
+                                        "Base_NDVI": float(ndvi_min),
+                                        "Threshold_SOS": float(sos_threshold),
+                                        "Threshold_EOS": float(eos_threshold),
+                                        "Trough_Date": t_all[ti0],
+                                        "Season": season_type,
+                                    })
             except Exception:
                 pass
 
@@ -1224,32 +1301,89 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
     ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
                label='NDVI (raw obs)', zorder=3)
 
-    # ── Smoothed line: EXACTLY the same pipeline as extract_phenology ──
-    # Step 1: same 5-day grid via reindex+interpolate (not resample)
-    ndvi_raw_s = ndvi_raw.copy()
-    ndvi_raw_s['Date'] = pd.to_datetime(ndvi_raw_s['Date'])
-    ndvi_idx = ndvi_raw_s.set_index('Date')['NDVI'].sort_index()
-    ndvi_idx = ndvi_idx[~ndvi_idx.index.duplicated(keep='first')]
-    full_range = pd.date_range(start=ndvi_idx.index.min(),
-                               end=ndvi_idx.index.max(), freq='5D')
-    ndvi_5d = ndvi_idx.reindex(ndvi_idx.index.union(full_range))
-    ndvi_5d = ndvi_5d.interpolate(method='time')
+    # ── Same gap-aware pipeline as extract_phenology ─────────
+    MAX_INTERP_GAP_DAYS = 60
+    ndvi_idx = ndvi_raw.copy()
+    ndvi_idx['Date'] = pd.to_datetime(ndvi_idx['Date'])
+    ndvi_s = ndvi_idx.set_index('Date')['NDVI'].sort_index()
+    ndvi_s = ndvi_s[~ndvi_s.index.duplicated(keep='first')]
+
+    orig_dates = ndvi_s.index.sort_values()
+    orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+    gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]
+
+    full_range = pd.date_range(start=ndvi_s.index.min(),
+                               end=ndvi_s.index.max(), freq='5D')
+    ndvi_5d = ndvi_s.reindex(ndvi_s.index.union(full_range))
+    ndvi_5d = ndvi_5d.interpolate(method='time', limit_area='inside')
+    for gap_start in gap_starts:
+        before = orig_dates[orig_dates < gap_start]
+        if len(before) == 0: continue
+        mask = (ndvi_5d.index > before[-1]) & (ndvi_5d.index < gap_start)
+        ndvi_5d.loc[mask] = np.nan
     ndvi_5d = ndvi_5d.reindex(full_range)
 
-    # Step 2: same adaptive SG window
+    # Per-segment SG smoothing
     n = len(ndvi_5d)
-    wl_target = max(7, int(n * 0.05))
-    wl = wl_target if wl_target % 2 == 1 else wl_target + 1
-    wl = min(wl, n - 1 if n > 1 else 1)
-    if wl % 2 == 0: wl = max(7, wl - 1)
-    poly = min(2, wl - 1)
-    if wl >= 5:
-        sm_arr = savgol_filter(ndvi_5d.ffill().bfill().values, wl, poly)
-        ax.plot(ndvi_5d.index, sm_arr, color='#1B5E20', lw=2.2,
-                label=f'Smoothed (SG w={wl})', zorder=5)
+    ndvi_vals = ndvi_5d.values.copy()
+    valid_mask = ~np.isnan(ndvi_vals)
+    sm_arr = np.full(n, np.nan)
+    seg_labels = np.zeros(n, dtype=int); seg_id = 0; in_seg = False
+    for i in range(n):
+        if valid_mask[i]:
+            if not in_seg: seg_id += 1; in_seg = True
+            seg_labels[i] = seg_id
+        else:
+            in_seg = False
 
-    # ── SOS / POS / EOS vertical lines only (no purple dots, no bands) ──
-    ev_colors  = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    wl_global = max(7, int(n * 0.05))
+    wl_global = wl_global if wl_global % 2 == 1 else wl_global + 1
+    wl_global = min(wl_global, n - 1 if n > 1 else 1)
+    if wl_global % 2 == 0: wl_global = max(7, wl_global - 1)
+
+    for sid in range(1, seg_id + 1):
+        idx_seg = np.where(seg_labels == sid)[0]
+        seg_n = len(idx_seg)
+        if seg_n < 5:
+            sm_arr[idx_seg] = ndvi_vals[idx_seg]; continue
+        wl_t = max(7, int(seg_n * 0.10))
+        wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
+        wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
+        if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
+        poly_s = min(2, wl_s - 1)
+        if wl_s >= 5 and wl_s < seg_n:
+            sm_arr[idx_seg] = savgol_filter(ndvi_vals[idx_seg], wl_s, poly_s)
+        else:
+            sm_arr[idx_seg] = ndvi_vals[idx_seg]
+
+    # Plot smoothed line — insert NaN at gap boundaries so line breaks visually
+    sm_plot = sm_arr.copy()
+    # Mark one point before and after each gap as NaN to break the plotted line
+    for i in range(1, n):
+        if np.isnan(sm_arr[i]) and not np.isnan(sm_arr[i-1]):
+            sm_plot[i-1] = np.nan   # break line going into gap
+        if np.isnan(sm_arr[i-1]) and not np.isnan(sm_arr[i]):
+            sm_plot[i] = np.nan     # break line coming out of gap
+
+    ax.plot(ndvi_5d.index, sm_plot, color='#1B5E20', lw=2.2,
+            label=f'Smoothed (SG w={wl_global})', zorder=5)
+
+    # Shade gap regions with a light grey band so user can see them clearly
+    in_gap = False
+    gap_s = None
+    for i in range(n):
+        currently_nan = np.isnan(sm_arr[i])
+        if currently_nan and not in_gap:
+            gap_s = ndvi_5d.index[i]; in_gap = True
+        elif not currently_nan and in_gap:
+            ax.axvspan(gap_s, ndvi_5d.index[i], color='#BDBDBD', alpha=0.30,
+                       label='_gap' if i > 0 else 'Data gap')
+            in_gap = False
+    if in_gap:
+        ax.axvspan(gap_s, ndvi_5d.index[-1], color='#BDBDBD', alpha=0.30)
+
+    # ── SOS / POS / EOS vertical lines ────────────────────────
+    ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
     ev_labels_map = {
         'SOS': 'SOS — Green-up start',
         'POS': 'POS — Peak greenness',
@@ -1266,7 +1400,8 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
 
     handles = [
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
-        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl if wl>=5 else "n/a"})'),
+        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl_global})'),
+        plt.Rectangle((0,0),1,1, fc='#BDBDBD', alpha=0.40, label='Data gap (not interpolated)'),
         Line2D([0],[0], color='#43A047', lw=1.5, ls='--', label='SOS — Green-up start'),
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
@@ -1276,7 +1411,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b\n%Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
-    ax.legend(handles=handles, ncol=5, fontsize=8.5, loc='upper left', framealpha=0.88)
+    ax.legend(handles=handles, ncol=3, fontsize=8.5, loc='upper left', framealpha=0.88)
     ax.grid(True, alpha=0.22, ls='--'); ax.set_facecolor('#FAFFF8')
     fig.tight_layout()
     return fig
