@@ -639,17 +639,32 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
 
         # ── Step 3: Find all inter-season troughs ─────────────
         min_dist = max(10, int((365 / 5) * 0.4))   # ~29 steps ≈ ~145 days
-        trough_indices = _find_troughs(sm_for_troughs, min_distance=min_dist)
+        trough_indices_raw = _find_troughs(sm_for_troughs, min_distance=min_dist)
 
-        # Build a set of 5-day grid indices that fall inside a data gap
-        # (used below to skip any cycle whose core data is missing)
+        # Build NaN mask (True where gap regions are)
         nan_mask = np.isnan(sm_vals)   # True where gap NaNs are
 
+        # ── KEY FIX: discard any trough that sits inside a gap region ──
+        # The linear bridge in sm_for_troughs can create fake valleys
+        # at the gap boundaries — these must not anchor real seasons.
+        # A trough is "in a gap" if any of the 5 points around it are NaN.
+        trough_indices = []
+        for ti in trough_indices_raw:
+            window = slice(max(0, ti - 5), min(n, ti + 6))
+            if nan_mask[window].any():
+                continue   # trough is at or adjacent to a gap — discard
+            trough_indices = trough_indices  # keep accumulating below
+            trough_indices.append(ti)
+
         def _cycle_has_gap(i_start, i_end):
-            """Return True if more than 30% of the cycle falls inside a gap."""
+            """Return True if more than 20% of the cycle falls inside a gap."""
             if i_end <= i_start: return True
             seg_slice = nan_mask[i_start:i_end+1]
-            return seg_slice.mean() > 0.30
+            return seg_slice.mean() > 0.20
+
+        # Also discard cycles where amplitude is suspiciously small
+        # (can happen on plateau trough artifacts, e.g. A < 0.05)
+        MIN_AMPLITUDE = 0.05
 
         # Fallback: if fewer than 2 troughs found, use season window boundaries
         if len(trough_indices) < 2:
@@ -739,6 +754,17 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             except Exception:
                 pass
 
+        # ── Window filter helper ──────────────────────────────
+        # Returns True if a given date falls within the user-selected
+        # season window (handles cross-year windows like Jun–May).
+        def _date_in_window(d):
+            """True if pd.Timestamp d is inside the [sm, em] growing window."""
+            m = d.month
+            if sm <= em:          # same-year window e.g. Mar–Nov
+                return sm <= m <= em
+            else:                 # cross-year window e.g. Jun–May
+                return m >= sm or m <= em
+
         # ── Main loop: trough-to-trough cycles ──
         for i in range(len(all_troughs) - 1):
             try:
@@ -755,15 +781,16 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 cycle_vals = sm_for_troughs[ti:ti1 + 1]  # gap-bridged for threshold math
                 cycle_t    = t_all[ti:ti1 + 1]
 
-                # ── Base value = NDVI at the LEFT trough (previous cycle valley) ──
-                ndvi_min = float(sm_vals[ti])        # valley before this season
+                # ── Base value = NDVI at the LEFT trough ──
+                # Use real smoothed value; fall back to bridged value if at segment edge
+                ndvi_min = float(sm_vals[ti]) if not np.isnan(sm_vals[ti]) else float(sm_for_troughs[ti])
 
                 # ── Peak = maximum within the cycle ──
                 ndvi_max = float(np.max(cycle_vals))
                 A = ndvi_max - ndvi_min
 
-                if A < 1e-6:
-                    continue
+                if A < max(1e-6, MIN_AMPLITUDE):
+                    continue   # skip plateau / noise cycles (e.g. A < 0.05)
 
                 # ── Per-cycle amplitude thresholds ──
                 sos_threshold = ndvi_min + thr_pct     * A
@@ -793,6 +820,10 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 sos = cycle_t[sos_idx_local]
                 pos = cycle_t[pos_idx_local]
                 eos = cycle_t[eos_idx_local]
+
+                # ── Window filter: skip if POS falls outside user-selected growing window ──
+                if not _date_in_window(pos):
+                    continue
 
                 # Assign year = calendar year of POS (most meaningful label)
                 yr = pos.year
@@ -824,51 +855,71 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             except Exception:
                 continue
 
-        # ── Handle the closing segment (last trough → data end) ──
-        if all_troughs and all_troughs[-1] < n - max(10, min_d // 5):
+        # ── Handle tail segments: last trough in each data segment → segment end ──
+        # This captures growing seasons at the END of each data block, e.g. the
+        # 2003 season (Apr 2003 trough → Apr 2004 end of data before gap).
+        # We iterate over each data segment and check if there is a trough inside it
+        # whose tail (trough → segment end) has not yet been covered by a trough-pair cycle.
+        covered_trough_starts = set(all_troughs[i] for i in range(len(all_troughs)-1)
+                                    if not _cycle_has_gap(all_troughs[i], all_troughs[i+1]))
+
+        for sid in range(1, seg_id + 1):
+            seg_idx = np.where(seg_labels == sid)[0]
+            if len(seg_idx) == 0: continue
+            seg_end_i = int(seg_idx[-1])
+            # Find the last valid trough that falls inside this segment
+            troughs_in_seg = [ti for ti in all_troughs
+                              if seg_idx[0] <= ti <= seg_end_i
+                              and ti not in covered_trough_starts]
+            if not troughs_in_seg: continue
+            ti0 = troughs_in_seg[-1]  # last trough in this segment
+            tail_len = seg_end_i - ti0
+            if tail_len < max(10, min_d // 5): continue  # tail too short
             try:
-                ti0  = all_troughs[-1]
-                if not _cycle_has_gap(ti0, n - 1):
-                    seg   = sm_for_troughs[ti0:]
-                    seg_t = t_all[ti0:]
-                    if len(seg) >= max(10, min_d // 5):
-                        ndvi_min = float(sm_for_troughs[ti0])
-                        ndvi_max = float(np.max(seg))
-                        A = ndvi_max - ndvi_min
-                        if A >= 1e-6:
-                            sos_threshold = ndvi_min + thr_pct     * A
-                            eos_threshold = ndvi_min + eos_thr_pct * A
-                            sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
-                            eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
-                            if len(sos_cands) and len(eos_cands):
-                                si = int(sos_cands[0]); ei = int(eos_cands[-1])
-                                if ei > si:
-                                    pi = si + int(np.argmax(seg[si:ei + 1]))
-                                    sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
-                                    yr = pos.year
-                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
-                                    rows.append({
-                                        "Year": yr,
-                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                        "SOS_Target": (sos - season_start).days,
-                                        "SOS_Method": "valley_amplitude_threshold",
-                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                        "POS_Target": (pos - season_start).days,
-                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                        "EOS_Target": (eos - season_start).days,
-                                        "EOS_Method": "valley_amplitude_threshold",
-                                        "LOS_Days": (eos - sos).days,
-                                        "Season_Start": season_start,
-                                        "Peak_NDVI": float(seg[pi]),
-                                        "Amplitude": float(A),
-                                        "Base_NDVI": float(ndvi_min),
-                                        "Threshold_SOS": float(sos_threshold),
-                                        "Threshold_EOS": float(eos_threshold),
-                                        "Trough_Date": t_all[ti0],
-                                        "Season": season_type,
-                                    })
+                seg   = sm_for_troughs[ti0:seg_end_i + 1]
+                seg_t = t_all[ti0:seg_end_i + 1]
+                # Only proceed if this tail is fully within the segment (no gap inside)
+                if nan_mask[ti0:seg_end_i + 1].any(): continue
+                ndvi_min = float(sm_vals[ti0]) if not np.isnan(sm_vals[ti0]) else float(sm_for_troughs[ti0])
+                ndvi_max = float(np.max(seg))
+                A = ndvi_max - ndvi_min
+                if A < max(1e-6, MIN_AMPLITUDE): continue
+                sos_threshold = ndvi_min + thr_pct     * A
+                eos_threshold = ndvi_min + eos_thr_pct * A
+                sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
+                eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
+                if not len(sos_cands) or not len(eos_cands): continue
+                si = int(sos_cands[0]); ei = int(eos_cands[-1])
+                if ei <= si: continue
+                pi = si + int(np.argmax(seg[si:ei + 1]))
+                sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                # Window filter: skip if POS outside growing window
+                if not _date_in_window(pos): continue
+                yr = pos.year
+                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                rows.append({
+                    "Year": yr,
+                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                    "SOS_Target": (sos - season_start).days,
+                    "SOS_Method": "valley_amplitude_threshold",
+                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                    "POS_Target": (pos - season_start).days,
+                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                    "EOS_Target": (eos - season_start).days,
+                    "EOS_Method": "valley_amplitude_threshold",
+                    "LOS_Days": (eos - sos).days,
+                    "Season_Start": season_start,
+                    "Peak_NDVI": float(seg[pi]),
+                    "Amplitude": float(A),
+                    "Base_NDVI": float(ndvi_min),
+                    "Threshold_SOS": float(sos_threshold),
+                    "Threshold_EOS": float(eos_threshold),
+                    "Trough_Date": t_all[ti0],
+                    "Season": season_type,
+                })
             except Exception:
                 pass
+
 
         if not rows:
             return None, (
@@ -1295,7 +1346,7 @@ class UniversalPredictor:
 
 
 # ─── PLOTS ───────────────────────────────────────────────────
-def plot_ndvi_phenology(ndvi_raw, pheno_df):
+def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
     fig, ax = plt.subplots(figsize=(14, 4.8))
     dates = pd.to_datetime(ndvi_raw['Date'])
     ax.scatter(dates, ndvi_raw['NDVI'], color='#A5D6A7', s=18, alpha=0.55,
@@ -1382,7 +1433,33 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
     if in_gap:
         ax.axvspan(gap_s, ndvi_5d.index[-1], color='#BDBDBD', alpha=0.30)
 
-    # ── Per-season threshold lines drawn directly on plot ─────
+    # ── Growing season window bands (from sidebar season start/end) ──
+    # Shades each year's selected growing window in light green so user
+    # can visually verify the window aligns with actual green-up.
+    if season_window is not None:
+        win_sm, win_em = season_window  # start month, end month (integers)
+        year_min = ndvi_5d.index.year.min()
+        year_max = ndvi_5d.index.year.max() + 1
+        win_plotted = False
+        for yr in range(year_min, year_max + 1):
+            try:
+                ws = pd.Timestamp(f"{yr}-{win_sm:02d}-01")
+                if win_sm > win_em:
+                    # window crosses year boundary e.g. Jun–May
+                    we = pd.Timestamp(f"{yr+1}-{win_em:02d}-28")
+                else:
+                    we = pd.Timestamp(f"{yr}-{win_em:02d}-28")
+                # Only draw if overlaps with data range
+                data_start = ndvi_5d.index[0]; data_end = ndvi_5d.index[-1]
+                if we < data_start or ws > data_end: continue
+                lbl = 'Selected growing window' if not win_plotted else ''
+                ax.axvspan(max(ws, data_start), min(we, data_end),
+                           color='#A5D6A7', alpha=0.13, zorder=0, label=lbl)
+                win_plotted = True
+            except Exception:
+                continue
+
+
     # Uses Base_NDVI, Threshold_SOS, Threshold_EOS, Trough_Date, EOS_Date from pheno_df
     thr_sos_plotted = False
     thr_eos_plotted = False
@@ -1450,6 +1527,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
         Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl_global})'),
         plt.Rectangle((0,0),1,1, fc='#BDBDBD', alpha=0.40, label='Data gap (not interpolated)'),
+        plt.Rectangle((0,0),1,1, fc='#A5D6A7', alpha=0.35, label='Selected growing window'),
         Line2D([0],[0], color='#F57F17', lw=1.1, ls=':', label='Base NDVI (dormancy valley)'),
         Line2D([0],[0], color='#66BB6A', lw=1.2, ls='--', label='SOS threshold (base + thr% × A)'),
         Line2D([0],[0], color='#FFA726', lw=1.2, ls='--', label='EOS threshold (base + thr% × A)'),
@@ -1458,7 +1536,13 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df):
         Line2D([0],[0], color='#1565C0', lw=1.5, ls='--', label='POS — Peak greenness'),
         Line2D([0],[0], color='#E65100', lw=1.5, ls='--', label='EOS — Senescence end'),
     ]
-    ax.set_title('NDVI Time Series + Smoothed Signal + Phenology Events\n'
+    month_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                   7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+    win_label = ''
+    if season_window:
+        ws, we = season_window
+        win_label = f'  |  Growing window: {month_names.get(ws,"?")} → {month_names.get(we,"?")}'
+    ax.set_title(f'NDVI Time Series + Smoothed Signal + Phenology Events{win_label}\n'
                  'with per-season amplitude threshold definition',
                  fontsize=11, fontweight='bold', color='#1B5E20')
     ax.set_xlabel('Date'); ax.set_ylabel('NDVI')
@@ -1931,28 +2015,41 @@ def main():
     # NOTE: full fingerprint is built AFTER sidebar widgets are rendered (see below)
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## 📅 Season Window Configuration")
+    st.sidebar.markdown("## 📅 Season Window")
+    st.sidebar.caption(
+        "Sets which months define your growing season. "
+        "Only seasons whose **peak greenness (POS) falls inside this window** are extracted. "
+        "The green bands on the NDVI plot show the selected window each year — "
+        "adjust until the bands align with your observed green-up peaks."
+    )
 
     # Simple season window — user sets start/end month manually
     sm_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                 7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
     month_options = list(sm_names.keys())
-    month_labels  = [sm_names[m] for m in month_options]
 
     col_sm, col_em = st.sidebar.columns(2)
     start_month_sel = col_sm.selectbox(
         "Season start", options=month_options,
         index=5,  # default June
         format_func=lambda m: sm_names[m],
-        help="Month when the growing season begins")
+        help="First month of the growing season window")
     end_month_sel = col_em.selectbox(
         "Season end", options=month_options,
         index=4,  # default May
         format_func=lambda m: sm_names[m],
-        help="Month when the growing season ends")
+        help="Last month of the growing season window")
+
+    # Show the active window description
+    if start_month_sel != end_month_sel:
+        if start_month_sel > end_month_sel:
+            st.sidebar.info(f"🌿 Cross-year window: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}** (e.g. monsoon/tropical seasons)")
+        else:
+            st.sidebar.info(f"🌿 Within-year window: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}**")
+
     min_days_sel = st.sidebar.slider(
-        "Minimum days in season window", 60, 300, 150, 10,
-        help="Seasons with fewer interpolated days are skipped")
+        "Min. season length (days)", 60, 300, 150, 10,
+        help="Cycles shorter than this are skipped — avoids spurious short detections")
 
     # Build a minimal cfg dict so downstream code keeps working
     season_type = f"Custom ({sm_names[start_month_sel]}–{sm_names[end_month_sel]})"
@@ -2129,7 +2226,8 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
         st.success(f"✅ **{n_seasons} growing seasons** extracted")
 
         c_left, c_right = st.columns([2,1])
-        with c_left: st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df))
+        with c_left: st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df,
+                                season_window=(start_month_sel, end_month_sel)))
         with c_right:
             st.markdown("**Extracted dates:**")
             # Build a clean display table with actual calendar dates
