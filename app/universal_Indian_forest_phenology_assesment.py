@@ -932,11 +932,21 @@ def get_all_correlations(X, y):
         idx=vals.index.intersection(y.dropna().index)
         if len(idx)<3: continue
         try:
-            r,p_val=pearsonr(vals[idx].astype(float), y[idx].astype(float))
-            rows.append({'Feature':col,'Pearson_r':round(r,3),'|r|':round(abs(r),3),
-                         'p_value':round(p_val,3),'Usable':'✅' if abs(r)>=MIN_CORR_THRESHOLD else '❌'})
+            r,   p_val  = pearsonr( vals[idx].astype(float), y[idx].astype(float))
+            rho, p_sp   = spearmanr(vals[idx].astype(float), y[idx].astype(float))
+            composite   = max(abs(r), abs(float(rho)))
+            rows.append({
+                'Feature':    col,
+                'Pearson_r':  round(r,   3),
+                '|r|':        round(abs(r), 3),
+                'Spearman_rho': round(float(rho), 3),
+                '|rho|':      round(abs(float(rho)), 3),
+                'Composite':  round(composite, 3),
+                'p_value':    round(p_val, 3),
+                'Usable':     '✅' if composite >= MIN_CORR_THRESHOLD else '❌'
+            })
         except Exception: continue
-    return pd.DataFrame(rows).sort_values('|r|', ascending=False)
+    return pd.DataFrame(rows).sort_values('Composite', ascending=False)
 
 
 # ─── LOO RIDGE ───────────────────────────────────────────────
@@ -1177,9 +1187,7 @@ class UniversalPredictor:
     def corr_table_for_display(self, event):
         """
         Returns a clean DataFrame for the Training tab feature table.
-        Columns: Feature | Pearson r | |r| | Role
-        Role values: IN MODEL / Excluded (spurious) / Not selected
-        p-values are intentionally omitted — shown only in the Correlations heatmap.
+        Columns: Feature | Pearson r | Spearman ρ | Composite | Role
         """
         if event not in self._fits: return pd.DataFrame()
         fit = self._fits[event]
@@ -1198,12 +1206,13 @@ class UniversalPredictor:
             elif usable:
                 role = '➖  Correlated but not selected (collinear or did not improve LOO R²)'
             else:
-                role = '⬜  Below |r| threshold'
+                role = '⬜  Below threshold'
             rows.append({
-                'Feature':   feat,
-                'Pearson r': row['Pearson_r'],
-                '|r|':       row['|r|'],
-                'Role':      role,
+                'Feature':      feat,
+                'Pearson r':    row['Pearson_r'],
+                'Spearman ρ':   row.get('Spearman_rho', float('nan')),
+                'Composite':    row.get('Composite', row['|r|']),
+                'Role':         role,
             })
         return pd.DataFrame(rows)
 
@@ -2042,9 +2051,9 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
                 ct_display = predictor.corr_table_for_display(ev)
                 if not ct_display.empty:
                     st.markdown(
-                        f"**Meteorological features ranked by |Pearson r| with {ev} timing**  "
-                        f"· Only |r| ≥ {MIN_CORR_THRESHOLD} features enter the model  "
-                        f"· p-values and significance stars: see the **Correlations** tab")
+                        f"**Features ranked by Composite score (max of |Pearson r|, |Spearman ρ|) with {ev} timing**  "
+                        f"· Composite ≥ {MIN_CORR_THRESHOLD} required to enter model  "
+                        f"· p-values: see the **Correlations** tab")
 
                     def _style_role(val):
                         if val.startswith('✅'):  return 'background-color:#C8E6C9;color:#1B5E20;font-weight:600'
@@ -2052,11 +2061,15 @@ T2M, T2M_MIN, T2M_MAX, PRECTOTCORR, RH2M, GWETTOP, GWETROOT, ALLSKY_SFC_SW_DWN
                         if val.startswith('➖'):  return 'color:#555'
                         return 'color:#999'
 
-                    styled = (ct_display.style
-                              .background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
-                              .background_gradient(subset=['|r|'], cmap='Greens', vmin=0, vmax=1)
+                    fmt = {'Pearson r': '{:+.3f}', 'Spearman ρ': '{:+.3f}', 'Composite': '{:.3f}'}
+                    grad_cols = [c for c in ['Pearson r','Spearman ρ','Composite'] if c in ct_display.columns]
+                    styled = ct_display.style
+                    if 'Pearson r'  in ct_display.columns: styled = styled.background_gradient(subset=['Pearson r'],  cmap='RdYlGn', vmin=-1, vmax=1)
+                    if 'Spearman ρ' in ct_display.columns: styled = styled.background_gradient(subset=['Spearman ρ'], cmap='RdYlGn', vmin=-1, vmax=1)
+                    if 'Composite'  in ct_display.columns: styled = styled.background_gradient(subset=['Composite'],  cmap='Greens', vmin=0,  vmax=1)
+                    styled = (styled
                               .applymap(_style_role, subset=['Role'])
-                              .format({'Pearson r': '{:+.3f}', '|r|': '{:.3f}'})
+                              .format(fmt)
                               .set_properties(**{'font-size': '0.84rem'}))
                     st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -2169,18 +2182,31 @@ The scatter plots on the right show the best single predictor vs observed event 
                     st.markdown(f"**{icons_ev[ev]} {ev}**")
                     ct = predictor.corr_tables.get(ev)
                     if ct is not None and len(ct):
-                        # Build display version: r, |r|, significance (no raw p number)
                         def _sig(p):
                             if p < 0.05:  return '**'
                             if p < 0.10:  return '*'
                             return ''
-                        disp = ct[['Feature','Pearson_r','|r|']].copy()
+                        disp = ct[['Feature','Pearson_r','Spearman_rho','Composite']].copy() \
+                               if 'Spearman_rho' in ct.columns \
+                               else ct[['Feature','Pearson_r','|r|']].copy()
                         disp['Sig'] = ct['p_value'].apply(_sig)
-                        disp = disp.rename(columns={'Pearson_r': 'Pearson r'})
-                        styled_ct = (disp.style
-                                     .background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
-                                     .background_gradient(subset=['|r|'], cmap='Greens', vmin=0, vmax=1)
-                                     .format({'Pearson r': '{:+.3f}', '|r|': '{:.3f}'})
+                        disp = disp.rename(columns={
+                            'Pearson_r':    'Pearson r',
+                            'Spearman_rho': 'Spearman ρ',
+                        })
+                        fmt_d = {'Pearson r': '{:+.3f}'}
+                        if 'Spearman ρ' in disp.columns: fmt_d['Spearman ρ'] = '{:+.3f}'
+                        if 'Composite'  in disp.columns: fmt_d['Composite']  = '{:.3f}'
+                        if '|r|'        in disp.columns: fmt_d['|r|']        = '{:.3f}'
+                        styled_ct = disp.style.background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
+                        if 'Spearman ρ' in disp.columns:
+                            styled_ct = styled_ct.background_gradient(subset=['Spearman ρ'], cmap='RdYlGn', vmin=-1, vmax=1)
+                        if 'Composite' in disp.columns:
+                            styled_ct = styled_ct.background_gradient(subset=['Composite'], cmap='Greens', vmin=0, vmax=1)
+                        elif '|r|' in disp.columns:
+                            styled_ct = styled_ct.background_gradient(subset=['|r|'], cmap='Greens', vmin=0, vmax=1)
+                        styled_ct = (styled_ct
+                                     .format(fmt_d)
                                      .set_properties(**{'font-size': '0.82rem'}))
                         st.dataframe(styled_ct, use_container_width=True,
                                      hide_index=True, height=320)
