@@ -706,53 +706,11 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         all_troughs = list(trough_indices)
         rows = []
 
-        # ── Handle the opening segment (data start → first trough) ──
-        if all_troughs and all_troughs[0] > max(10, min_d // 5):
-            try:
-                ti0  = 0
-                ti1  = all_troughs[0]
-                # Skip if this opening segment spans a gap
-                if not _cycle_has_gap(ti0, ti1):
-                    seg   = sm_for_troughs[ti0:ti1 + 1]
-                    seg_t = t_all[ti0:ti1 + 1]
-                    if len(seg) >= max(10, min_d // 5):
-                        ndvi_min = float(np.min(seg))
-                        ndvi_max = float(np.max(seg))
-                        A = ndvi_max - ndvi_min
-                        if A >= 1e-6:
-                            sos_threshold = ndvi_min + thr_pct     * A
-                            eos_threshold = ndvi_min + eos_thr_pct * A
-                            sos_cands = np.where(seg >= sos_threshold)[0]
-                            eos_cands = np.where(seg >= eos_threshold)[0]
-                            if len(sos_cands) and len(eos_cands):
-                                si = int(sos_cands[0]); ei = int(eos_cands[-1])
-                                if ei > si:
-                                    pi = si + int(np.argmax(seg[si:ei + 1]))
-                                    sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
-                                    yr = pos.year
-                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
-                                    rows.append({
-                                        "Year": yr,
-                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                        "SOS_Target": (sos - season_start).days,
-                                        "SOS_Method": "valley_amplitude_threshold",
-                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                        "POS_Target": (pos - season_start).days,
-                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                        "EOS_Target": (eos - season_start).days,
-                                        "EOS_Method": "valley_amplitude_threshold",
-                                        "LOS_Days": (eos - sos).days,
-                                        "Season_Start": season_start,
-                                        "Peak_NDVI": float(seg[pi]),
-                                        "Amplitude": float(A),
-                                        "Base_NDVI": float(ndvi_min),
-                                        "Threshold_SOS": float(sos_threshold),
-                                        "Threshold_EOS": float(eos_threshold),
-                                        "Trough_Date": seg_t[int(np.argmin(seg))],
-                                        "Season": season_type,
-                                    })
-            except Exception:
-                pass
+        # NOTE: Opening segment (data-start → first trough) is intentionally
+        # NOT extracted here. If data starts mid-greenness (before the trough),
+        # the threshold is crossed on the descending limb, giving a pre-trough SOS.
+        # The tail-segment handler below correctly extracts each trough → segment-end
+        # cycle, which covers the real post-trough rising season.
 
         # ── Window filter helper ──────────────────────────────
         # Returns True if a given date falls within the user-selected
@@ -796,26 +754,26 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
 
-                # ── SOS: first point AFTER left trough rising above sos_threshold ──
-                # Search from index 1 onward (skip the trough itself)
-                sos_cands = np.where(cycle_vals[1:] >= sos_threshold)[0] + 1
+                # ── Find POS (global max in cycle) ──
+                pos_idx_local = int(np.argmax(cycle_vals))
+
+                # ── SOS: first threshold crossing on ASCENDING limb (trough → POS) ──
+                # Search cycle_vals[1 : pos_idx+1] — after the trough, before the peak
+                asc = cycle_vals[1:pos_idx_local + 1]
+                sos_cands = np.where(asc >= sos_threshold)[0] + 1   # offset back to cycle indices
                 if len(sos_cands) == 0:
                     continue
                 sos_idx_local = int(sos_cands[0])
 
-                # ── EOS: last point BEFORE right trough falling below eos_threshold ──
-                # Search up to the last point (skip the right trough itself)
-                eos_cands = np.where(cycle_vals[:-1] >= eos_threshold)[0]
+                # ── EOS: last threshold crossing on DESCENDING limb (POS → right trough) ──
+                desc = cycle_vals[pos_idx_local:-1]  # from POS to just before right trough
+                eos_cands = np.where(desc >= eos_threshold)[0]
                 if len(eos_cands) == 0:
                     continue
-                eos_idx_local = int(eos_cands[-1])
+                eos_idx_local = pos_idx_local + int(eos_cands[-1])
 
                 if eos_idx_local <= sos_idx_local:
                     continue
-
-                # ── POS: argmax between SOS and EOS ──
-                pos_idx_local = sos_idx_local + int(
-                    np.argmax(cycle_vals[sos_idx_local:eos_idx_local + 1]))
 
                 sos = cycle_t[sos_idx_local]
                 pos = cycle_t[pos_idx_local]
@@ -886,12 +844,24 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if A < max(1e-6, MIN_AMPLITUDE): continue
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
-                sos_cands = np.where(seg[1:] >= sos_threshold)[0] + 1
-                eos_cands = np.where(seg[:-1] >= eos_threshold)[0]
-                if not len(sos_cands) or not len(eos_cands): continue
-                si = int(sos_cands[0]); ei = int(eos_cands[-1])
+
+                # ── Find POS first (global max in the tail) ──
+                pi = int(np.argmax(seg))
+
+                # ── SOS: first crossing on ASCENDING limb (trough → POS only) ──
+                # Search from index 1 to pi (skip the trough itself)
+                asc_limb = seg[1:pi + 1]
+                sos_cands = np.where(asc_limb >= sos_threshold)[0] + 1  # +1 because we sliced from [1:]
+                if not len(sos_cands): continue
+                si = int(sos_cands[0])
+
+                # ── EOS: last crossing on DESCENDING limb (POS → end) ──
+                desc_limb = seg[pi:]
+                eos_cands_desc = np.where(desc_limb >= eos_threshold)[0]
+                if not len(eos_cands_desc): continue
+                ei = pi + int(eos_cands_desc[-1])
+
                 if ei <= si: continue
-                pi = si + int(np.argmax(seg[si:ei + 1]))
                 sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
                 # Window filter: skip if POS outside growing window
                 if not _date_in_window(pos): continue
