@@ -1147,26 +1147,25 @@ def _loo_r2_quick(X_vals, y_vals, alpha=0.01):
     return float(np.clip(1 - ss_res / ss_tot, -1, 1))
 
 
-def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD):
+def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD,
+                          user_max_features=None):
     """
-    Purely data-driven feature selection — works with as few as 2 seasons.
-    Auto-lowers correlation threshold for small datasets so features are not
-    completely filtered out when n is too small for reliable Pearson r.
-    1. Filter by Pearson/Spearman composite ≥ effective_min_r (adapts to n)
-    2. Remove collinear features (|r_pair| > 0.85)
-    3. Forward selection by LOO R² improvement (degrades gracefully for n=2)
+    Data-driven feature selection with optional user override for max features.
+    Collinearity threshold is relaxed for small n (<=5) to avoid discarding
+    genuinely different variables that happen to correlate in small samples.
     """
-    n_obs  = len(y.dropna())
+    n_obs = len(y.dropna())
 
-    # ── Auto-lower threshold for small datasets ────────────────────────────
-    # Pearson r with n=3 can be ±1 by chance. We relax the gate so at least
-    # the best-correlated feature can enter, even if r < 0.40.
     if n_obs <= 3:
-        effective_min_r = min(min_r, 0.10)   # extremely permissive for n=3
+        effective_min_r = min(min_r, 0.10)
     elif n_obs <= 5:
-        effective_min_r = min(min_r, 0.25)   # permissive for n=4-5
+        effective_min_r = min(min_r, 0.25)
     else:
-        effective_min_r = min_r              # normal threshold
+        effective_min_r = min_r
+
+    # With n<=5, virtually all monotonic pairs get |r|>0.85 by chance.
+    # Use 0.97 so only genuinely redundant (near-duplicate) features are dropped.
+    collinear_thr = 0.97 if n_obs <= 5 else 0.85
 
     usable = []
     for col in X.columns:
@@ -1177,8 +1176,8 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD):
         if len(idx) < 2:
             continue
         try:
-            rp, _ = pearsonr( vals[idx].astype(float), y[idx].astype(float))
-            rs = rp  # default for n=2
+            rp, _ = pearsonr(vals[idx].astype(float), y[idx].astype(float))
+            rs = rp
             if len(idx) >= 3:
                 rs, _ = spearmanr(vals[idx].astype(float), y[idx].astype(float))
         except Exception:
@@ -1204,26 +1203,35 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD):
                 r_pair, _ = pearsonr(xi[idx2].astype(float), xj[idx2].astype(float))
             except Exception:
                 continue
-            if abs(r_pair) > 0.85:
+            if abs(r_pair) > collinear_thr:
                 collinear = True
                 break
         if not collinear:
             collinear_filtered.append(feat)
 
-    # With small n, limit features to avoid overfitting
-    if n_obs <= 3:
-        max_features = 1
+    # Effective max features: user override takes priority
+    if user_max_features is not None:
+        effective_max = user_max_features
+    elif n_obs <= 3:
+        effective_max = 1
     elif n_obs <= 5:
-        max_features = min(max_features, 2)
+        effective_max = min(max_features, 2)
+    else:
+        effective_max = max_features
+
     max_safe   = max(1, n_obs - 1)
-    candidates = collinear_filtered[:min(max_features, max_safe)]
+    candidates = collinear_filtered[:min(effective_max, max_safe)]
     if len(candidates) <= 1:
         return candidates
 
-    y_vals   = y.values.astype(float)
+    y_vals = y.values.astype(float)
     selected = [candidates[0]]
     best_r2  = _loo_r2_quick(
         X[selected].fillna(X[selected[0]].median()).values.reshape(-1, 1), y_vals)
+
+    # Stricter improvement requirement for small datasets
+    improvement_thr = 0.08 if n_obs <= 5 else 0.03
+
     for feat in candidates[1:]:
         trial = selected + [feat]
         Xt    = X[trial].fillna(X[trial].median()).values
@@ -1231,10 +1239,11 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD):
             trial_r2 = _loo_r2_quick(Xt, y_vals)
         except Exception:
             continue
-        if trial_r2 > best_r2 + 0.03:
+        if trial_r2 > best_r2 + improvement_thr:
             selected.append(feat)
             best_r2 = trial_r2
     return selected
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1307,7 +1316,7 @@ def loo_poly(X_vals, y_vals, degree=2):
             float(mean_absolute_error(y_vals, preds)))
 
 
-def fit_event_model(X_all, y, model_key="ridge"):
+def fit_event_model(X_all, y, model_key="ridge", user_max_features=None):
     """
     Fit a model for one phenological event.
     For small data (n < 5), automatically falls back to the most stable model:
@@ -1335,7 +1344,8 @@ def fit_event_model(X_all, y, model_key="ridge"):
     elif n <= 6:
         adaptive_min_r = max(0.30, MIN_CORR_THRESHOLD - 0.10)
 
-    features = select_multi_features(X_all, y, max_features=5, min_r=adaptive_min_r)
+    features = select_multi_features(X_all, y, max_features=5, min_r=adaptive_min_r,
+                                     user_max_features=user_max_features)
 
     if not features:
         md = float(yt.mean())
@@ -1434,7 +1444,7 @@ class UniversalPredictor:
         self.n_seasons  = {}
         self.corr_tables = {}
 
-    def train(self, train_df, all_params, model_key="ridge"):
+    def train(self, train_df, all_params, model_key="ridge", user_max_features=None):
         meta      = {'Year', 'Event', 'Target_DOY', 'LOS_Days', 'Peak_NDVI', 'Season_Start'}
         feat_cols = [c for c in train_df.columns
                      if c not in meta
@@ -1443,12 +1453,13 @@ class UniversalPredictor:
         for event in ['SOS', 'POS', 'EOS']:
             sub = train_df[train_df['Event'] == event].copy()
             self.n_seasons[event] = len(sub)
-            if len(sub) < 2:          # need at least 2 data points
+            if len(sub) < 2:
                 continue
             X   = sub[feat_cols].fillna(sub[feat_cols].median())
             y   = sub['Target_DOY']
             self.corr_tables[event] = get_all_correlations(X, y)
-            fit = fit_event_model(X, y, model_key=model_key)
+            fit = fit_event_model(X, y, model_key=model_key,
+                                  user_max_features=user_max_features)
             self._fits[event] = fit
             self.r2[event]    = fit['r2']
             self.mae[event]   = fit['mae']
@@ -1519,7 +1530,10 @@ class UniversalPredictor:
         ct  = self.corr_tables.get(event)
         if ct is None or len(ct) == 0:
             return pd.DataFrame()
-        in_model = set(fit['features'])
+        in_model   = set(fit['features'])
+        # Reconstruct which features were collinear vs dropped by LOO
+        # by checking collinearity between correlated features and the selected ones
+        selected_first = fit['features'][0] if fit['features'] else None
         rows = []
         for _, row in ct.iterrows():
             feat   = row['Feature']
@@ -1527,9 +1541,25 @@ class UniversalPredictor:
             if feat in in_model:
                 role = '✅  In model'
             elif usable:
-                role = '➖  Correlated but not selected (collinear / no LOO R² gain)'
+                # Check if collinear with selected feature
+                is_collinear = False
+                collinear_with = None
+                if selected_first and selected_first in ct['Feature'].values:
+                    try:
+                        sel_r = ct[ct['Feature'] == selected_first]['Pearson_r'].values[0]
+                        feat_r = row['Pearson_r']
+                        # If both have same-sign high |r| with target → likely collinear
+                        if abs(feat_r) > 0.85 and abs(sel_r) > 0.85 and (feat_r * sel_r > 0 or abs(abs(feat_r) - abs(sel_r)) < 0.15):
+                            is_collinear = True
+                            collinear_with = selected_first
+                    except Exception:
+                        pass
+                if is_collinear and collinear_with:
+                    role = f'➖  Redundant — highly similar to {collinear_with}'
+                else:
+                    role = '➖  Did not improve model accuracy — not added'
             else:
-                role = '⬜  Below threshold'
+                role = '⬜  Below correlation threshold'
             rows.append({'Feature':    feat,
                          'Pearson r':  row['Pearson_r'],
                          'Spearman ρ': row.get('Spearman_rho', float('nan')),
@@ -2104,10 +2134,30 @@ def main():
         "Days before event to average climate", 7, 60, 15, 1,
         help="How many days of meteorological data before each event date are averaged to form predictors.")
 
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## 🔢 Maximum Features in Model")
+    max_features_override = st.sidebar.slider(
+        "Max climate variables per model", 1, 4, 1, 1,
+        key="max_feat_slider",
+        help=(
+            "Maximum number of climate variables allowed in each model. "
+            "With few seasons (< 5), using more than 1–2 features causes overfitting — "
+            "the model memorises the training data but fails to predict new seasons. "
+            "Increase only if you have ≥ 6 seasons and want to test multi-variable models."
+        ))
+    if max_features_override >= 2:
+        st.sidebar.markdown(
+            '<div style="background:#FFF8E1;padding:8px 12px;border-radius:8px;'
+            'border-left:3px solid #F9A825;font-size:0.80rem;margin-top:4px">'
+            '⚠️ Using 2+ features with fewer than 6 seasons can overfit. '
+            'LOO R² may appear high but predictions may be unreliable.</div>',
+            unsafe_allow_html=True)
+
     cfg = {"start_month": start_m, "end_month": end_m, "min_days": min_days}
 
     _fp = (f"{_fp_ndvi}|{_fp_met}|sm={start_m}|em={end_m}|md={min_days}"
-           f"|sos={sos_thr:.3f}|eos={eos_thr:.3f}|model={model_key}|win={feat_window}")
+           f"|sos={sos_thr:.3f}|eos={eos_thr:.3f}|model={model_key}|win={feat_window}"
+           f"|mxf={max_features_override}")
     if st.session_state.get('_fp') != _fp:
         for k in ['predictor','pheno_df','met_df','train_df','all_params',
                   'raw_params','ndvi_df','ndvi_info','met_info','interp_freq']:
@@ -2312,7 +2362,8 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
         with st.spinner(f"Training {model_sel} models…"):
             train_df  = make_training_features(pheno_df, met_df, all_params, window=feat_window)
             predictor = UniversalPredictor()
-            predictor.train(train_df, all_params, model_key=model_key)
+            predictor.train(train_df, all_params, model_key=model_key,
+                            user_max_features=max_features_override)
 
         st.session_state.update({
             'pheno_df': pheno_df, 'met_df': met_df, 'train_df': train_df,
@@ -2381,9 +2432,25 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
 
         # Fitted equations
         st.markdown('<p class="section-title">Model Equations</p>', unsafe_allow_html=True)
+
+        # Explain why only 1 feature when n is small
+        if n_seasons <= 3 and max_features_override == 1:
+            st.markdown(
+                f'<div class="banner-info">ℹ️ <b>Why only 1 climate variable?</b> — '
+                f'With {n_seasons} seasons, adding more variables causes the model to memorise '
+                f'the training data perfectly but fail on new seasons (overfitting). '
+                f'To try 2 variables, increase <b>Maximum Features in Model</b> in the sidebar — '
+                f'but treat the results with caution.</div>',
+                unsafe_allow_html=True)
+        elif n_seasons <= 5 and max_features_override == 1:
+            st.markdown(
+                f'<div class="banner-info">ℹ️ With {n_seasons} seasons, the model uses 1 variable by default '
+                f'to avoid overfitting. You can try 2 variables using the sidebar slider.</div>',
+                unsafe_allow_html=True)
+
         st.caption(
-            "Each equation shows the relationship between the best climate predictor and the event date, "
-            "expressed as days from the start of the season window.")
+            "Each equation shows the relationship between the selected climate variable(s) "
+            "and the event date, expressed as days from the start of the growing season.")
         t_sos, t_pos, t_eos = st.tabs(
             [f"{icons['SOS']} Start of Season (SOS)",
              f"{icons['POS']} Peak of Season (POS)",
@@ -2397,8 +2464,9 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
                 if not ct.empty:
                     def _sr(val):
                         if val.startswith('✅'): return 'background-color:#C8E6C9;color:#1B5E20;font-weight:600'
+                        if val.startswith('➖') and 'Redundant' in val: return 'color:#9E9E9E;font-style:italic'
                         if val.startswith('➖'): return 'color:#555'
-                        return 'color:#999'
+                        return 'color:#bbb'
                     fmt  = {'Pearson r': '{:+.3f}', 'Spearman ρ': '{:+.3f}', 'Composite': '{:.3f}'}
                     sty  = ct.style
                     if 'Pearson r'  in ct.columns: sty = sty.background_gradient(subset=['Pearson r'],  cmap='RdYlGn', vmin=-1, vmax=1)
@@ -2696,6 +2764,7 @@ The difference between the peak NDVI and the baseline NDVI for a given season. L
 | **Minimum Season Length** | Seasons shorter than this are ignored. Increase if the NDVI chart shows spurious short cycles. Decrease if true seasons are being missed. |
 | **SOS / EOS Threshold** | The percentage of each season's NDVI amplitude at which green-up is considered to have started or ended. 10% is a common default. Lower values give earlier SOS / later EOS. |
 | **Climate Window** | How many days before each event date to average the climate data when building the predictive model. |
+| **Maximum Features in Model** | Maximum number of climate variables the model can use. Default is 1 for small datasets (< 5 seasons) to prevent overfitting. Increase to 2–3 only when you have ≥ 6 seasons. |
 | **Prediction Model** | The statistical method used to link climate variables to event dates. Ridge Regression is recommended for small datasets. |
 
 ---
