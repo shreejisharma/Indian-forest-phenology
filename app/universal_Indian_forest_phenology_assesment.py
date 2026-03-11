@@ -627,6 +627,63 @@ def _find_troughs(ndvi_values, min_distance=10):
     return merged
 
 
+def _find_troughs_boundary(v, min_distance):
+    """
+    FIX v6 — Boundary-aware trough finder.
+
+    The standard _find_troughs() misses real troughs that fall within min_dist
+    steps of the data start or end (e.g. Apr 2003 trough when data starts Feb 2003).
+    This function:
+      1. Runs the standard search (internal troughs).
+      2. Checks the first 1.5×min_dist steps for a boundary trough at the START.
+      3. Checks the last  1.5×min_dist steps for a boundary trough at the END.
+    A boundary trough is accepted only if it is genuinely lower than its surrounding
+    values and sufficiently far from the nearest interior trough.
+    """
+    n = len(v)
+    # Step 1: standard interior troughs
+    troughs = []
+    for i in range(1, n - 1):
+        w = v[max(0, i - min_distance): i + min_distance + 1]
+        if v[i] == np.min(w) and v[i] <= v[i - 1] and v[i] <= v[i + 1]:
+            troughs.append(i)
+    if troughs:
+        merged = [troughs[0]]
+        for t in troughs[1:]:
+            if t - merged[-1] < min_distance:
+                if v[t] < v[merged[-1]]: merged[-1] = t
+            else:
+                merged.append(t)
+    else:
+        merged = []
+
+    # Step 2: boundary trough at START
+    search_end = min(int(min_distance * 1.5), n // 3)
+    if search_end > 1:
+        start_win = v[0:search_end]
+        bmi = int(np.argmin(start_win))
+        next_t = merged[0] if merged else n
+        # Accept: not at very first step, genuinely low, far enough from next interior trough
+        if bmi > 0 and next_t - bmi >= min_distance:
+            # Must be lower than the midpoint between start and next trough
+            midpoint_val = float(np.mean(v[bmi:next_t])) if next_t < n else float(np.mean(v[bmi:]))
+            if v[bmi] < midpoint_val:
+                merged.insert(0, bmi)
+
+    # Step 3: boundary trough at END
+    search_start = max(n - int(min_distance * 1.5), 2 * n // 3)
+    if search_start < n - 1:
+        end_win = v[search_start:]
+        bmi = search_start + int(np.argmin(end_win))
+        prev_t = merged[-1] if merged else -1
+        if bmi - prev_t >= min_distance and bmi < n - 1:
+            midpoint_val = float(np.mean(v[prev_t:bmi])) if prev_t >= 0 else float(np.mean(v[0:bmi]))
+            if v[bmi] < midpoint_val:
+                merged.append(bmi)
+
+    return merged
+
+
 def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
     """
     Fully data-driven phenology extraction.
@@ -663,7 +720,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
         gap_starts  = orig_dates[orig_diffs.values > MAX_INTERP_GAP]
 
         # ── Step 3: 5-day grid interpolation ─────────────────
-        interp_freq = max(1, min(8, int(typical_cad // 2)))
+        interp_freq = max(1, min(8, round(typical_cad)))   # FIX v6: was int(cad//2) → gave 2d grid for 5d data
         full_range  = pd.date_range(
             start=ndvi_raw.index.min(),
             end=ndvi_raw.index.max(),
@@ -733,7 +790,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
             cycle_steps = int(365 / interp_freq)
         min_dist = max(10, int(cycle_steps * 0.4))   # 40% of cycle length
 
-        trough_raw = _find_troughs(sm_for_troughs, min_distance=min_dist)
+        trough_raw = _find_troughs_boundary(sm_for_troughs, min_dist)
 
         # Gap filter: discard troughs at/adjacent to NaN
         trough_indices = []
@@ -776,7 +833,17 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
             return m >= sm or m <= em
 
         # ── HEAD SEGMENT ─────────────────────────────────────
-        if trough_indices:
+        # FIX v6: Only use head segment if data START looks like a genuine trough.
+        # If data starts mid-season (NDVI already elevated), the head segment
+        # creates a false season merging the tail of an invisible prior season
+        # with the start of the real first season → wrong SOS/POS dates.
+        _valid_sm_vals = sm_for_troughs[~np.isnan(sm_vals)]
+        _global_min    = float(np.percentile(_valid_sm_vals, 5))  if len(_valid_sm_vals) > 0 else 0
+        _global_amp    = (float(np.percentile(_valid_sm_vals, 95)) - _global_min) if len(_valid_sm_vals) > 0 else 1
+        _head_trough_ceiling = _global_min + 0.25 * _global_amp  # start must be in bottom 25% of range
+        _head_start_looks_like_trough = (float(sm_for_troughs[0]) <= _head_trough_ceiling)
+
+        if trough_indices and _head_start_looks_like_trough:
             ti_first = trough_indices[0]
             head_len = ti_first
             _amp_pre = (float(np.max(sm_for_troughs[0:ti_first + 1])) -
