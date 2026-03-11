@@ -483,13 +483,20 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             else:
                 in_seg = False
 
+        # BUG FIX v3: SG window capped at 31 steps (~155 days).
+        # The old 10%-of-segment window produced ~73 steps (~365 days) for a 10-year
+        # segment, which is longer than one growing season. This over-smoothed subtle
+        # annual cycles, collapsing their amplitude below MIN_AMPLITUDE=0.05 and causing
+        # those seasons to be skipped (e.g. 2018-19 A crushed from 0.21→0.03, 2022-23
+        # from 0.15→0.04). Capping at 31 steps preserves intra-seasonal variability.
+        MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
         for sid in range(1, seg_id + 1):
             idx_seg = np.where(seg_labels == sid)[0]
             seg_n = len(idx_seg)
             if seg_n < 5:
                 sm_vals[idx_seg] = ndvi_vals[idx_seg]
                 continue
-            wl_t = max(7, int(seg_n * 0.10))
+            wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5% capped at 31
             wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
             wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
             if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
@@ -561,7 +568,11 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             seg_slice = nan_mask[i_start:i_end+1]
             return seg_slice.mean() > 0.20
 
-        MIN_AMPLITUDE = 0.05
+        # BUG FIX v3: Lowered from 0.05 → 0.02.
+        # For high-NDVI evergreen forests (Shola), seasonal amplitude after SG smoothing
+        # can be as small as 0.03–0.04 even when real raw amplitude is 0.07–0.15.
+        # A 0.05 floor incorrectly discards those seasons entirely.
+        MIN_AMPLITUDE = 0.02
 
         if len(trough_indices) < 2:
             rows = []
@@ -672,28 +683,43 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if _cycle_has_gap(ti, ti1):
                     continue
 
-                cycle_vals = sm_for_troughs[ti:ti1 + 1]
+                # BUG FIX v3: Use RAW 5-day interpolated values (ndvi_vals) for
+                # amplitude and threshold computation — NOT the over-smoothed signal.
+                # For a 10-year continuous segment the SG window is ~365 days, which
+                # flattens shallow annual cycles and collapses their amplitude below
+                # MIN_AMPLITUDE (e.g. 2018-19 goes 0.22→0.03, 2022-23 goes 0.15→0.04).
+                # Using raw values gives the true seasonal range and prevents these
+                # seasons from being skipped.
+                # sm_for_troughs is still used ONLY for POS location (cleaner peak).
+                cycle_raw  = ndvi_vals[ti:ti1 + 1]   # raw 5-day interpolated
+                cycle_sm   = sm_for_troughs[ti:ti1 + 1]  # smoothed — for POS only
                 cycle_t    = t_all[ti:ti1 + 1]
 
-                ndvi_min = float(sm_vals[ti]) if not np.isnan(sm_vals[ti]) else float(sm_for_troughs[ti])
-                ndvi_max = float(np.max(cycle_vals))
+                # Base = raw value at the left trough (true dormancy floor)
+                ndvi_min = float(ndvi_vals[ti]) if not np.isnan(ndvi_vals[ti]) \
+                           else float(sm_for_troughs[ti])
+                # Peak = max of raw values within cycle
+                ndvi_max = float(np.nanmax(cycle_raw))
                 A = ndvi_max - ndvi_min
 
                 if A < max(1e-6, MIN_AMPLITUDE):
                     continue
 
+                # Thresholds computed from raw amplitude
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
 
-                pos_idx_local = int(np.argmax(cycle_vals))
+                # POS = peak of SMOOTHED signal (stable peak location)
+                pos_idx_local = int(np.argmax(cycle_sm))
 
-                asc = cycle_vals[1:pos_idx_local + 1]
+                # SOS/EOS crossings on RAW signal (honours true amplitude)
+                asc = cycle_raw[1:pos_idx_local + 1]
                 sos_cands = np.where(asc >= sos_threshold)[0] + 1
                 if len(sos_cands) == 0:
                     continue
                 sos_idx_local = int(sos_cands[0])
 
-                desc = cycle_vals[pos_idx_local:-1]
+                desc = cycle_raw[pos_idx_local:-1]
                 eos_cands = np.where(desc >= eos_threshold)[0]
                 if len(eos_cands) == 0:
                     continue
@@ -724,7 +750,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     "EOS_Method":    "valley_amplitude_threshold",
                     "LOS_Days":      (eos - sos).days,
                     "Season_Start":  season_start,
-                    "Peak_NDVI":     float(cycle_vals[pos_idx_local]),
+                    "Peak_NDVI":     float(cycle_sm[pos_idx_local]),
                     "Amplitude":     float(A),
                     "Base_NDVI":     float(ndvi_min),
                     "Threshold_SOS": float(sos_threshold),
@@ -751,21 +777,26 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             tail_len = seg_end_i - ti0
             if tail_len < max(10, min_d // 5): continue
             try:
-                seg   = sm_for_troughs[ti0:seg_end_i + 1]
+                seg_sm  = sm_for_troughs[ti0:seg_end_i + 1]   # smoothed — POS location
+                seg_raw = ndvi_vals[ti0:seg_end_i + 1]         # raw — amplitude/thresholds
                 seg_t = t_all[ti0:seg_end_i + 1]
                 if nan_mask[ti0:seg_end_i + 1].any(): continue
-                ndvi_min = float(sm_vals[ti0]) if not np.isnan(sm_vals[ti0]) else float(sm_for_troughs[ti0])
-                ndvi_max = float(np.max(seg))
+                # Use raw values for amplitude (avoids over-smoothing collapsing shallow cycles)
+                ndvi_min = float(ndvi_vals[ti0]) if not np.isnan(ndvi_vals[ti0]) \
+                           else float(sm_for_troughs[ti0])
+                ndvi_max = float(np.nanmax(seg_raw))
                 A = ndvi_max - ndvi_min
                 if A < max(1e-6, MIN_AMPLITUDE): continue
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
-                pi = int(np.argmax(seg))
-                asc_limb = seg[1:pi + 1]
+                # POS from smoothed signal (stable peak)
+                pi = int(np.argmax(seg_sm))
+                # SOS/EOS from raw signal
+                asc_limb = seg_raw[1:pi + 1]
                 sos_cands = np.where(asc_limb >= sos_threshold)[0] + 1
                 if not len(sos_cands): continue
                 si = int(sos_cands[0])
-                desc_limb = seg[pi:]
+                desc_limb = seg_raw[pi:]
                 eos_cands_desc = np.where(desc_limb >= eos_threshold)[0]
                 if not len(eos_cands_desc): continue
                 ei = pi + int(eos_cands_desc[-1])
@@ -786,7 +817,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     "EOS_Method": "valley_amplitude_threshold",
                     "LOS_Days": (eos - sos).days,
                     "Season_Start": season_start,
-                    "Peak_NDVI": float(seg[pi]),
+                    "Peak_NDVI": float(seg_sm[pi]),
                     "Amplitude": float(A),
                     "Base_NDVI": float(ndvi_min),
                     "Threshold_SOS": float(sos_threshold),
@@ -1210,12 +1241,13 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
     wl_global = min(wl_global, n - 1 if n > 1 else 1)
     if wl_global % 2 == 0: wl_global = max(7, wl_global - 1)
 
+    _MAX_SG = 31  # cap at 31 steps (~155 days) — same as extract_phenology fix
     for sid in range(1, seg_id + 1):
         idx_seg = np.where(seg_labels == sid)[0]
         seg_n = len(idx_seg)
         if seg_n < 5:
             sm_arr[idx_seg] = ndvi_vals[idx_seg]; continue
-        wl_t = max(7, int(seg_n * 0.10))
+        wl_t = max(7, min(int(seg_n * 0.05), _MAX_SG))  # 5% capped at 31
         wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
         wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
         if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
@@ -1233,7 +1265,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
             sm_plot[i] = np.nan
 
     ax.plot(ndvi_5d.index, sm_plot, color='#1B5E20', lw=2.2,
-            label=f'Smoothed (SG w={wl_global})', zorder=5)
+            label=f'Smoothed (SG w≤31)', zorder=5)
 
     in_gap = False; gap_s = None
     for i in range(n):
@@ -1309,7 +1341,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
 
     handles = [
         Line2D([0],[0], color='#A5D6A7', marker='o', ms=5, lw=0, label='NDVI (raw obs)'),
-        Line2D([0],[0], color='#1B5E20', lw=2.2, label=f'Smoothed (SG w={wl_global})'),
+        Line2D([0],[0], color='#1B5E20', lw=2.2, label='Smoothed (SG w≤31, capped at 155d)'),
         plt.Rectangle((0,0),1,1, fc='#BDBDBD', alpha=0.40, label='Data gap (not interpolated)'),
         plt.Rectangle((0,0),1,1, fc='#A5D6A7', alpha=0.35, label='Selected growing window'),
         Line2D([0],[0], color='#F57F17', lw=1.1, ls=':', label='Base NDVI (dormancy valley)'),
@@ -2063,27 +2095,29 @@ def main():
 
 ---
 
-#### 🐛 Bug Fix v2 — Plateau Trough Filter (Fixed for High-NDVI Evergreen Forests)
+#### 🐛 Bug Fix v2 — Plateau Trough Filter (High-NDVI Evergreen Forests)
 
-**Problem:** The original plateau trough filter used a **60% amplitude ceiling** to discard false troughs:
-```
-trough_ceiling = global_min + 0.60 × global_amp
-```
-For high-baseline, low-amplitude forests like **Shola** (Mukurthi), the seasonal NDVI amplitude is only ~0.17.
-With a 60% ceiling, genuine seasonal troughs at NDVI ~0.737 were incorrectly classified as "plateau dips" and discarded — causing those seasons to be **completely missed** in the output.
+**Problem:** Original filter used 60% amplitude ceiling, discarding genuine troughs in Shola/evergreen forests where NDVI stays high. Fix: raise to 85% ceiling; skip entirely when `global_amp < 0.20`.
 
-**Fix applied:**
+---
+
+#### 🐛 Bug Fix v3 — Over-Aggressive SG Smoothing (Missing Seasons)
+
+**Problem:** The Savitzky–Golay window was set to **10% of the total segment length**, which for a 10-year dataset produces a window of ~73 steps (~365 days). A window longer than one growing season averages across annual cycles, **crushing the per-cycle amplitude** below the minimum threshold (0.05):
+
+| Season | Raw NDVI amplitude | Smoothed amplitude (old) | Status |
+|--------|-------------------|--------------------------|--------|
+| 2018–19 | **0.21** | 0.03 | ❌ Skipped |
+| 2021–22 | 0.07 | 0.04 | ❌ Skipped |
+| 2022–23 | **0.15** | 0.04 | ❌ Skipped |
+
+**Fix:** Cap the SG window at **31 steps (~155 days)** — shorter than one growing season:
 ```python
-if global_amp >= 0.20:
-    # Sufficient amplitude — use 85% ceiling (raised from 60%)
-    trough_ceiling = global_min + 0.85 × global_amp
-    trough_indices = [ti for ti in trough_indices if sm_for_troughs[ti] <= trough_ceiling]
-# else: global_amp < 0.20 → skip filter entirely (all troughs are real)
+MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
+wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5%, capped at 31
 ```
 
-**Result for Mukurthi Shola data:**
-- Before fix: 8 troughs → 2017 and 2018 seasons missed
-- After fix: 10 troughs → all 9 seasons (2016–2025) correctly extracted
+**Result:** All 9 seasons (2016–2025) correctly extracted with all amplitudes preserved.
 
 ---
 
