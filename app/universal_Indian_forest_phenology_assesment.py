@@ -1,40 +1,16 @@
 """
-🌲 UNIVERSAL INDIAN FOREST PHENOLOGY PREDICTOR — v5 (Data-Driven, Zero Hardcoding)
-=====================================================================================
+Forest Phenology Analyser
+=========================
+Upload NDVI and meteorological data to extract seasonal phenology events (SOS, POS, EOS, LOS),
+identify climate drivers, train predictive models, and forecast future phenology dates.
 
-KEY DESIGN PRINCIPLE — FULLY DATA-GOVERNED:
-  Every threshold, window, feature, model, and prediction is derived exclusively
-  from the uploaded NDVI + meteorological data. No forest-type presets, no lookup
-  tables, no hardcoded DOY ranges influence the result.
+Supports any Indian forest type — fully data-driven, no manual configuration required.
 
-  1. NDVI data auto-detects cadence, amplitude, seasonality, and cycle structure.
-  2. Met data auto-discovers all available parameters; derived features are computed.
-  3. Season window is set by the user once (start/end month + min length); the
-     algorithm then finds real troughs in the data — no preset start dates.
-  4. Thresholds are calibrated per-cycle from the data amplitude (user-adjustable %).
-  5. Models select features purely by Pearson/Spearman correlation with the actual
-     extracted phenology targets — no priority lists baked in.
-  6. Predictions use only the fitted model from the uploaded data.
+Requirements:
+    pip install streamlit pandas numpy scipy scikit-learn matplotlib
 
-BUG FIXES (v5):
-  FIX 1 — Missing season: season year = trough_year (not pos.year)
-  FIX 2 — POS aligned to raw NDVI peak (not smoothed peak)
-  FIX 3 (v4) — Gap-tolerant cycle extraction
-  FIX 4 (v3) — SG window capped at 31 steps (~155 days)
-  FIX 5 (v2) — Plateau trough filter 85% ceiling
-
-NEW in v5 (Data-Driven):
-  • Auto-detect NDVI cadence → adaptive interpolation & smoothing
-  • Auto-calibrate trough min-distance from data seasonality (no 145-day hardcode)
-  • Auto-detect amplitude range → adaptive MIN_AMPLITUDE threshold
-  • Feature selection: pure data correlation, no event priority lists
-  • All model defaults are data-derived (means, medians from uploaded data)
-  • Prediction inputs pre-filled from actual training data statistics
-  • Summary statistics panel: data-derived NDVI/met characterization
-  • Export: full phenology table + met features + model coefficients
-
-pip install streamlit pandas numpy scipy scikit-learn matplotlib
-streamlit run universal_Indian_forest_phenology_v5.py
+Run:
+    streamlit run universal_Indian_forest_phenology_v5.py
 """
 
 import streamlit as st
@@ -84,28 +60,75 @@ def _loess_predict(x_train, y_train, x_new, frac=0.75):
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="🌲 Forest Phenology v5",
-    page_icon="🌲",
+    page_title="🌿 Forest Phenology Analyser",
+    page_icon="🌿",
     layout="wide"
 )
 
 st.markdown("""
 <style>
-.main-header{font-size:2.2rem;color:#1B5E20;font-weight:bold;text-align:center;padding:16px 0 4px}
-.sub-header{text-align:center;color:#388E3C;font-size:0.95rem;margin-bottom:14px;font-style:italic}
-.metric-box{background:linear-gradient(135deg,#E8F5E9,#C8E6C9);padding:20px;border-radius:14px;
-            text-align:center;box-shadow:0 3px 8px rgba(0,0,0,.10);margin:4px;border:1px solid #A5D6A7}
-.metric-box h3{color:#1B5E20;margin:0 0 4px;font-size:0.90rem;font-weight:600}
-.metric-box h1{color:#1B5E20;margin:0;font-size:1.9rem}
-.metric-box p{color:#388E3C;margin:4px 0 0;font-size:0.78rem}
-.info-box{background:#FFF9C4;padding:14px 18px;border-radius:10px;border-left:5px solid #F9A825;margin:10px 0}
-.warn-box{background:#FFE0B2;padding:14px 18px;border-radius:10px;border-left:5px solid #FF9800;margin:8px 0}
-.good-box{background:#C8E6C9;padding:14px 18px;border-radius:10px;border-left:5px solid #4CAF50;margin:8px 0}
-.data-box{background:#E3F2FD;padding:14px 18px;border-radius:10px;border-left:5px solid #1976D2;margin:8px 0}
-.eq-box{background:#F3E5F5;padding:13px 16px;border-radius:10px;border-left:5px solid #9C27B0;
-        font-family:monospace;font-size:0.82rem;margin:8px 0;word-break:break-all}
-.upload-hint{background:#F1F8E9;padding:16px 20px;border-radius:12px;border:2px dashed #81C784;margin:16px 0}
-.stat-card{background:#FAFFF8;padding:12px 16px;border-radius:10px;border:1px solid #C8E6C9;margin:4px 0}
+/* ── Typography & Base ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+/* ── App Header ── */
+.app-header {
+    background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 60%, #388E3C 100%);
+    padding: 32px 40px 24px; border-radius: 16px; margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(27,94,32,0.25);
+}
+.app-header h1 { color: #fff; font-size: 2rem; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.5px; }
+.app-header p  { color: #C8E6C9; font-size: 0.92rem; margin: 0; line-height: 1.6; }
+.app-header .badge {
+    display: inline-block; background: rgba(255,255,255,0.15);
+    color: #fff; font-size: 0.78rem; font-weight: 600;
+    padding: 3px 10px; border-radius: 20px; margin: 4px 4px 0 0;
+}
+
+/* ── Cards ── */
+.metric-card {
+    background: #fff; padding: 20px 16px; border-radius: 14px;
+    text-align: center; box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+    border: 1px solid #E8F5E9; margin: 4px;
+}
+.metric-card .label { color: #616161; font-size: 0.78rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.metric-card .value { color: #1B5E20; font-size: 1.85rem; font-weight: 700; margin: 0; }
+.metric-card .sub   { color: #757575; font-size: 0.76rem; margin-top: 4px; }
+
+/* ── Info Banners ── */
+.banner-info  { background: #E3F2FD; padding: 14px 18px; border-radius: 10px;
+    border-left: 4px solid #1976D2; margin: 10px 0; font-size: 0.88rem; }
+.banner-warn  { background: #FFF8E1; padding: 14px 18px; border-radius: 10px;
+    border-left: 4px solid #F9A825; margin: 10px 0; font-size: 0.88rem; }
+.banner-good  { background: #E8F5E9; padding: 14px 18px; border-radius: 10px;
+    border-left: 4px solid #43A047; margin: 10px 0; font-size: 0.88rem; }
+.banner-error { background: #FFEBEE; padding: 14px 18px; border-radius: 10px;
+    border-left: 4px solid #E53935; margin: 10px 0; font-size: 0.88rem; }
+
+/* ── Equation Box ── */
+.eq-box { background: #F8F9FA; padding: 14px 16px; border-radius: 10px;
+    border-left: 4px solid #7B1FA2; font-family: 'Courier New', monospace;
+    font-size: 0.83rem; margin: 8px 0; word-break: break-all; color: #212121; }
+
+/* ── Upload Panel ── */
+.upload-panel { background: #F9FBF9; padding: 24px 28px; border-radius: 14px;
+    border: 2px dashed #A5D6A7; margin: 20px 0; }
+.upload-panel h3 { color: #1B5E20; margin-bottom: 12px; font-size: 1.05rem; }
+.upload-panel code { background: #E8F5E9; padding: 2px 6px; border-radius: 4px;
+    font-size: 0.82rem; }
+
+/* ── Section Heading ── */
+.section-title { font-size: 1.15rem; font-weight: 700; color: #1B5E20;
+    margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #C8E6C9; }
+
+/* ── Guide Definition Term ── */
+.term { background: #E8F5E9; padding: 2px 8px; border-radius: 5px;
+    font-weight: 600; color: #1B5E20; font-size: 0.88rem; }
+
+/* ── Stat table ── */
+.stat-card { background: #FAFFFE; padding: 12px 16px; border-radius: 10px;
+    border: 1px solid #C8E6C9; margin: 4px 0; font-size: 0.88rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1999,31 +2022,36 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df, interp_freq=5):
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    st.markdown('<p class="main-header">🌲 Universal Forest Phenology Predictor — v5</p>',
-                unsafe_allow_html=True)
-    st.markdown(
-        '<p class="sub-header">Data-Driven · Zero Hardcoding · All Indian Forest Types · '
-        'SOS / POS / EOS / LOS · Ridge / LOESS / Poly / GPR · LOO CV<br>'
-        '<span style="color:#1976D2;font-weight:bold">'
-        'Every parameter — thresholds, features, models — governed entirely by your uploaded data'
-        '</span></p>', unsafe_allow_html=True)
+    # ── APP HEADER ────────────────────────────────────────────
+    st.markdown("""
+    <div class="app-header">
+        <h1>🌿 Forest Phenology Analyser</h1>
+        <p>Upload your NDVI and meteorological data to automatically extract seasonal events,
+        train predictive models, and forecast future phenology for any Indian forest type.</p>
+        <span class="badge">🌱 SOS — Start of Season</span>
+        <span class="badge">🌿 POS — Peak of Season</span>
+        <span class="badge">🍂 EOS — End of Season</span>
+        <span class="badge">📏 LOS — Length of Season</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── SIDEBAR ───────────────────────────────────────────────
-    st.sidebar.markdown("## 📤 Upload Your Data")
+    st.sidebar.markdown("## 📂 Upload Data")
     ndvi_file = st.sidebar.file_uploader(
-        "1️⃣  NDVI CSV",  type=['csv'],
-        help="Any CSV: date + ndvi columns. Multi-site CSVs supported.")
+        "NDVI File (CSV)",  type=['csv'],
+        help="A CSV file with a date column and an NDVI column. Any date format is accepted.")
     met_file = st.sidebar.file_uploader(
-        "2️⃣  NASA POWER Met CSV", type=['csv'],
-        help="Daily export from power.larc.nasa.gov — header auto-skipped.")
+        "Meteorological File (CSV)", type=['csv'],
+        help="Daily meteorological data CSV — from NASA POWER or your own source.")
 
     _fp_ndvi = f"{ndvi_file.name}:{ndvi_file.size}" if ndvi_file else ""
     _fp_met  = f"{met_file.name}:{met_file.size}"   if met_file  else ""
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## 📅 Season Window")
-    sm_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
-                7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    st.sidebar.markdown("## 📅 Growing Season Window")
+    st.sidebar.caption("Set the calendar period that defines one growing season for your study site.")
+    sm_names  = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+                 7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
     month_opts = list(sm_names.keys())
     col_sm, col_em = st.sidebar.columns(2)
     start_m = col_sm.selectbox("Start month", options=month_opts, index=5,
@@ -2032,44 +2060,47 @@ def main():
                                format_func=lambda m: sm_names[m])
     if start_m != end_m:
         if start_m > end_m:
-            st.sidebar.info(f"🌿 Cross-year: **{sm_names[start_m]} → {sm_names[end_m]}**")
+            st.sidebar.info(f"Cross-year window: **{sm_names[start_m]} → {sm_names[end_m]}**")
         else:
-            st.sidebar.info(f"🌿 Within-year: **{sm_names[start_m]} → {sm_names[end_m]}**")
+            st.sidebar.info(f"Within-year window: **{sm_names[start_m]} → {sm_names[end_m]}**")
     if start_m == end_m:
-        st.sidebar.warning("⚠️ Start = End month: window is ~1 month. No seasons will be detected.")
+        st.sidebar.warning("⚠️ Start and end month are the same — no seasons will be detected.")
 
-    min_days = st.sidebar.slider("Min. season length (days)", 30, 300, 100, 10)
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ Amplitude Threshold")
-    sos_thr = st.sidebar.slider("SOS threshold (% amplitude)", 5, 40, 10, 5) / 100.0
-    eos_thr = st.sidebar.slider("EOS threshold (% amplitude)", 5, 40, 10, 5) / 100.0
-    st.sidebar.caption(f"SOS: **{int(sos_thr*100)}%** | EOS: **{int(eos_thr*100)}%** "
-                       f"of per-cycle NDVI amplitude (data-calibrated)")
+    min_days = st.sidebar.slider(
+        "Minimum season length (days)", 30, 300, 100, 10,
+        help="Seasons shorter than this value are ignored. Increase if short noise cycles appear.")
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📈 Regression Model")
+    st.sidebar.markdown("## ⚙️ Detection Sensitivity")
+    st.sidebar.caption(
+        "These thresholds define when green-up starts (SOS) and ends (EOS), "
+        "expressed as a percentage of each season's NDVI amplitude.")
+    sos_thr = st.sidebar.slider("SOS threshold  (% of amplitude)", 5, 40, 10, 5) / 100.0
+    eos_thr = st.sidebar.slider("EOS threshold  (% of amplitude)", 5, 40, 10, 5) / 100.0
+    st.sidebar.caption(
+        f"Current: SOS at **{int(sos_thr*100)}%** · EOS at **{int(eos_thr*100)}%** "
+        "of each season's NDVI swing. Higher % = stricter (later SOS, earlier EOS).")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## 📈 Prediction Model")
+    st.sidebar.caption("Model used to relate meteorological conditions to phenological event dates.")
     model_opts = {
-        "Ridge Regression (Linear)":        "ridge",
-        "LOESS / LOWESS Smoothing":         "loess",
-        "Polynomial Regression (deg 2)":    "poly2",
-        "Polynomial Regression (deg 3)":    "poly3",
-        "Gaussian Process (best n<10)":     "gpr",
+        "Ridge Regression":             "ridge",
+        "LOESS Smoothing":              "loess",
+        "Polynomial Regression (Deg 2)":"poly2",
+        "Polynomial Regression (Deg 3)":"poly3",
+        "Gaussian Process":             "gpr",
     }
-    model_sel = st.sidebar.radio("Select fitting model", list(model_opts.keys()), index=0)
+    model_sel = st.sidebar.radio("Model type", list(model_opts.keys()), index=0)
     model_key = model_opts[model_sel]
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔬 Feature Window")
+    st.sidebar.markdown("## 🗓️ Climate Window")
     feat_window = st.sidebar.slider(
-        "Met window (days before each event)", 7, 60, 15, 1,
-        help="Rolling window of met data used to compute features for each phenological event.")
+        "Days before event to average climate", 7, 60, 15, 1,
+        help="How many days of meteorological data before each event date are averaged to form predictors.")
 
-    cfg = {
-        "start_month": start_m,
-        "end_month":   end_m,
-        "min_days":    min_days,
-    }
+    cfg = {"start_month": start_m, "end_month": end_m, "min_days": min_days}
 
     _fp = (f"{_fp_ndvi}|{_fp_met}|sm={start_m}|em={end_m}|md={min_days}"
            f"|sos={sos_thr:.3f}|eos={eos_thr:.3f}|model={model_key}|win={feat_window}")
@@ -2079,46 +2110,58 @@ def main():
             st.session_state[k] = None
         st.session_state['_fp'] = _fp
 
+    # ── WELCOME SCREEN ────────────────────────────────────────
     if not (ndvi_file and met_file):
         st.markdown("""
-<div class="upload-hint">
-<b>👈 Upload both files in the sidebar to begin</b><br><br>
-<b>NDVI CSV format:</b>
-<pre>Date,NDVI
-2016-01-01,0.42
-2016-01-17,0.45</pre>
-<b>NASA POWER Met CSV:</b> download from
-<a href="https://power.larc.nasa.gov/data-access-viewer/" target="_blank">power.larc.nasa.gov</a>
-→ Daily → Point → coordinates → select parameters → CSV.<br><br>
-<b>✅ Fully data-driven:</b> no forest type selection needed —
-the app auto-detects cadence, amplitude, seasonality and selects features
-from your data's own correlations.
+<div class="upload-panel">
+<h3>👈 Upload your two data files using the sidebar to begin</h3>
+
+<b>File 1 — NDVI CSV</b><br>
+Any CSV with a date column and an NDVI column. Column names are detected automatically.
+<br><br>
+<code>Date, NDVI</code><br>
+<code>2016-01-01, 0.42</code><br>
+<code>2016-01-17, 0.45</code>
+<br><br>
+
+<b>File 2 — Meteorological CSV</b><br>
+Daily climate data for your study site. Download free from
+<a href="https://power.larc.nasa.gov/data-access-viewer/" target="_blank">NASA POWER</a>
+(Daily → Point → your coordinates → CSV), or use your own file.
+Parameters such as temperature, rainfall, humidity, and radiation are detected automatically.
+<br><br>
+
+<b>What this tool does:</b><br>
+• Detects your forest's seasonal green-up and senescence from the NDVI curve<br>
+• Identifies the <b>Start (SOS)</b>, <b>Peak (POS)</b>, and <b>End (EOS)</b> of each growing season<br>
+• Finds which climate variables best explain year-to-year variation in those dates<br>
+• Trains a model so you can predict future phenology dates from forecast weather<br>
 </div>
         """, unsafe_allow_html=True)
         return
 
-    # ── PARSE ─────────────────────────────────────────────────
-    with st.spinner("📂 Parsing files…"):
+    # ── PARSE FILES ───────────────────────────────────────────
+    with st.spinner("Reading files…"):
         ndvi_result, ndvi_err = parse_ndvi(ndvi_file)
         if ndvi_result is None:
-            st.error(f"❌ NDVI: {ndvi_err}"); return
+            st.error(f"Could not read NDVI file: {ndvi_err}"); return
 
         if isinstance(ndvi_result, tuple) and ndvi_result[0] == 'MULTI_SITE':
             _, site_list, raw_df, date_col, ndvi_col = ndvi_result
             st.sidebar.markdown("---")
-            st.sidebar.markdown("### 🗺️ Multi-Site CSV")
-            chosen_site = st.sidebar.selectbox("Select site", site_list, key="site_sel")
+            st.sidebar.markdown("### 🗺️ Multiple Sites Detected")
+            chosen_site = st.sidebar.selectbox("Select site to analyse", site_list, key="site_sel")
             ndvi_df = _filter_ndvi_site(raw_df, date_col, ndvi_col, chosen_site)
             if len(ndvi_df) == 0:
-                st.error(f"❌ No valid rows for site '{chosen_site}'."); return
-            st.sidebar.success(f"✅ Site: **{chosen_site}** — {len(ndvi_df)} obs")
+                st.error(f"No valid rows for site '{chosen_site}'."); return
+            st.sidebar.success(f"✅ Site: **{chosen_site}** — {len(ndvi_df)} observations")
         else:
             ndvi_df = ndvi_result
 
         met_file.seek(0)
         met_df, raw_params, met_err = parse_nasa_power(met_file)
         if met_df is None:
-            st.error(f"❌ Met: {met_err}"); return
+            st.error(f"Could not read met file: {met_err}"); return
 
     # ── DERIVED FEATURES ──────────────────────────────────────
     met_df     = add_derived_features(met_df, season_start_month=start_m)
@@ -2127,133 +2170,142 @@ from your data's own correlations.
                   and pd.api.types.is_numeric_dtype(met_df[c])]
     derived    = [p for p in all_params if p not in raw_params]
 
-    # ── DATA CHARACTERIZATION ─────────────────────────────────
+    # ── SIDEBAR SUCCESS ───────────────────────────────────────
     _, _, interp_freq = detect_ndvi_cadence(ndvi_df)
     ndvi_info  = characterize_ndvi_data(ndvi_df)
     met_info   = characterize_met_data(met_df, raw_params)
 
-    st.sidebar.success(f"✅ NDVI: {ndvi_info['n_obs']} obs | {ndvi_info['n_years']} yrs | "
-                       f"cadence ~{ndvi_info['cadence_d']:.0f}d")
-    st.sidebar.success(f"✅ Met: {len(raw_params)} parameters")
+    st.sidebar.markdown("---")
+    st.sidebar.success(f"✅ NDVI loaded — {ndvi_info['n_obs']} observations · {ndvi_info['n_years']} years")
+    st.sidebar.success(f"✅ Met loaded — {len(raw_params)} climate parameters")
     if derived:
-        st.sidebar.info(f"🔧 {len(derived)} derived features computed")
-    st.sidebar.info(f"📐 Auto MIN_AMPLITUDE: {compute_data_driven_min_amplitude(ndvi_df['NDVI'].dropna().values):.3f}")
+        st.sidebar.info(f"+ {len(derived)} derived features computed automatically")
 
     # ── TABS ──────────────────────────────────────────────────
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Data Overview",
-        "🔬 Training & Models",
-        "📈 Correlations & Met",
+        "📊 Data Summary",
+        "🔬 Season Extraction & Models",
+        "📈 Climate Correlations",
         "🔮 Predict",
-        "📖 Guide"])
+        "📖 User Guide"])
 
     icons = {'SOS': '🌱', 'POS': '🌿', 'EOS': '🍂'}
 
-    # ══ TAB 0 — DATA OVERVIEW ══════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    # TAB 1 — DATA SUMMARY
+    # ══════════════════════════════════════════════════════════
     with tab1:
-        st.markdown("### 📊 Uploaded Data — Automatic Characterization")
-        st.markdown(
-            '<div class="data-box">All values below are derived exclusively from your uploaded files. '
-            'No lookup tables, no hardcoded ranges. The app adapts to any forest, any region, any NDVI source.</div>',
-            unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(f'<div class="metric-box"><h3>📅 Years</h3><h1>{ndvi_info["year_range"]}</h1>'
-                    f'<p>{ndvi_info["n_obs"]} observations</p></div>', unsafe_allow_html=True)
-        c2.markdown(f'<div class="metric-box"><h3>🌿 NDVI Mean</h3><h1>{ndvi_info["ndvi_mean"]}</h1>'
-                    f'<p>std = {ndvi_info["ndvi_std"]}</p></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="metric-box"><h3>📏 Dynamic Range</h3><h1>{ndvi_info["data_range"]}</h1>'
-                    f'<p>P5={ndvi_info["ndvi_p5"]} | P95={ndvi_info["ndvi_p95"]}</p></div>',
-                    unsafe_allow_html=True)
-        c4.markdown(f'<div class="metric-box"><h3>🔁 Cadence</h3><h1>{ndvi_info["cadence_d"]:.0f}d</h1>'
-                    f'<p>Max gap threshold: {ndvi_info["max_gap_d"]}d</p></div>', unsafe_allow_html=True)
+        st.markdown('<p class="section-title">Your Uploaded Data</p>', unsafe_allow_html=True)
 
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(
+            f'<div class="metric-card"><div class="label">📅 Year Range</div>'
+            f'<div class="value">{ndvi_info["year_range"]}</div>'
+            f'<div class="sub">{ndvi_info["n_obs"]} NDVI observations</div></div>',
+            unsafe_allow_html=True)
+        c2.markdown(
+            f'<div class="metric-card"><div class="label">🌿 Mean NDVI</div>'
+            f'<div class="value">{ndvi_info["ndvi_mean"]}</div>'
+            f'<div class="sub">std = {ndvi_info["ndvi_std"]}</div></div>',
+            unsafe_allow_html=True)
+        c3.markdown(
+            f'<div class="metric-card"><div class="label">📏 NDVI Range</div>'
+            f'<div class="value">{ndvi_info["data_range"]}</div>'
+            f'<div class="sub">P5 = {ndvi_info["ndvi_p5"]}  ·  P95 = {ndvi_info["ndvi_p95"]}</div></div>',
+            unsafe_allow_html=True)
+        c4.markdown(
+            f'<div class="metric-card"><div class="label">🔁 Observation Cadence</div>'
+            f'<div class="value">{ndvi_info["cadence_d"]:.0f} days</div>'
+            f'<div class="sub">Auto-detected from file</div></div>',
+            unsafe_allow_html=True)
+
+        st.markdown("")
         fig_ds = plot_data_summary(ndvi_info, met_info)
         st.pyplot(fig_ds, use_container_width=True)
 
-        st.markdown("---")
-        st.markdown("#### 🗂️ Available Met Parameters (from your file)")
+        st.markdown('<p class="section-title">Climate Parameters Available</p>', unsafe_allow_html=True)
         if met_info:
             met_summary_df = pd.DataFrame([
-                {'Parameter': p, 'Mean': round(v['mean'], 3), 'Std': round(v['std'], 3),
+                {'Parameter': p, 'Mean': round(v['mean'], 3), 'Std Dev': round(v['std'], 3),
                  'Min': round(v['min'], 3), 'Max': round(v['max'], 3)}
                 for p, v in met_info.items()
             ])
-            st.dataframe(met_summary_df.style.background_gradient(subset=['Mean'], cmap='Blues'),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(
+                met_summary_df.style.background_gradient(subset=['Mean'], cmap='Greens'),
+                use_container_width=True, hide_index=True)
+        if derived:
+            st.markdown(
+                f'<div class="banner-info">ℹ️ In addition to the {len(raw_params)} parameters in your file, '
+                f'<b>{len(derived)} derived variables</b> were computed automatically '
+                f'(e.g. Growing Degree Days, log-rainfall, seasonal cumulative values). '
+                f'These are included in the model feature pool.</div>',
+                unsafe_allow_html=True)
 
-    # ══ TAB 1 — TRAINING ══════════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    # TAB 2 — SEASON EXTRACTION & MODELS
+    # ══════════════════════════════════════════════════════════
     with tab2:
-        st.markdown("### 🔬 Phenology Extraction & Model Training")
-        st.markdown(
-            '<div class="data-box"><b>Data-driven extraction:</b> cadence, amplitude threshold, '
-            'trough spacing, and minimum amplitude are all computed from your NDVI file. '
-            'No forest-type presets are applied.</div>', unsafe_allow_html=True)
+        st.markdown('<p class="section-title">Extracting Seasonal Events from NDVI</p>',
+                    unsafe_allow_html=True)
 
-        with st.spinner("Extracting phenology from data…"):
+        with st.spinner("Analysing NDVI time series…"):
             pheno_df, pheno_err = extract_phenology(ndvi_df, cfg, sos_thr, eos_thr)
 
         if pheno_df is None:
-            st.error(f"❌ {pheno_err}"); return
+            st.error(f"Could not detect seasons: {pheno_err}"); return
         n_seasons = len(pheno_df)
 
-        # ── Data quality badge — warn instead of crash ──────────────────────
+        # Dataset size guidance
         if n_seasons == 0:
-            st.error("❌ No complete seasons found — try reducing Min Season Length or adjusting the growing window."); return
+            st.error("No complete seasons found. Try reducing the minimum season length, "
+                     "or adjust the growing season window months."); return
         elif n_seasons == 1:
-            st.warning("⚠️ Only **1 season** extracted — phenology chart is shown but **modelling needs ≥ 2 seasons**. Upload more years of data to enable predictions.")
+            st.warning("Only **1 season** was extracted. The NDVI chart is shown below, "
+                       "but model training requires at least 2 seasons. "
+                       "Add more years of data to enable predictions.")
         elif n_seasons == 2:
-            st.warning("⚠️ **2 seasons** — models will attempt to fit but results are **not statistically reliable**. Treat as exploratory only. Collect ≥ 5 years for reliable R².")
+            st.warning("**2 seasons** extracted — model results are exploratory only. "
+                       "With just 2 data points, statistical reliability is limited. "
+                       "We recommend collecting at least 5 years of data.")
         elif n_seasons <= 4:
-            st.info(
-                f"ℹ️ **{n_seasons} seasons detected** — small dataset mode activated automatically:\n"
-                f"- Correlation threshold lowered to **0.25** (from {MIN_CORR_THRESHOLD}) to find best available features\n"
-                f"- Max features limited to **1** to prevent overfitting\n"
-                f"- Unstable models (Poly-3, GPR) auto-switched to **Ridge**\n"
-                f"- Results are indicative — ≥ 5 seasons needed for reliable R²"
-            )
+            st.info(f"**{n_seasons} seasons** extracted — small dataset. "
+                    f"Results are indicative. At least 5 seasons are recommended for reliable predictions.")
         elif n_seasons < 7:
-            st.info(f"ℹ️ **{n_seasons} seasons** — usable dataset. R² 0.3–0.6 is realistic at this sample size.")
+            st.info(f"**{n_seasons} seasons** extracted — usable dataset. "
+                    "Predictions are available. More years will further improve accuracy.")
         else:
-            st.success(f"✅ **{n_seasons} growing seasons** — good dataset. Model estimates are reliable.")
+            st.success(f"✅ **{n_seasons} growing seasons** extracted — good dataset for modelling.")
 
-        # Show extracted amplitudes (fully data-derived)
-        amp_stats = pheno_df['Amplitude'].describe()
-        st.markdown(
-            f'<div class="data-box">Data-derived NDVI amplitude: '
-            f'mean = <b>{amp_stats["mean"]:.3f}</b>, '
-            f'min = <b>{amp_stats["min"]:.3f}</b>, '
-            f'max = <b>{amp_stats["max"]:.3f}</b> — '
-            f'MIN_AMPLITUDE threshold = <b>{compute_data_driven_min_amplitude(ndvi_df["NDVI"].dropna().values):.3f}</b></div>',
-            unsafe_allow_html=True)
-
+        # Phenology chart + table
         c_left, c_right = st.columns([2, 1])
         with c_left:
             st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df,
                                           season_window=(start_m, end_m),
                                           interp_freq=interp_freq))
         with c_right:
-            st.markdown("**Extracted phenology:**")
+            st.markdown("**Extracted season dates**")
             disp = []
             for _, row in pheno_df.iterrows():
                 sd = row.get('SOS_Date'); pd_ = row.get('POS_Date'); ed = row.get('EOS_Date')
                 disp.append({
-                    'Year': int(row['Year']),
-                    'SOS': pd.Timestamp(sd).strftime('%b %d') if pd.notna(sd) else '—',
-                    'SOS_DOY': int(row.get('SOS_DOY', 0)),
-                    'POS': pd.Timestamp(pd_).strftime('%b %d') if pd.notna(pd_) else '—',
-                    'POS_DOY': int(row.get('POS_DOY', 0)),
-                    'EOS': pd.Timestamp(ed).strftime('%b %d %Y') if pd.notna(ed) else '—',
-                    'LOS (d)': int(row.get('LOS_Days', 0)),
-                    'Peak NDVI': round(float(row.get('Peak_NDVI', 0)), 3),
-                    'Amplitude': round(float(row.get('Amplitude', 0)), 3),
+                    'Year':       int(row['Year']),
+                    'SOS':        pd.Timestamp(sd).strftime('%b %d') if pd.notna(sd) else '—',
+                    'DOY':        int(row.get('SOS_DOY', 0)),
+                    'POS':        pd.Timestamp(pd_).strftime('%b %d') if pd.notna(pd_) else '—',
+                    'DOY.1':      int(row.get('POS_DOY', 0)),
+                    'EOS':        pd.Timestamp(ed).strftime('%b %d %Y') if pd.notna(ed) else '—',
+                    'LOS (days)': int(row.get('LOS_Days', 0)),
+                    'Peak NDVI':  round(float(row.get('Peak_NDVI', 0)), 3),
                 })
-            st.dataframe(pd.DataFrame(disp), use_container_width=True, height=320)
+            st.dataframe(pd.DataFrame(disp), use_container_width=True, height=300)
 
         fig_t = plot_pheno_trends(pheno_df)
         st.pyplot(fig_t)
 
-        # ── TRAIN ─────────────────────────────────────────────
-        with st.spinner(f"Building features & fitting {model_sel}…"):
+        # ── MODEL TRAINING ────────────────────────────────────
+        st.markdown('<p class="section-title">Predictive Model Training</p>', unsafe_allow_html=True)
+
+        with st.spinner(f"Training {model_sel} models…"):
             train_df  = make_training_features(pheno_df, met_df, all_params, window=feat_window)
             predictor = UniversalPredictor()
             predictor.train(train_df, all_params, model_key=model_key)
@@ -2266,57 +2318,72 @@ from your data's own correlations.
             'interp_freq': interp_freq,
         })
 
-        st.markdown("---")
-        st.markdown(f"### 📊 Model Performance (LOO R²) — {model_sel}")
+        st.markdown(
+            f"The table below shows how well each model predicts the event date "
+            f"(validated by leaving one season out at a time — **Leave-One-Out cross-validation**).")
+
         c1, c2, c3 = st.columns(3)
 
         def _card(col, ev):
+            ev_full = {'SOS':'Start of Season','POS':'Peak of Season','EOS':'End of Season'}
             n_ev = predictor.n_seasons.get(ev, 0)
             if ev not in predictor._fits:
-                msg = "Need ≥ 2 seasons" if n_ev < 2 else "No features passed |r| threshold"
-                col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
-                             f'<h1 style="color:#607D8B">—</h1><p>{msg}<br>n={n_ev} season(s)</p></div>',
-                             unsafe_allow_html=True); return
+                msg = ("Need ≥ 2 seasons to train a model." if n_ev < 2
+                       else "No climate variable was correlated strongly enough.")
+                col.markdown(
+                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="value" style="color:#9E9E9E;font-size:1.3rem">Not fitted</div>'
+                    f'<div class="sub">{msg}<br>{n_ev} season(s) available</div></div>',
+                    unsafe_allow_html=True); return
             fit  = predictor._fits[ev]
             r2   = predictor.r2.get(ev, 0)
             mae  = predictor.mae.get(ev, 0)
             n    = predictor.n_seasons.get(ev, 0)
             if fit['mode'] == 'mean':
-                col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
-                             f'<h1 style="color:#607D8B">0.0%</h1>'
-                             f'<p>No feature |r|≥{MIN_CORR_THRESHOLD}<br>'
-                             f'Prediction = mean ≈ {fit["mean_doy"]:.0f} days<br>'
-                             f'MAE = ±{mae:.1f} d</p></div>', unsafe_allow_html=True)
+                col.markdown(
+                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="value" style="color:#9E9E9E">Mean only</div>'
+                    f'<div class="sub">No climate variable met the correlation threshold.<br>'
+                    f'Prediction = historical average ≈ DOY {fit["mean_doy"]:.0f}<br>'
+                    f'Typical error: ±{mae:.1f} days</div></div>', unsafe_allow_html=True)
             else:
-                clr  = '#1B5E20' if r2 > 0.6 else '#E65100' if r2 > 0.3 else '#B71C1C'
+                clr = '#1B5E20' if r2 > 0.6 else '#E65100' if r2 > 0.3 else '#B71C1C'
                 feats = fit.get('features', [])
                 mtag  = {'ridge':'Ridge','loess':'LOESS','poly2':'Poly-2',
-                         'poly3':'Poly-3','gpr':'GPR'}.get(fit.get('model_key','ridge'), '?')
-                col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
-                             f'<h1 style="color:{clr}">{r2*100:.1f}%</h1>'
-                             f'<p>{mtag} | LOO | {n} seasons<br>'
-                             f'<b>{len(feats)} feature(s):</b> {", ".join(feats) or "—"}<br>'
-                             f'Best |r|={fit["best_r"]:.3f} | MAE=±{mae:.1f} d</p></div>',
-                             unsafe_allow_html=True)
+                         'poly3':'Poly-3','gpr':'Gaussian Process'}.get(fit.get('model_key','ridge'), '—')
+                col.markdown(
+                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="value" style="color:{clr}">{r2*100:.1f}%</div>'
+                    f'<div class="sub">Accuracy (R²) · {mtag} · {n} seasons<br>'
+                    f'Driver(s): <b>{", ".join(feats) or "—"}</b><br>'
+                    f'Typical error: ±{mae:.1f} days</div></div>',
+                    unsafe_allow_html=True)
 
         _card(c1, 'SOS'); _card(c2, 'POS'); _card(c3, 'EOS')
 
-        if n_seasons < 2:
-            st.markdown('<div class="warn-box">⚠️ Only <b>1 season</b> — cannot train models. Add more years of data.</div>', unsafe_allow_html=True)
-        elif n_seasons < 4:
-            st.markdown(f'<div class="warn-box">⚠️ <b>{n_seasons} seasons</b> — very small dataset. '
-                        f'R² values shown are <b>indicative only</b> — not statistically reliable. '
-                        f'Collect ≥5 years for trustworthy models.</div>', unsafe_allow_html=True)
+        if n_seasons < 4:
+            st.markdown(
+                '<div class="banner-warn">⚠️ With fewer than 4 seasons, accuracy scores (R²) '
+                'should be treated as indicative only. Collect more years of data for reliable predictions.</div>',
+                unsafe_allow_html=True)
         elif n_seasons < 7:
-            st.markdown(f'<div class="info-box">ℹ️ <b>{n_seasons} seasons</b> — usable dataset. '
-                        f'R² 0.3–0.6 is realistic at this sample size.</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="banner-info">ℹ️ With {n_seasons} seasons, an R² of 0.3–0.6 is typical. '
+                f'More years will improve model reliability.</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="good-box">✅ <b>{n_seasons} seasons</b> — good dataset. Model estimates are reliable.</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="banner-good">✅ {n_seasons} seasons — sufficient data for reliable modelling.</div>',
+                unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("### 📐 Fitted Equations (data-derived coefficients)")
+        # Fitted equations
+        st.markdown('<p class="section-title">Model Equations</p>', unsafe_allow_html=True)
+        st.caption(
+            "Each equation shows the relationship between the best climate predictor and the event date, "
+            "expressed as days from the start of the season window.")
         t_sos, t_pos, t_eos = st.tabs(
-            [f"{icons['SOS']} SOS", f"{icons['POS']} POS", f"{icons['EOS']} EOS"])
+            [f"{icons['SOS']} Start of Season (SOS)",
+             f"{icons['POS']} Peak of Season (POS)",
+             f"{icons['EOS']} End of Season (EOS)"])
         for ui_tab, ev in zip([t_sos, t_pos, t_eos], ['SOS', 'POS', 'EOS']):
             with ui_tab:
                 eq   = predictor.equation_str(ev, season_start_month=start_m)
@@ -2338,122 +2405,140 @@ from your data's own correlations.
 
         fig_s = plot_obs_vs_pred(predictor, train_df)
         if fig_s:
-            st.markdown("---"); st.markdown("### 📉 Observed vs Predicted")
+            st.markdown('<p class="section-title">Observed vs Predicted</p>', unsafe_allow_html=True)
+            st.caption("Each point is one historical season. The closer points are to the diagonal line, "
+                       "the more accurate the model.")
             st.pyplot(fig_s)
 
-        st.markdown("---")
         # Downloads
+        st.markdown("---")
         dl_cols = [c for c in ['Year','SOS_DOY','POS_DOY','EOS_DOY','LOS_Days',
                                 'Peak_NDVI','Amplitude','Base_NDVI','SOS_Date',
                                 'POS_Date','EOS_Date'] if c in pheno_df.columns]
         coef_df = predictor.export_coefficients(season_start_month=start_m)
         col_d1, col_d2 = st.columns(2)
-        col_d1.download_button("📥 Phenology Table (CSV)",
+        col_d1.download_button("📥 Download Phenology Table (CSV)",
                                pheno_df[dl_cols].to_csv(index=False),
-                               "phenology_extracted.csv", "text/csv")
-        col_d2.download_button("📥 Model Coefficients (CSV)",
+                               "phenology_table.csv", "text/csv")
+        col_d2.download_button("📥 Download Model Coefficients (CSV)",
                                coef_df.to_csv(index=False),
                                "model_coefficients.csv", "text/csv")
 
-    # ══ TAB 2 — CORRELATIONS ══════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    # TAB 3 — CLIMATE CORRELATIONS
+    # ══════════════════════════════════════════════════════════
     with tab3:
-        st.markdown("### 📈 Feature Correlations & Meteorological Plots")
+        st.markdown('<p class="section-title">Which Climate Variables Drive Each Seasonal Event?</p>',
+                    unsafe_allow_html=True)
         predictor_ss = st.session_state.get('predictor')
         pheno_df_ss  = st.session_state.get('pheno_df')
         if predictor_ss is None:
-            st.info("Train models first — upload files and visit 🔬 Training tab.")
-        else:
-            fig_c = plot_correlation_summary(predictor_ss)
-            if fig_c:
-                st.pyplot(fig_c, use_container_width=True)
+            st.info("Complete the Season Extraction step first (🔬 Season Extraction & Models tab)."); return
 
-            st.markdown("---")
-            st.markdown("#### 📋 Detailed Correlation Tables")
-            c1, c2, c3 = st.columns(3)
-            for col_st, ev in zip([c1, c2, c3], ['SOS', 'POS', 'EOS']):
-                with col_st:
-                    st.markdown(f"**{icons[ev]} {ev}**")
-                    ct = predictor_ss.corr_tables.get(ev)
-                    if ct is not None and len(ct):
-                        disp = ct[['Feature','Pearson_r',
-                                   'Spearman_rho' if 'Spearman_rho' in ct.columns else '|r|',
-                                   'Composite']].copy()
-                        disp = disp.rename(columns={'Pearson_r':'Pearson r','Spearman_rho':'Spearman ρ'})
-                        sty  = disp.style.background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
-                        if 'Spearman ρ' in disp.columns:
-                            sty = sty.background_gradient(subset=['Spearman ρ'], cmap='RdYlGn', vmin=-1, vmax=1)
-                        if 'Composite' in disp.columns:
-                            sty = sty.background_gradient(subset=['Composite'], cmap='Greens', vmin=0, vmax=1)
-                        sty = sty.format({'Pearson r':'{:+.3f}','Spearman ρ':'{:+.3f}','Composite':'{:.3f}'} if 'Spearman ρ' in disp.columns else {'Pearson r':'{:+.3f}','Composite':'{:.3f}'})
-                        st.dataframe(sty, use_container_width=True, hide_index=True, height=320)
-                    else:
-                        st.info("No data.")
+        fig_c = plot_correlation_summary(predictor_ss)
+        if fig_c:
+            st.pyplot(fig_c, use_container_width=True)
 
-            st.markdown("---")
-            st.markdown("#### 📈 NDVI + Met — Year-by-Year")
-            _met  = st.session_state.get('met_df')
-            _ndvi = st.session_state.get('ndvi_df')
-            _rp   = st.session_state.get('raw_params', [])
-            _if   = st.session_state.get('interp_freq', 5)
-            if _met is not None and _ndvi is not None:
-                figs_l = plot_met_with_ndvi(_met, _ndvi, _rp, pheno_df_ss, interp_freq=_if)
-                if figs_l:
-                    for s_lbl, f_m in figs_l:
-                        st.markdown(f"**Season {s_lbl}**")
-                        st.pyplot(f_m, use_container_width=True); plt.close(f_m)
+        st.markdown('<p class="section-title">Full Correlation Table</p>', unsafe_allow_html=True)
+        st.caption(
+            "Pearson r and Spearman ρ measure the linear and rank correlation between each "
+            "climate variable and the event date. Values range from −1 to +1. "
+            "A positive value means higher climate values → later event. "
+            "Variables marked ✅ were used in the model.")
+        c1, c2, c3 = st.columns(3)
+        for col_st, ev in zip([c1, c2, c3], ['SOS', 'POS', 'EOS']):
+            with col_st:
+                ev_full = {'SOS':'Start of Season','POS':'Peak','EOS':'End of Season'}
+                st.markdown(f"**{icons[ev]} {ev_full[ev]}**")
+                ct = predictor_ss.corr_tables.get(ev)
+                if ct is not None and len(ct):
+                    disp = ct[['Feature','Pearson_r',
+                               'Spearman_rho' if 'Spearman_rho' in ct.columns else '|r|',
+                               'Composite']].copy()
+                    disp = disp.rename(columns={'Pearson_r':'Pearson r','Spearman_rho':'Spearman ρ'})
+                    sty  = disp.style.background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
+                    if 'Spearman ρ' in disp.columns:
+                        sty = sty.background_gradient(subset=['Spearman ρ'], cmap='RdYlGn', vmin=-1, vmax=1)
+                    if 'Composite' in disp.columns:
+                        sty = sty.background_gradient(subset=['Composite'], cmap='Greens', vmin=0, vmax=1)
+                    sty = sty.format({'Pearson r':'{:+.3f}','Spearman ρ':'{:+.3f}','Composite':'{:.3f}'}
+                                     if 'Spearman ρ' in disp.columns else
+                                     {'Pearson r':'{:+.3f}','Composite':'{:.3f}'})
+                    st.dataframe(sty, use_container_width=True, hide_index=True, height=320)
                 else:
-                    st.info("No complete seasons in data window.")
+                    st.info("No correlation data available.")
 
-    # ══ TAB 3 — PREDICT ═══════════════════════════════════════
+        st.markdown('<p class="section-title">NDVI and Climate — Year by Year</p>',
+                    unsafe_allow_html=True)
+        st.caption("Each chart shows NDVI (green fill) alongside your climate variables "
+                   "for one growing season.")
+        _met  = st.session_state.get('met_df')
+        _ndvi = st.session_state.get('ndvi_df')
+        _rp   = st.session_state.get('raw_params', [])
+        _if   = st.session_state.get('interp_freq', 5)
+        if _met is not None and _ndvi is not None:
+            figs_l = plot_met_with_ndvi(_met, _ndvi, _rp, pheno_df_ss, interp_freq=_if)
+            if figs_l:
+                for s_lbl, f_m in figs_l:
+                    st.markdown(f"**Season {s_lbl}**")
+                    st.pyplot(f_m, use_container_width=True); plt.close(f_m)
+            else:
+                st.info("No complete seasons with overlapping climate data found.")
+
+    # ══════════════════════════════════════════════════════════
+    # TAB 4 — PREDICT
+    # ══════════════════════════════════════════════════════════
     with tab4:
-        st.markdown("### 🔮 Predict SOS / POS / EOS for Any Year")
+        st.markdown('<p class="section-title">Predict Phenology Dates for Any Year</p>',
+                    unsafe_allow_html=True)
         predictor_ss = st.session_state.get('predictor')
         train_df_ss  = st.session_state.get('train_df')
         pheno_ss     = st.session_state.get('pheno_df')
         if predictor_ss is None:
-            st.info("Train models first (🔬 Training tab)."); return
+            st.info("Complete the Season Extraction step first (🔬 Season Extraction & Models tab)."); return
 
         st.markdown(
-            '<div class="data-box"><b>Inputs below are pre-filled with training data means.</b> '
-            'Edit any value to simulate a different climate scenario. '
-            'All defaults are data-derived — no hardcoded values.</div>',
+            '<div class="banner-info">Enter the expected climate conditions for your target year. '
+            'Values are pre-filled with historical averages from your training data as a starting point. '
+            'Adjust them to match forecast or scenario conditions.</div>',
             unsafe_allow_html=True)
 
         mo = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
               7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
         ev_colors_hex  = {'SOS': '#E8F5E9', 'POS': '#E3F2FD', 'EOS': '#FFF3E0'}
         ev_border_hex  = {'SOS': '#2E7D32', 'POS': '#1565C0', 'EOS': '#E65100'}
-        ev_labels_full = {'SOS': '🌱 SOS — Green-up start',
-                          'POS': '🌿 POS — Peak greenness',
-                          'EOS': '🍂 EOS — Senescence end'}
+        ev_labels_full = {'SOS': '🌱 Start of Season (SOS)',
+                          'POS': '🌿 Peak of Season (POS)',
+                          'EOS': '🍂 End of Season (EOS)'}
         ev_inputs = {ev: {} for ev in ['SOS', 'POS', 'EOS']}
 
+        any_model = False
         for ev in ['SOS', 'POS', 'EOS']:
             fit = predictor_ss._fits.get(ev, {})
-            if not fit or fit.get('mode') not in ('ridge', 'loess', 'poly2', 'poly3', 'gpr'):
+            if not fit or fit.get('mode') not in ('ridge','loess','poly2','poly3','gpr'):
                 continue
             feats = fit.get('features', [])
             if not feats:
                 continue
+            any_model = True
             r2  = predictor_ss.r2.get(ev, 0)
             mae = predictor_ss.mae.get(ev, 0)
-            eq_short = predictor_ss.equation_str(ev, season_start_month=start_m).split('\n')[0]
 
-            # Data-derived historical hint
             hist_hint = ""
             if pheno_ss is not None and f'{ev}_Date' in pheno_ss.columns:
                 ev_dates = pheno_ss[f'{ev}_Date'].dropna()
                 if len(ev_dates) > 0:
                     med_m = int(ev_dates.dt.month.median())
                     med_d = int(ev_dates.dt.day.median())
-                    hist_hint = f"  |  Historically ~{mo[med_m]} {med_d} (data-derived, ±{mae:.0f} d MAE)"
+                    hist_hint = f" · Historically around {mo[med_m]} {med_d} (±{mae:.0f} days)"
 
             st.markdown(
                 f"<div style='background:{ev_colors_hex[ev]};padding:14px 18px;border-radius:10px;"
-                f"border-left:5px solid {ev_border_hex[ev]};margin:10px 0'>"
-                f"<b>{ev_labels_full[ev]}</b>&nbsp;&nbsp;"
-                f"<span style='font-size:0.82rem;color:#555'>R²(LOO)={r2:.3f} | MAE=±{mae:.1f}d{hist_hint}</span><br>"
-                f"<code style='font-size:0.78rem'>{eq_short}</code></div>", unsafe_allow_html=True)
+                f"border-left:4px solid {ev_border_hex[ev]};margin:10px 0'>"
+                f"<b>{ev_labels_full[ev]}</b>"
+                f"<span style='font-size:0.82rem;color:#666'>&nbsp;&nbsp;"
+                f"Model accuracy (R²) = {r2:.0%}{hist_hint}</span></div>",
+                unsafe_allow_html=True)
 
             col_list = st.columns(min(len(feats), 4))
             for idx, f in enumerate(feats):
@@ -2464,7 +2549,6 @@ from your data's own correlations.
                     if len(vals):
                         default = float(vals.mean())
                 is_sum = any(k in f.upper() for k in ACCUM_KEYWORDS)
-                # Determine value range from training data
                 vmin = vmax = None
                 if train_df_ss is not None and f in train_df_ss.columns:
                     col_vals = train_df_ss[f].dropna()
@@ -2475,15 +2559,23 @@ from your data's own correlations.
                     ev_inputs[ev][f] = st.number_input(
                         f"{f}  [{ev}]", value=round(default, 3), format="%.3f",
                         key=f"inp_{ev}_{f}",
-                        help=(f"{'15-day sum' if is_sum else f'{feat_window}-day mean'} of {f} "
-                              f"before expected {ev}.\n"
-                              f"Training mean: {default:.3f}"
-                              + (f" | range: [{vmin:.2f}, {vmax:.2f}]" if vmin is not None else "")))
+                        help=(f"{'Total (sum)' if is_sum else f'{feat_window}-day average'} of {f} "
+                              f"before the expected {ev} date.\n"
+                              f"Historical mean: {default:.3f}"
+                              + (f" | range in data: [{vmin:.2f} – {vmax:.2f}]" if vmin is not None else "")))
+
+        if not any_model:
+            st.markdown(
+                '<div class="banner-warn">⚠️ No predictive models could be fitted — '
+                'not enough seasons or no climate variable showed sufficient correlation. '
+                'Upload more years of data to enable predictions.</div>',
+                unsafe_allow_html=True)
+            return
 
         st.markdown("---")
-        pred_year = st.number_input("Prediction year", 2020, 2050, 2026)
+        pred_year = st.number_input("Year to predict for", 2020, 2050, 2026)
 
-        if st.button("🚀 Predict Phenology Events", type="primary"):
+        if st.button("▶  Run Prediction", type="primary"):
             results = {}
             for ev in ['SOS', 'POS', 'EOS']:
                 res = predictor_ss.predict(ev_inputs.get(ev, {}), ev, pred_year,
@@ -2492,7 +2584,6 @@ from your data's own correlations.
                     results[ev] = res
 
             if results:
-                # Ecological order correction (data-driven fallback values)
                 order_warns = []
                 if 'SOS' in results and 'POS' in results:
                     if results['POS']['rel_days'] <= results['SOS']['rel_days']:
@@ -2503,7 +2594,7 @@ from your data's own correlations.
                         nd = datetime(pred_year, start_m, 1) + timedelta(days=corrected)
                         results['POS'].update({'rel_days': corrected,
                                                'doy': nd.timetuple().tm_yday, 'date': nd})
-                        order_warns.append(f"⚠️ **POS** before SOS — corrected to ~{nd.strftime('%b %d')}")
+                        order_warns.append(f"Peak was predicted before start — adjusted to ~{nd.strftime('%b %d')}")
                 if 'POS' in results and 'EOS' in results:
                     if results['EOS']['rel_days'] <= results['POS']['rel_days']:
                         fb = (int(round(pheno_ss['EOS_Target'].mean()))
@@ -2513,142 +2604,158 @@ from your data's own correlations.
                         nd = datetime(pred_year, start_m, 1) + timedelta(days=corrected)
                         results['EOS'].update({'rel_days': corrected,
                                                'doy': nd.timetuple().tm_yday, 'date': nd})
-                        order_warns.append(f"⚠️ **EOS** before POS — corrected to ~{nd.strftime('%b %d')}")
+                        order_warns.append(f"End was predicted before peak — adjusted to ~{nd.strftime('%b %d')}")
                 if order_warns:
-                    st.markdown('<div class="warn-box"><b>Ecological order correction (data-derived fallback):</b><br>'
-                                + '<br>'.join(order_warns) + '</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="banner-warn"><b>Note:</b> ' +
+                        ' · '.join(order_warns) + '</div>', unsafe_allow_html=True)
 
                 cols = st.columns(len(results))
                 for col, (ev, res) in zip(cols, results.items()):
-                    col.markdown(f'<div class="metric-box"><h3>{icons[ev]} {ev}</h3>'
-                                 f'<h1>{res["date"].strftime("%b %d")}</h1>'
-                                 f'<p>DOY {res["doy"]} of {res["date"].year}<br>'
-                                 f'R²(LOO)={res["r2"]:.3f}<br>MAE=±{res["mae"]:.1f} d</p></div>',
-                                 unsafe_allow_html=True)
+                    ev_full = {'SOS':'Start of Season','POS':'Peak of Season','EOS':'End of Season'}
+                    col.markdown(
+                        f'<div class="metric-card"><div class="label">{icons[ev]} {ev_full[ev]}</div>'
+                        f'<div class="value">{res["date"].strftime("%b %d")}</div>'
+                        f'<div class="sub">Day {res["doy"]} of {res["date"].year}<br>'
+                        f'Model accuracy (R²) = {res["r2"]:.0%}<br>'
+                        f'Typical error: ±{res["mae"]:.0f} days</div></div>',
+                        unsafe_allow_html=True)
 
                 if 'SOS' in results and 'EOS' in results:
                     sd = results['SOS']['date']; ed = results['EOS']['date']
                     los = (ed - sd).days if ed >= sd else (ed - sd).days + 365
                     st.markdown("---")
                     mc1, mc2, mc3 = st.columns(3)
-                    mc1.metric("📏 LOS", f"{los} days")
+                    mc1.metric("📏 Season Length", f"{los} days")
                     if 'POS' in results:
-                        mc2.metric("🌱→🌿 SOS→POS", f"{(results['POS']['date']-results['SOS']['date']).days} d")
-                        mc3.metric("🌿→🍂 POS→EOS", f"{(results['EOS']['date']-results['POS']['date']).days} d")
+                        mc2.metric("Green-up phase (SOS → POS)",
+                                   f"{(results['POS']['date']-results['SOS']['date']).days} days")
+                        mc3.metric("Senescence phase (POS → EOS)",
+                                   f"{(results['EOS']['date']-results['POS']['date']).days} days")
 
                 out = pd.DataFrame({
-                    'Event': list(results.keys()),
-                    'Date':  [r['date'].strftime('%Y-%m-%d') for r in results.values()],
-                    'DOY':   [r['doy'] for r in results.values()],
-                    'R2_LOO': [round(r['r2'], 3) for r in results.values()],
-                    'MAE_days': [round(r['mae'], 1) for r in results.values()],
+                    'Event':         list(results.keys()),
+                    'Predicted Date':[r['date'].strftime('%Y-%m-%d') for r in results.values()],
+                    'Day of Year':   [r['doy'] for r in results.values()],
+                    'R² (accuracy)': [round(r['r2'], 3) for r in results.values()],
+                    'Typical error (days)': [round(r['mae'], 1) for r in results.values()],
                 })
-                st.dataframe(out, use_container_width=True)
+                st.dataframe(out, use_container_width=True, hide_index=True)
                 st.download_button("📥 Download Predictions (CSV)", out.to_csv(index=False),
                                    "predictions.csv", "text/csv")
 
-    # ══ TAB 4 — GUIDE ═════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════
+    # TAB 5 — USER GUIDE
+    # ══════════════════════════════════════════════════════════
     with tab5:
-        st.markdown(f"""
-### 📖 Technical Guide — v5 (Data-Driven)
+        st.markdown('<p class="section-title">User Guide</p>', unsafe_allow_html=True)
+
+        st.markdown("""
+This tool analyses the timing of seasonal changes in forest vegetation using satellite NDVI data
+and daily climate records. It is designed for researchers and ecologists studying **forest phenology**
+across any region of India — no configuration for forest type is required.
 
 ---
 
-#### 🎯 Core Design Principle
+### 📘 Key Terms
 
-**Every parameter is governed by the uploaded data.** There are no forest-type presets,
-no hardcoded DOY ranges, no lookup tables by region or species. The same codebase works
-identically for Tropical Dry Deciduous (Tirupati), Alpine meadows (Spiti), Mangroves
-(Sundarbans), or any other ecosystem — because all thresholds are calibrated from the
-data's own statistics.
+**NDVI — Normalised Difference Vegetation Index**
+A satellite-derived measure of vegetation greenness, ranging from 0 (bare soil) to 1 (dense canopy).
+The seasonal rise and fall of NDVI is used to track the timing of green-up and senescence.
 
-| Parameter | Old (hardcoded) | New (data-driven) |
-|-----------|----------------|-------------------|
-| NDVI cadence | assumed 16d | median of observed date diffs |
-| Max gap threshold | fixed 60d | 8× detected cadence |
-| Trough min distance | fixed 145d | 40% of autocorrelation-estimated cycle |
-| MIN_AMPLITUDE | fixed 0.02 | 5% of data's own P5–P95 range |
-| Feature priority | hard list per event | pure Pearson/Spearman ranking |
-| Prediction defaults | mean DOY | mean of training data per feature |
-| Feature window | fixed 15d | user-adjustable sidebar slider |
+**SOS — Start of Season** 🌱
+The date when the forest begins its seasonal green-up. Defined as the date when NDVI first rises above
+a threshold percentage of its annual swing (amplitude).
 
----
+**POS — Peak of Season** 🌿
+The date of maximum greenness in the growing season. Corresponds to the highest NDVI value between SOS and EOS.
 
-#### 🐛 Bug Fixes (v5)
+**EOS — End of Season** 🍂
+The date when NDVI falls back below the same threshold on the descending limb. Marks the end of the active growing period.
 
-**Fix 1 — Missing Season (trough_year instead of pos.year)**
-```python
-# ❌ OLD: yr = pos.year  → two seasons collide when POS falls in same calendar year
-# ✅ NEW:
-trough_year = t_all[ti].year   # always unique per trough-to-trough cycle
-```
+**LOS — Length of Season** 📏
+The number of days between SOS and EOS. A longer LOS means an extended period of active canopy cover.
 
-**Fix 2 — POS aligned to raw NDVI peak**
-```python
-# ❌ OLD: pos_idx = int(np.argmax(cycle_sm))  → smoothed peak may shift ±10d
-# ✅ NEW:
-pos_idx = int(np.nanargmax(cycle_raw))   # exact raw maximum
-```
+**DOY — Day of Year**
+The number of the day within a calendar year (1 = 1 January, 365 = 31 December). Used to express event dates numerically for analysis and plotting.
 
-**Fix 3 (v4) — Gap-tolerant cycle extraction**
-- Tolerates up to 50% missing data when amplitude ≥ 0.10 (seasonal signal clear)
-- Strict 20% threshold for low-amplitude cycles
-
-**Fix 4 (v3) — SG window capped at 31 steps (≈155 days)**
-- Prevents window > one growing season crushing per-cycle amplitude
-
-**Fix 5 (v2) — Plateau trough filter (85% ceiling, skip amp < 0.20)**
-- Fixes missing seasons in high-NDVI evergreen forests
+**Amplitude**
+The difference between the peak NDVI and the baseline NDVI for a given season. Larger amplitude indicates a stronger seasonal signal — typical of deciduous forests.
 
 ---
 
-#### 🌿 Phenology Extraction Steps
+### ⚙️ Controls Explained
 
-| Step | What | How (data-governed) |
-|------|------|---------------------|
-| 1 | Cadence detection | Median of observed date differences |
-| 2 | Gap identification | Gaps > 8× cadence preserved as NaN |
-| 3 | Interpolation | 5-day (adaptive) grid, within-segment only |
-| 4 | SG smoothing | Per-segment, window ≤ 31 steps (≤155d) |
-| 5 | Cycle length | Autocorrelation of smoothed series |
-| 6 | Trough detection | Min distance = 40% of cycle length |
-| 7 | MIN_AMPLITUDE | 5% of data's P5–P95 range |
-| 8 | SOS / EOS threshold | user% × per-cycle amplitude (A) |
-| 9 | POS | Raw NDVI maximum between SOS and EOS |
-| 10 | Season year | Trough start year (not POS year) |
+| Control | What it does |
+|---|---|
+| **Growing Season Window** | Sets the calendar period searched for each season. Set Start to the month of lowest NDVI (trough) and End to one month before that the following year. |
+| **Minimum Season Length** | Seasons shorter than this are ignored. Increase if the NDVI chart shows spurious short cycles. Decrease if true seasons are being missed. |
+| **SOS / EOS Threshold** | The percentage of each season's NDVI amplitude at which green-up is considered to have started or ended. 10% is a common default. Lower values give earlier SOS / later EOS. |
+| **Climate Window** | How many days before each event date to average the climate data when building the predictive model. |
+| **Prediction Model** | The statistical method used to link climate variables to event dates. Ridge Regression is recommended for small datasets. |
 
 ---
 
-#### 📊 Feature Selection (data-driven)
+### 📊 Understanding Model Accuracy (R²)
 
-1. Compute Pearson r and Spearman ρ for all met features vs each event DOY
-2. Keep features with composite (max |r|, |ρ|) ≥ {MIN_CORR_THRESHOLD}
-3. Remove collinear pairs (|r_pair| > 0.85) — keep highest-correlation member
-4. Forward selection: add features that improve LOO R² by ≥ 0.03
-5. No priority list, no event-specific exclude list — purely data-driven
+R² measures what fraction of the year-to-year variation in an event date is explained by climate.
 
----
+| R² | Interpretation |
+|---|---|
+| > 0.80 | Strong — climate is a good predictor of this event |
+| 0.50 – 0.80 | Good |
+| 0.30 – 0.50 | Moderate — some predictive signal present |
+| < 0.30 | Weak — more years of data or different predictors may help |
 
-#### 📉 R² (LOO) Interpretation
-
-| R² | Meaning |
-|----|---------|
-| > 0.80 | Strong predictive power |
-| 0.50–0.80 | Good |
-| 0.30–0.50 | Moderate |
-| < 0.30 | Weak — collect more years |
+The error figure shown (±X days) is the typical difference between the model's prediction and the actual
+historical date. This is evaluated using **Leave-One-Out cross-validation**: each season is predicted
+using all other seasons, giving an honest estimate of out-of-sample accuracy.
 
 ---
 
-#### 📦 Research Use
+### 📂 Data Format Requirements
 
-This tool is designed for publication-quality phenology analysis:
-- All parameters reported are data-derived and reproducible
-- Model coefficients are exportable (CSV download in Training tab)
-- LOO cross-validation provides honest out-of-sample R² for small samples
-- Amplitude-based thresholds are per-cycle, not global — correct for inter-annual variation
+**NDVI file:**
+- Any CSV with a date column and an NDVI column
+- Column names are detected automatically (e.g. `date`, `Date`, `DATE`, `ndvi`, `NDVI`)
+- Dates can be in any standard format: `YYYY-MM-DD`, `DD-MM-YY`, `MM/DD/YYYY`, etc.
+- Typical sources: MODIS MOD13A2 / MYD13A2, Sentinel-2, Landsat time series
+
+**Meteorological file:**
+- Daily CSV from [NASA POWER](https://power.larc.nasa.gov/data-access-viewer/) or your own source
+- Column names such as `T2M` (temperature), `PRECTOTCORR` (rainfall), `RH2M` (humidity), `ALLSKY_SFC_SW_DWN` (radiation) are recognised automatically
+- Derived variables (Growing Degree Days, log-rainfall, seasonal cumulative values) are computed automatically from what is available
+
+---
+
+### 📋 How Many Years of Data Are Needed?
+
+| Years available | What the tool can do |
+|---|---|
+| 1 year | Shows NDVI chart and season dates only |
+| 2 years | Fits basic models — treat results as exploratory |
+| 3 – 4 years | Models available with caution — indicative only |
+| 5 – 9 years | Reliable models and predictions |
+| 10+ years | Best results — strong statistical reliability |
+
+---
+
+### 📥 Outputs Available
+
+- **Phenology Table** — SOS, POS, EOS dates and Day of Year for each season (CSV download)
+- **Model Coefficients** — Fitted equation parameters for reproducible reporting (CSV download)
+- **Prediction Results** — Forecast dates for a target year (CSV download)
+- **Correlation Table** — Ranked climate variables with Pearson r and Spearman ρ (displayed in Climate Correlations tab)
+
         """)
 
+
+if __name__ == "__main__":
+    for k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params',
+              'ndvi_df','ndvi_info','met_info','interp_freq','_fp']:
+        if k not in st.session_state:
+            st.session_state[k] = None
+    main()
 
 if __name__ == "__main__":
     for k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params',
