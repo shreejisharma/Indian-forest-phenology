@@ -589,6 +589,35 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         # A 0.05 floor incorrectly discards those seasons entirely.
         MIN_AMPLITUDE = 0.02
 
+        def _correct_season_start(pos_date):
+            """
+            BUG FIX v6: Correct season_start using the POS (peak) date.
+
+            OLD: season_start = f"{trough_date.year}-{sm:02d}-01"
+            This fails for cross-year windows (sm > em, e.g. Jun→May) because
+            troughs often fall BEFORE the window start month (e.g. trough in Apr/May
+            when window starts Jun). Using the trough year gives a season_start that
+            is one year too early, placing all horizontal lines/arrows outside the
+            correct shaded window region — making that window appear blank.
+
+            FIX: Derive season_start from POS (peak greenness) date instead.
+            POS always falls within the growing season, so its year + month
+            unambiguously identifies which window it belongs to.
+
+            Examples (Jun→May window, sm=6):
+              POS=Oct 2019 → month ≥ 6 → season_start = Jun 2019  ✅
+              POS=Feb 2019 → month < 6 → season_start = Jun 2018  ✅
+              POS=Aug 2021 → month ≥ 6 → season_start = Jun 2021  ✅
+            """
+            yr = pos_date.year; mo = pos_date.month
+            if sm > em:  # cross-year window (e.g. Jun→May)
+                if mo >= sm:
+                    return pd.Timestamp(f"{yr}-{sm:02d}-01")
+                else:
+                    return pd.Timestamp(f"{yr - 1}-{sm:02d}-01")
+            else:        # same-year window (e.g. Jan→Dec, Apr→Mar)
+                return pd.Timestamp(f"{yr}-{sm:02d}-01")
+
         if len(trough_indices) < 2:
             rows = []
             for yr in range(ndvi_5d.index.year.min(), ndvi_5d.index.year.max() + 1):
@@ -676,7 +705,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                                 if ei > si:
                                     sos = seg_t[si]; eos = seg_t[ei]
                                     yr  = pos.year
-                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                    season_start = _correct_season_start(pos)
                                     rows.append({
                                         "Year": yr,
                                         "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
@@ -772,7 +801,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     continue
 
                 yr = pos.year
-                season_start = pd.Timestamp(f"{t_all[ti].year}-{sm:02d}-01")
+                season_start = _correct_season_start(pos)
 
                 rows.append({
                     "Year":          yr,
@@ -855,7 +884,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
                 if not _date_in_window(pos): continue
                 yr = pos.year
-                season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                season_start = _correct_season_start(pos)
                 rows.append({
                     "Year": yr,
                     "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
