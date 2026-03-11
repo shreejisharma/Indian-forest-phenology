@@ -876,13 +876,20 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                                 ei = pi + int(ec[-1])
                                 if ei > si:
                                     sos = seg_t[si]; eos = seg_t[ei]
-                                    # FIX 1: year = trough start
-                                    trough_year  = seg_t[0].year
-                                    season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
-                                    rows.append(_make_row(
-                                        trough_year, season_start, sos, pos, eos,
-                                        ndvi_max, A, ndvi_min, sos_thr, eos_thr,
-                                        seg_t[int(np.argmin(seg_sm))], sm, em))
+                                    # FIX v6: clamp EOS to actual data end, cap LOS at 365d
+                                    data_end_dt = t_all[-1]
+                                    if eos > data_end_dt:
+                                        eos = data_end_dt
+                                    if (eos - sos).days > 365:
+                                        eos = sos + pd.Timedelta(days=365)
+                                    if eos > sos:
+                                        # FIX 1: year = trough start
+                                        trough_year  = seg_t[0].year
+                                        season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
+                                        rows.append(_make_row(
+                                            trough_year, season_start, sos, pos, eos,
+                                            ndvi_max, A, ndvi_min, sos_thr, eos_thr,
+                                            seg_t[int(np.argmin(seg_sm))], sm, em))
                 except Exception:
                     pass
 
@@ -920,6 +927,13 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                 ei = pos_idx + int(ec[-1])
                 if ei <= si: continue
                 sos = cycle_t[si]; pos = cycle_t[pos_idx]; eos = cycle_t[ei]
+                # FIX v6: clamp EOS to actual data end, cap LOS at 365d
+                data_end_dt = t_all[-1]
+                if eos > data_end_dt:
+                    eos = data_end_dt
+                if (eos - sos).days > 365:
+                    eos = sos + pd.Timedelta(days=365)
+                if eos <= sos: continue
                 if not _date_in_window(pos): continue
                 # FIX 1
                 trough_year  = t_all[ti].year
@@ -970,6 +984,21 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                 ei = pi + int(ec[-1])
                 if ei <= si: continue
                 sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
+                # FIX v6: clamp EOS to actual data end, cap LOS at 365d
+                data_end_dt = t_all[-1]
+                if eos > data_end_dt:
+                    eos = data_end_dt
+                if (eos - sos).days > 365:
+                    eos = sos + pd.Timedelta(days=365)
+                if eos <= sos: continue
+                # FIX v6: Reject tail season if EOS == data end AND NDVI at data end
+                # is still above threshold (descending limb never completed — season truncated).
+                # Only keep it if either: EOS is genuinely before data end,
+                # OR the NDVI at data end has clearly crossed below threshold.
+                eos_is_at_data_end = (eos >= data_end_dt - pd.Timedelta(days=interp_freq*2))
+                ndvi_at_data_end = float(ndvi_vals[-1]) if not np.isnan(ndvi_vals[-1]) else float(sm_for_troughs[-1])
+                if eos_is_at_data_end and ndvi_at_data_end >= eos_thr:
+                    continue  # Incomplete season — EOS not observed within data
                 if not _date_in_window(pos): continue
                 # FIX 1
                 trough_year  = seg_t[0].year
