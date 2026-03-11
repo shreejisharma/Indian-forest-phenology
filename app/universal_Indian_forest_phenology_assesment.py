@@ -893,20 +893,22 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                             asc = work_arr[1:pi + 1]
                             sc  = np.where(asc >= sos_thr)[0]
                             desc = work_arr[pi:]
-                            ec  = np.where(desc >= eos_thr)[0]
-                            if len(sc) and len(ec):
+                            # EOS: first crossing below threshold; fallback = descending minimum
+                            ec_below = np.where(desc < eos_thr)[0]
+                            if len(ec_below):
+                                ei = pi + max(0, int(ec_below[0]) - 1)
+                            else:
+                                ei = pi + int(np.nanargmin(desc))  # best estimate
+                            if len(sc) and ei > 0:
                                 si = 1 + int(sc[0])
-                                ei = pi + int(ec[-1])
                                 if ei > si:
                                     sos = seg_t[si]; eos = seg_t[ei]
-                                    # FIX v6: clamp EOS to actual data end, cap LOS at 365d
                                     data_end_dt = t_all[-1]
                                     if eos > data_end_dt:
                                         eos = data_end_dt
-                                    if (eos - sos).days > 365:
-                                        eos = sos + pd.Timedelta(days=365)
+                                    if (eos - sos).days >= 365:
+                                        eos = sos + pd.Timedelta(days=364)
                                     if eos > sos:
-                                        # FIX 1: year = trough start
                                         trough_year  = seg_t[0].year
                                         season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
                                         rows.append(_make_row(
@@ -945,20 +947,21 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                 if not len(sc): continue
                 si = int(sc[0])
                 desc = cycle_raw[pos_idx:-1]
-                ec   = np.where(desc >= eos_thr)[0]
-                if not len(ec): continue
-                ei = pos_idx + int(ec[-1])
+                # EOS: first crossing below threshold; fallback = descending minimum
+                ec_below = np.where(desc < eos_thr)[0]
+                if len(ec_below):
+                    ei = pos_idx + max(0, int(ec_below[0]) - 1)
+                else:
+                    ei = pos_idx + int(np.nanargmin(desc))  # best estimate
                 if ei <= si: continue
                 sos = cycle_t[si]; pos = cycle_t[pos_idx]; eos = cycle_t[ei]
-                # FIX v6: clamp EOS to actual data end, cap LOS at 365d
                 data_end_dt = t_all[-1]
                 if eos > data_end_dt:
                     eos = data_end_dt
-                if (eos - sos).days > 365:
-                    eos = sos + pd.Timedelta(days=365)
+                if (eos - sos).days >= 365:
+                    eos = sos + pd.Timedelta(days=364)
                 if eos <= sos: continue
                 if not _date_in_window(pos): continue
-                # FIX 1
                 trough_year  = t_all[ti].year
                 season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
                 rows.append(_make_row(
@@ -1002,28 +1005,25 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                 if not len(sc): continue
                 si = int(sc[0])
                 desc = seg_raw[pi:]
-                ec   = np.where(desc >= eos_thr)[0]
-                if not len(ec): continue
-                ei = pi + int(ec[-1])
+                # EOS: first crossing below threshold; fallback = descending minimum
+                ec_below = np.where(desc < eos_thr)[0]
+                if len(ec_below):
+                    ei = pi + max(0, int(ec_below[0]) - 1)
+                else:
+                    ei = pi + int(np.nanargmin(desc))  # best estimate
                 if ei <= si: continue
                 sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
-                # FIX v6: clamp EOS to actual data end, cap LOS at 365d
                 data_end_dt = t_all[-1]
                 if eos > data_end_dt:
                     eos = data_end_dt
-                if (eos - sos).days > 365:
-                    eos = sos + pd.Timedelta(days=365)
+                if (eos - sos).days >= 365:
+                    eos = sos + pd.Timedelta(days=364)
                 if eos <= sos: continue
-                # FIX v6: Reject tail season if EOS == data end AND NDVI at data end
-                # is still above threshold (descending limb never completed — season truncated).
-                # Only keep it if either: EOS is genuinely before data end,
-                # OR the NDVI at data end has clearly crossed below threshold.
                 eos_is_at_data_end = (eos >= data_end_dt - pd.Timedelta(days=interp_freq*2))
                 ndvi_at_data_end = float(ndvi_vals[-1]) if not np.isnan(ndvi_vals[-1]) else float(sm_for_troughs[-1])
                 if eos_is_at_data_end and ndvi_at_data_end >= eos_thr:
                     continue  # Incomplete season — EOS not observed within data
                 if not _date_in_window(pos): continue
-                # FIX 1
                 trough_year  = seg_t[0].year
                 season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
                 rows.append(_make_row(
@@ -1669,7 +1669,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None, interp_freq=5):
             ax.hlines(thr_s, seg_st, seg_en, colors='#66BB6A', lw=1.2, ls='--', alpha=0.70,
                       label='SOS threshold' if not thr_sos_p else '', zorder=4)
             thr_sos_p = True
-        if pd.notna(thr_e) and (not pd.notna(thr_s) or abs(thr_e - thr_s) > 1e-4):
+        if pd.notna(thr_e):
             ax.hlines(thr_e, seg_st, seg_en, colors='#FFA726', lw=1.2, ls='--', alpha=0.70,
                       label='EOS threshold' if not thr_eos_p else '', zorder=4)
             thr_eos_p = True
@@ -2038,10 +2038,10 @@ def main():
     # ── SIDEBAR ───────────────────────────────────────────────
     st.sidebar.markdown("## 📂 Upload Data")
     ndvi_file = st.sidebar.file_uploader(
-        "NDVI File (CSV)",  type=['csv'],
+        "NDVI File (CSV)",  type=['csv'], key="ndvi_uploader",
         help="A CSV file with a date column and an NDVI column. Any date format is accepted.")
     met_file = st.sidebar.file_uploader(
-        "Meteorological File (CSV)", type=['csv'],
+        "Meteorological File (CSV)", type=['csv'], key="met_uploader",
         help="Daily meteorological data CSV — from NASA POWER or your own source.")
 
     _fp_ndvi = f"{ndvi_file.name}:{ndvi_file.size}" if ndvi_file else ""
@@ -2080,6 +2080,10 @@ def main():
     st.sidebar.caption(
         f"Current: SOS at **{int(sos_thr*100)}%** · EOS at **{int(eos_thr*100)}%** "
         "of each season's NDVI swing. Higher % = stricter (later SOS, earlier EOS).")
+    st.sidebar.caption(
+        "ℹ️ Changing the SOS threshold can shift when each season 'starts', "
+        "which changes the climate window used to predict all events including EOS. "
+        "This is expected — SOS and EOS share the same season baseline.")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 📈 Prediction Model")
