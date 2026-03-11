@@ -14,12 +14,14 @@ Predicts SOS / POS / EOS / LOS for 11 Indian forest types using:
   • Threshold-based phenology extraction (robust for multi-hump NDVI)
   • Optional IMD monsoon onset date as SOS predictor
 
-BUG FIX v2 (plateau trough filter):
-  - OLD: trough_ceiling = global_min + 0.60 * global_amp  [TOO STRICT]
-  - NEW: if global_amp >= 0.20: ceiling = global_min + 0.85 * global_amp
-         else: skip filter (low-amplitude evergreen forests — all troughs real)
-  This fixes missing seasons in Shola / high-baseline evergreen forests
-  where seasonal NDVI troughs are still relatively high in absolute value.
+BUG FIX v4 (gap-tolerant cycle extraction):
+  - OLD: _cycle_has_gap hard cutoff at 20% → seasons spanning data gaps always dropped
+  - NEW: if amplitude ≥ 0.10 (clear seasonal signal), tolerate up to 50% gap,
+         using sm_for_troughs (gap-bridged linear interpolation) for that cycle.
+         Low-amplitude cycles keep strict 20% threshold.
+  This fixes missing seasons in datasets with mid-season data gaps (e.g. cloud cover)
+  where the seasonal pattern is still unambiguous from surrounding observations.
+  Affected: any season where SOS/EOS/amplitude was visible in plot but not labelled.
 
 pip install streamlit pandas numpy scipy scikit-learn matplotlib
 streamlit run universal_Indian_forest_phenology_FIXED.py
@@ -563,10 +565,23 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             # wet evergreen). All detected troughs are genuine seasonal lows. Keep all.
         # ──────────────────────────────────────────────────────────────────
 
-        def _cycle_has_gap(i_start, i_end):
+        # BUG FIX v4: Improved gap filter.
+        # OLD: hard cutoff at 20% gap regardless of signal clarity.
+        # NEW: if amplitude is large (≥ 0.10) — the seasonal signal is unambiguous
+        #   even across a gap — tolerate up to 50% gap. For small-amplitude signals
+        #   keep the strict 20% threshold to avoid spurious extractions.
+        # When a gap-tolerant cycle IS extracted, use sm_for_troughs (which already
+        # linearly bridges gaps) rather than raw ndvi_vals for that cycle.
+        _GAP_STRICT   = 0.20   # max gap fraction for low-amplitude cycles
+        _GAP_TOLERANT = 0.50   # max gap fraction for high-amplitude cycles
+        _AMP_GAP_THRESHOLD = 0.10  # amplitude above which we use the tolerant limit
+
+        def _cycle_has_gap(i_start, i_end, amplitude=None):
             if i_end <= i_start: return True
-            seg_slice = nan_mask[i_start:i_end+1]
-            return seg_slice.mean() > 0.20
+            gap_frac = nan_mask[i_start:i_end+1].mean()
+            if amplitude is not None and amplitude >= _AMP_GAP_THRESHOLD:
+                return gap_frac > _GAP_TOLERANT
+            return gap_frac > _GAP_STRICT
 
         # BUG FIX v3: Lowered from 0.05 → 0.02.
         # For high-NDVI evergreen forests (Shola), seasonal amplitude after SG smoothing
@@ -680,26 +695,34 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
 
                 if ti1 - ti < max(10, min_d // 5):
                     continue
-                if _cycle_has_gap(ti, ti1):
+                # BUG FIX v3+v4: Dual signal strategy
+                # Pre-check amplitude on sm_for_troughs to inform gap tolerance
+                _cycle_sm_pre = sm_for_troughs[ti:ti1 + 1]
+                _amp_pre = float(np.max(_cycle_sm_pre)) - float(sm_for_troughs[ti])
+
+                if _cycle_has_gap(ti, ti1, amplitude=_amp_pre):
                     continue
 
-                # BUG FIX v3: Use RAW 5-day interpolated values (ndvi_vals) for
-                # amplitude and threshold computation — NOT the over-smoothed signal.
-                # For a 10-year continuous segment the SG window is ~365 days, which
-                # flattens shallow annual cycles and collapses their amplitude below
-                # MIN_AMPLITUDE (e.g. 2018-19 goes 0.22→0.03, 2022-23 goes 0.15→0.04).
-                # Using raw values gives the true seasonal range and prevents these
-                # seasons from being skipped.
-                # sm_for_troughs is still used ONLY for POS location (cleaner peak).
-                cycle_raw  = ndvi_vals[ti:ti1 + 1]   # raw 5-day interpolated
+                # - No gap: use raw 5-day ndvi_vals (true seasonal amplitude).
+                # - Gap present (but passed tolerance): use sm_for_troughs which
+                #   linearly bridges across gaps.
+                # In both cases, sm_for_troughs is used for POS peak location.
+                _cycle_has_any_gap = nan_mask[ti:ti1 + 1].any()
+
                 cycle_sm   = sm_for_troughs[ti:ti1 + 1]  # smoothed — for POS only
                 cycle_t    = t_all[ti:ti1 + 1]
 
-                # Base = raw value at the left trough (true dormancy floor)
-                ndvi_min = float(ndvi_vals[ti]) if not np.isnan(ndvi_vals[ti]) \
-                           else float(sm_for_troughs[ti])
-                # Peak = max of raw values within cycle
-                ndvi_max = float(np.nanmax(cycle_raw))
+                if _cycle_has_any_gap:
+                    # Gap-bridged: use sm_for_troughs for amplitude + thresholds
+                    cycle_raw = sm_for_troughs[ti:ti1 + 1]
+                    ndvi_min = float(sm_for_troughs[ti])
+                    ndvi_max = float(np.max(cycle_raw))
+                else:
+                    # No gap: raw 5-day values give true amplitude
+                    cycle_raw = ndvi_vals[ti:ti1 + 1]
+                    ndvi_min = float(ndvi_vals[ti]) if not np.isnan(ndvi_vals[ti]) \
+                               else float(sm_for_troughs[ti])
+                    ndvi_max = float(np.nanmax(cycle_raw))
                 A = ndvi_max - ndvi_min
 
                 if A < max(1e-6, MIN_AMPLITUDE):
@@ -780,23 +803,32 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 seg_sm  = sm_for_troughs[ti0:seg_end_i + 1]   # smoothed — POS location
                 seg_raw = ndvi_vals[ti0:seg_end_i + 1]         # raw — amplitude/thresholds
                 seg_t = t_all[ti0:seg_end_i + 1]
-                if nan_mask[ti0:seg_end_i + 1].any(): continue
-                # Use raw values for amplitude (avoids over-smoothing collapsing shallow cycles)
-                ndvi_min = float(ndvi_vals[ti0]) if not np.isnan(ndvi_vals[ti0]) \
-                           else float(sm_for_troughs[ti0])
-                ndvi_max = float(np.nanmax(seg_raw))
+                # BUG FIX v4: allow tail segments with gaps (use gap-bridged sm_for_troughs)
+                _tail_has_gap = nan_mask[ti0:seg_end_i + 1].any()
+                _tail_gap_frac = nan_mask[ti0:seg_end_i + 1].mean()
+                if _tail_gap_frac > _GAP_TOLERANT: continue  # too many gaps
+                # Use raw values for amplitude when no gap, gap-bridged when gap exists
+                if _tail_has_gap:
+                    ndvi_min = float(sm_for_troughs[ti0])
+                    ndvi_max = float(np.max(seg_sm))
+                    _seg_signal = seg_sm  # gap-bridged for SOS/EOS
+                else:
+                    ndvi_min = float(ndvi_vals[ti0]) if not np.isnan(ndvi_vals[ti0]) \
+                               else float(sm_for_troughs[ti0])
+                    ndvi_max = float(np.nanmax(seg_raw))
+                    _seg_signal = seg_raw  # raw for SOS/EOS
                 A = ndvi_max - ndvi_min
                 if A < max(1e-6, MIN_AMPLITUDE): continue
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
                 # POS from smoothed signal (stable peak)
                 pi = int(np.argmax(seg_sm))
-                # SOS/EOS from raw signal
-                asc_limb = seg_raw[1:pi + 1]
+                # SOS/EOS from chosen signal (raw if no gap, gap-bridged if gap)
+                asc_limb = _seg_signal[1:pi + 1]
                 sos_cands = np.where(asc_limb >= sos_threshold)[0] + 1
                 if not len(sos_cands): continue
                 si = int(sos_cands[0])
-                desc_limb = seg_raw[pi:]
+                desc_limb = _seg_signal[pi:]
                 eos_cands_desc = np.where(desc_limb >= eos_threshold)[0]
                 if not len(eos_cands_desc): continue
                 ei = pi + int(eos_cands_desc[-1])
