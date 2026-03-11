@@ -16,7 +16,7 @@ NDVI time series and NASA POWER meteorological data. Works for **any Indian fore
 zero hardcoded presets — every threshold, cadence, amplitude floor, and feature ranking is derived
 exclusively from your data.
 
-**[▶ Open Live App](https://universal-forest-phenology-assessment.streamlit.app)**
+**[▶ Open Live App](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**
 
 ---
 
@@ -24,7 +24,7 @@ exclusively from your data.
 
 | Item | Detail |
 |------|--------|
-| **Forest types** | Universal — any Indian forest (or any ecosystem worldwide) |
+| **Forest types** | Universal — any Indian forest type (or any ecosystem worldwide) |
 | **Phenological events** | SOS · POS · EOS · LOS (Length of Season) |
 | **NDVI input** | Any CSV with `Date` + `NDVI` columns (MODIS MOD13Q1, Sentinel-2, or other) |
 | **Meteorological input** | NASA POWER daily export (headers auto-detected and skipped) |
@@ -40,23 +40,23 @@ exclusively from your data.
 ### 📊 Data Overview Tab
 - Auto-detected observation cadence, dominant cycle period, global NDVI amplitude
 - Every extraction parameter shown with its derivation formula
-- Detected meteorological parameters (raw + derived)
+- Detected meteorological parameters (raw + derived features)
 - Growing window summary
 
 ### 🔬 Training & Models Tab
 - Automatic NDVI 5-day interpolation + per-segment Savitzky-Golay smoothing
-- Valley-anchored amplitude threshold phenology extraction
-- All 7 bug fixes applied (v2–v7): plateau filter, SG window, gap tolerance, season window alignment, raw POS
+- Valley-anchored amplitude threshold phenology extraction (all 7 bug fixes v2–v7 applied)
 - Model performance cards (LOO R², MAE, number of seasons)
 - Fitted equations in tabbed layout (SOS / POS / EOS)
 - Feature role table — colour-coded: ✅ IN MODEL · ➖ Correlated not selected · ⬜ Below threshold
 - Observed vs Predicted scatter plots
-- Download phenology table as CSV
+- Download phenology table as CSV + model coefficients as CSV
 
 ### 📈 Correlations & Met Tab
-- Feature heatmaps: Pearson r + Spearman ρ across SOS / POS / EOS
-- Year-by-year meteorological + NDVI panels for each growing season
-- Detailed per-event correlation tables with significance
+- Pearson r + Spearman ρ heatmaps across SOS / POS / EOS
+- Significance stars (** p < 0.05, * p < 0.10)
+- Year-by-year meteorological + NDVI panels per growing season
+- Detailed per-event correlation tables (consistent with heatmap — same `corr_tables` object)
 
 ### 🔮 Predict Tab
 - Event-scoped input fields pre-filled from training data means
@@ -67,7 +67,7 @@ exclusively from your data.
 ### 📖 Technical Guide Tab
 - Full methodology documentation
 - Bug-fix log (v2–v7) with before/after comparison
-- Threshold sensitivity guide
+- Threshold sensitivity guide and R² interpretation table
 - Citation
 
 ---
@@ -164,8 +164,8 @@ The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR`, `VPD`, `
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/universal-forest-phenology-assessment.git
-cd universal-forest-phenology-assessment
+git clone https://github.com/shreejisharma/Indian-forest-phenology.git
+cd Indian-forest-phenology
 pip install -r requirements.txt
 streamlit run app/universal_Indian_forest_phenology_v5.py
 ```
@@ -175,7 +175,7 @@ streamlit run app/universal_Indian_forest_phenology_v5.py
 ## Repository Structure
 
 ```
-universal-forest-phenology-assessment/
+Indian-forest-phenology/
 ├── app/
 │   └── universal_Indian_forest_phenology_v5.py   ← main app (single file)
 ├── data/
@@ -194,7 +194,7 @@ universal-forest-phenology-assessment/
 ## Methodology
 
 ### Phenology Extraction — Valley-Anchored Amplitude Method
-1. Gaps > `8 × cadence` preserved as NaN (not interpolated)
+1. Gaps > `8 × cadence` preserved as NaN (not interpolated across large gaps)
 2. NDVI resampled to 5-day grid by linear interpolation within valid segments
 3. Per-segment Savitzky-Golay smoothing (window ≤ 42% of dominant cycle period)
 4. Valley (trough) detection — minimum separation = 40% of autocorrelation cycle period
@@ -202,23 +202,19 @@ universal-forest-phenology-assessment/
 6. Threshold = `NDVI_min + threshold% × A`
 7. SOS = first crossing on ascending limb
 8. EOS = last crossing on descending limb
-9. POS = **raw NDVI maximum** between SOS and EOS (not smoothed)
+9. POS = **raw NDVI maximum** between SOS and EOS (not smoothed peak)
 
 ### Regression Model
 1. 15-day pre-event meteorological windows computed per season per event
 2. Features ranked by composite score = `max(|Pearson r|, |Spearman ρ|)` — no preset list
-3. Correlation gate: composite score ≥ threshold (default 0.40, adjustable via sidebar)
-4. Collinearity filter: `|r| > 0.85` between candidates → weaker one dropped
+3. Correlation gate: composite ≥ threshold (default 0.40, adjustable via sidebar slider)
+4. Collinearity filter: `|r| > 0.85` between candidates → weaker feature dropped
 5. Incremental LOO R² check: feature added only if it improves LOO R² by ≥ 0.03
 6. Ridge Regression / LOESS / Polynomial / Gaussian Process — user-selectable
 
-### Threshold Sensitivity
-| SOS/EOS % | Effect |
-|-----------|--------|
-| 5% | Very sensitive — earliest SOS / latest EOS |
-| **10%** | **Scientific default** |
-| 15–20% | Core growing period only |
-| 25–30% | Conservative — peak season only |
+### Consistency Guarantee
+Pearson r and significance shown in the **Training tab** and the **Correlations tab heatmap** are
+computed from the **same `corr_tables` object** — they are always identical.
 
 ---
 
@@ -237,7 +233,7 @@ universal-forest-phenology-assessment/
 
 ```
 Sharma, S. (2025). Universal Forest Phenology Assessment v5 [Software].
-GitHub. https://github.com/your-username/universal-forest-phenology-assessment
+GitHub. https://github.com/shreejisharma/Indian-forest-phenology
 ```
 
 ---
