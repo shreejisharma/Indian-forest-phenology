@@ -635,55 +635,68 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 return m >= sm or m <= em
 
         # Head segment
+        # BUG FIX v5: Apply same amplitude-aware gap tolerance to the head segment.
+        # OLD: strict nan_mask.any() check → head skipped if ANY gap (e.g. 2017-18 had 25% gap → DROPPED)
+        # NEW: use _cycle_has_gap with amplitude pre-check, same as main loop.
         if all_troughs:
             ti_first = all_troughs[0]
             head_len = ti_first
-            if head_len >= max(10, min_d // 5) and not _cycle_has_gap(0, ti_first):
+            _head_amp_pre = float(np.max(sm_for_troughs[0:ti_first + 1])) - float(sm_for_troughs[0])
+            if head_len >= max(10, min_d // 5) and not _cycle_has_gap(0, ti_first, amplitude=_head_amp_pre):
                 try:
-                    seg   = sm_for_troughs[0:ti_first + 1]
-                    seg_t = t_all[0:ti_first + 1]
-                    if not nan_mask[0:ti_first + 1].any():
-                        base_idx = int(np.argmin(seg))
-                        ndvi_min  = float(seg[base_idx])
-                        ndvi_max  = float(np.max(seg))
-                        A = ndvi_max - ndvi_min
-                        if A >= max(1e-6, MIN_AMPLITUDE):
-                            sos_threshold = ndvi_min + thr_pct     * A
-                            eos_threshold = ndvi_min + eos_thr_pct * A
-                            pi = int(np.argmax(seg))
-                            pos = seg_t[pi]
-                            if _date_in_window(pos):
-                                asc = seg[base_idx + 1:pi + 1]
-                                sc  = np.where(asc >= sos_threshold)[0]
-                                desc = seg[pi:]
-                                ec   = np.where(desc >= eos_threshold)[0]
-                                if len(sc) and len(ec):
-                                    si = base_idx + 1 + int(sc[0])
-                                    ei = pi + int(ec[-1])
-                                    if ei > si:
-                                        sos = seg_t[si]; eos = seg_t[ei]
-                                        yr  = pos.year
-                                        season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
-                                        rows.append({
-                                            "Year": yr,
-                                            "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                            "SOS_Target": (sos - season_start).days,
-                                            "SOS_Method": "valley_amplitude_threshold",
-                                            "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                            "POS_Target": (pos - season_start).days,
-                                            "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                            "EOS_Target": (eos - season_start).days,
-                                            "EOS_Method": "valley_amplitude_threshold",
-                                            "LOS_Days": (eos - sos).days,
-                                            "Season_Start": season_start,
-                                            "Peak_NDVI": float(seg[pi]),
-                                            "Amplitude": float(A),
-                                            "Base_NDVI": float(ndvi_min),
-                                            "Threshold_SOS": float(sos_threshold),
-                                            "Threshold_EOS": float(eos_threshold),
-                                            "Trough_Date": seg_t[base_idx],
-                                            "Season": season_type,
-                                        })
+                    seg_sm = sm_for_troughs[0:ti_first + 1]
+                    seg_raw = ndvi_vals[0:ti_first + 1]
+                    seg_t  = t_all[0:ti_first + 1]
+                    _head_has_gap = nan_mask[0:ti_first + 1].any()
+
+                    # Dual signal: gap-bridged sm if gap exists, raw values otherwise
+                    if _head_has_gap:
+                        work_arr = seg_sm
+                        ndvi_min = float(sm_for_troughs[0])
+                        ndvi_max = float(np.max(seg_sm))
+                    else:
+                        work_arr = seg_raw
+                        ndvi_min = float(ndvi_vals[0]) if not np.isnan(ndvi_vals[0]) else float(sm_for_troughs[0])
+                        ndvi_max = float(np.nanmax(seg_raw))
+
+                    A = ndvi_max - ndvi_min
+                    if A >= max(1e-6, MIN_AMPLITUDE):
+                        sos_threshold = ndvi_min + thr_pct     * A
+                        eos_threshold = ndvi_min + eos_thr_pct * A
+                        pi = int(np.argmax(seg_sm))   # POS from smoothed
+                        pos = seg_t[pi]
+                        if _date_in_window(pos):
+                            asc  = work_arr[1:pi + 1]
+                            sc   = np.where(asc >= sos_threshold)[0]
+                            desc = work_arr[pi:]
+                            ec   = np.where(desc >= eos_threshold)[0]
+                            if len(sc) and len(ec):
+                                si = 1 + int(sc[0])
+                                ei = pi + int(ec[-1])
+                                if ei > si:
+                                    sos = seg_t[si]; eos = seg_t[ei]
+                                    yr  = pos.year
+                                    season_start = pd.Timestamp(f"{seg_t[0].year}-{sm:02d}-01")
+                                    rows.append({
+                                        "Year": yr,
+                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
+                                        "SOS_Target": (sos - season_start).days,
+                                        "SOS_Method": "valley_amplitude_threshold",
+                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
+                                        "POS_Target": (pos - season_start).days,
+                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
+                                        "EOS_Target": (eos - season_start).days,
+                                        "EOS_Method": "valley_amplitude_threshold",
+                                        "LOS_Days": (eos - sos).days,
+                                        "Season_Start": season_start,
+                                        "Peak_NDVI": float(seg_sm[pi]),
+                                        "Amplitude": float(A),
+                                        "Base_NDVI": float(ndvi_min),
+                                        "Threshold_SOS": float(sos_threshold),
+                                        "Threshold_EOS": float(eos_threshold),
+                                        "Trough_Date": seg_t[int(np.argmin(seg_sm))],
+                                        "Season": season_type,
+                                    })
                 except Exception:
                     pass
 
@@ -785,45 +798,51 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 continue
 
         # Tail segments
-        covered_trough_starts = set(all_troughs[i] for i in range(len(all_troughs)-1)
-                                    if not _cycle_has_gap(all_troughs[i], all_troughs[i+1]))
+        # BUG FIX v5: Recompute covered set with amplitude-aware gap check (v4).
+        covered_trough_starts = set()
+        for i in range(len(all_troughs) - 1):
+            _amp_pre = float(np.max(sm_for_troughs[all_troughs[i]:all_troughs[i+1]+1])) \
+                       - float(sm_for_troughs[all_troughs[i]])
+            if not _cycle_has_gap(all_troughs[i], all_troughs[i+1], amplitude=_amp_pre):
+                covered_trough_starts.add(all_troughs[i])
 
-        for sid in range(1, seg_id + 1):
-            seg_idx = np.where(seg_labels == sid)[0]
-            if len(seg_idx) == 0: continue
-            seg_end_i = int(seg_idx[-1])
-            troughs_in_seg = [ti for ti in all_troughs
-                              if seg_idx[0] <= ti <= seg_end_i
-                              and ti not in covered_trough_starts]
-            if not troughs_in_seg: continue
-            ti0 = troughs_in_seg[-1]
-            tail_len = seg_end_i - ti0
+        # BUG FIX v5: Tail now uses FULL remaining data extent (0 → n-1),
+        # not just within the same segment.
+        # OLD: seg_end_i = end of the segment containing the trough
+        #      → if a gap follows shortly after the trough (e.g. 2024-04-19 with
+        #        gap starting 2024-06-23), seg_end = only 65d after trough → too short
+        # NEW: use n-1 (end of all data) so the tail spans the trough → data end,
+        #      bridging across any trailing gap as long as total gap% ≤ 50% and A ≥ 0.10.
+        for ti0 in [ti for ti in all_troughs if ti not in covered_trough_starts]:
+            tail_end_i = n - 1  # full data extent
+            tail_len = tail_end_i - ti0
             if tail_len < max(10, min_d // 5): continue
             try:
-                seg_sm  = sm_for_troughs[ti0:seg_end_i + 1]   # smoothed — POS location
-                seg_raw = ndvi_vals[ti0:seg_end_i + 1]         # raw — amplitude/thresholds
-                seg_t = t_all[ti0:seg_end_i + 1]
-                # BUG FIX v4: allow tail segments with gaps (use gap-bridged sm_for_troughs)
-                _tail_has_gap = nan_mask[ti0:seg_end_i + 1].any()
-                _tail_gap_frac = nan_mask[ti0:seg_end_i + 1].mean()
-                if _tail_gap_frac > _GAP_TOLERANT: continue  # too many gaps
-                # Use raw values for amplitude when no gap, gap-bridged when gap exists
+                _tail_amp_pre = float(np.max(sm_for_troughs[ti0:tail_end_i + 1])) \
+                                - float(sm_for_troughs[ti0])
+                _tail_gap_frac = nan_mask[ti0:tail_end_i + 1].mean()
+                if _cycle_has_gap(ti0, tail_end_i, amplitude=_tail_amp_pre): continue
+
+                seg_sm  = sm_for_troughs[ti0:tail_end_i + 1]
+                seg_raw = ndvi_vals[ti0:tail_end_i + 1]
+                seg_t   = t_all[ti0:tail_end_i + 1]
+
+                _tail_has_gap = nan_mask[ti0:tail_end_i + 1].any()
                 if _tail_has_gap:
                     ndvi_min = float(sm_for_troughs[ti0])
                     ndvi_max = float(np.max(seg_sm))
-                    _seg_signal = seg_sm  # gap-bridged for SOS/EOS
+                    _seg_signal = seg_sm
                 else:
                     ndvi_min = float(ndvi_vals[ti0]) if not np.isnan(ndvi_vals[ti0]) \
                                else float(sm_for_troughs[ti0])
                     ndvi_max = float(np.nanmax(seg_raw))
-                    _seg_signal = seg_raw  # raw for SOS/EOS
+                    _seg_signal = seg_raw
+
                 A = ndvi_max - ndvi_min
                 if A < max(1e-6, MIN_AMPLITUDE): continue
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
-                # POS from smoothed signal (stable peak)
                 pi = int(np.argmax(seg_sm))
-                # SOS/EOS from chosen signal (raw if no gap, gap-bridged if gap)
                 asc_limb = _seg_signal[1:pi + 1]
                 sos_cands = np.where(asc_limb >= sos_threshold)[0] + 1
                 if not len(sos_cands): continue
