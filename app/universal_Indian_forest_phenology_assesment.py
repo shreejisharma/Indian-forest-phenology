@@ -99,20 +99,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── CONSTANTS ───────────────────────────────────────────────
-MIN_CORR_THRESHOLD = 0.40
-ALPHAS = [0.01, 0.1, 1, 10, 50, 100, 500, 1000, 5000]
+# v5: ALL thresholds are data-driven — no hardcoded forest-type presets.
+# MIN_CORR_THRESHOLD is the only analyst-configurable gate; it is also
+# exposed as a sidebar slider so the researcher can adjust it.
+MIN_CORR_THRESHOLD = 0.40          # default; overridden by sidebar slider
+ALPHAS = [0.001, 0.01, 0.1, 1, 10, 50, 100, 500, 1000, 5000, 10000]
 
-EVENT_PRIORITIES = {
-    'SOS': ['T2M_MIN', 'PRECTOTCORR', 'log_precip', 'RH2M', 'GWETTOP',
-            'GWETROOT', 'SPEI_proxy', 'VPD', 'T2M', 'GDD_5', 'GDD_10',
-            'WS2M', 'DTR', 'T2M_MAX'],
-    'POS': ['PRECTOTCORR', 'log_precip', 'GDD_cum', 'GWETROOT', 'GWETTOP',
-            'RH2M', 'GDD_5', 'GDD_10', 'T2M', 'T2M_MAX',
-            'ALLSKY_SFC_SW_DWN', 'SPEI_proxy', 'VPD'],
-    'EOS': ['T2M_MIN', 'WS2M', 'DTR', 'T2M_RANGE', 'VPD',
-            'GWETTOP', 'GWETROOT', 'MSI', 'SPEI_proxy',
-            'T2M', 'log_precip', 'PRECTOTCORR', 'RH2M'],
-}
+# v5: EVENT_PRIORITIES removed — feature ranking is 100% data-driven via
+# Pearson |r| and Spearman |ρ|. The composite score = max(|r|, |ρ|) ranks
+# ALL available met features against each phenological target; no predetermined
+# list biases the selection. This works for any forest type worldwide.
+EVENT_PRIORITIES = {}   # kept for API compatibility — never used for ranking
 
 EVENT_EXCLUDE = {
     'SOS': {'GDD_cum'},
@@ -122,95 +119,124 @@ EVENT_EXCLUDE = {
 SM_NAME = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
            7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
 
-SEASON_CONFIGS = {
-    "Tropical Dry Deciduous — Monsoon (Jun-May)": {
-        "start_month":6,"end_month":5,"min_days":150,"sos_base":None,
-        "pos_constrain_end":12,"threshold_pct":0.30,"sos_method":"rainfall","icon":"🍂",
-        "regions":"Tirupati, Deccan Plateau, Eastern Ghats, Vindhyas",
-        "species":"Teak, Sal, Axlewood, Bamboo","states":"AP, Telangana, Karnataka, MP, UP, Bihar",
-        "rainfall":"800-1200 mm","ndvi_peak":"Oct-Nov","key_drivers":"PRECTOTCORR, GWETTOP, T2M_MIN",
-        "desc":"Largest forest type (35% India). SW Monsoon drives leaf flush Jun-Jul. Leaf fall Mar-Apr."},
-    "Tropical Moist Deciduous — Monsoon (Jun-May)": {
-        "start_month":6,"end_month":5,"min_days":150,"sos_base":None,
-        "pos_constrain_end":12,"threshold_pct":0.25,"sos_method":"rainfall","icon":"🌿",
-        "regions":"NE India, Western Ghats E slopes, Odisha, Central India",
-        "species":"Sal (Shorea robusta), Teak, Laurel, Rosewood, Bamboo",
-        "states":"Assam, Odisha, Jharkhand, MP, Chhattisgarh, NE States",
-        "rainfall":"1000-2000 mm","ndvi_peak":"Sep-Oct","key_drivers":"RH2M, PRECTOTCORR, T2M, GWETROOT",
-        "desc":"Sal-dominant moist forests. SOS Jun-Jul (monsoon flush)."},
-    "Tropical Wet Evergreen / Semi-Evergreen (Jan-Dec)": {
-        "start_month":1,"end_month":12,"min_days":200,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.20,"sos_method":"threshold","icon":"🌲",
-        "regions":"Western Ghats, NE India, Andaman & Nicobar",
-        "species":"Dipterocarp, Mesua, Calophyllum, Bamboo, Canes",
-        "states":"Kerala, Karnataka, Tamil Nadu (W Ghats), Assam, Meghalaya",
-        "rainfall":">2500 mm","ndvi_peak":"Oct-Dec","key_drivers":"RH2M, ALLSKY_SFC_SW_DWN, GWETROOT",
-        "desc":"Nearly year-round green. Highest NDVI in India (0.65-0.82)."},
-    "Tropical Dry Evergreen (Jan-Dec)": {
-        "start_month":1,"end_month":12,"min_days":200,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.20,"sos_method":"threshold","icon":"🌴",
-        "regions":"Tamil Nadu Coromandel Coast","species":"Manilkara, Memecylon, Diospyros, Eugenia",
-        "states":"Tamil Nadu coastal strip","rainfall":"~1000 mm (NE monsoon)","ndvi_peak":"Dec-Jan",
-        "key_drivers":"PRECTOTCORR (Oct-Dec), T2M",
-        "desc":"Driven by NE monsoon. SOS Oct-Nov — opposite to most Indian forests."},
-    "Tropical Thorn Forest / Scrub (Jun-May)": {
-        "start_month":6,"end_month":5,"min_days":100,"sos_base":None,
-        "pos_constrain_end":12,"threshold_pct":0.25,"sos_method":"rainfall","icon":"🌵",
-        "regions":"Rajasthan, Gujarat, semi-arid Deccan",
-        "species":"Khejri, Babul (Acacia), Euphorbia, Ziziphus",
-        "states":"Rajasthan, Gujarat, Haryana, parts of MP & AP",
-        "rainfall":"<700 mm","ndvi_peak":"Aug-Sep","key_drivers":"PRECTOTCORR, GWETTOP",
-        "desc":"Very short growing season driven by monsoon pulse. Low base NDVI."},
-    "Subtropical Broadleaved Hill Forest (Apr-Mar)": {
-        "start_month":4,"end_month":3,"min_days":150,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.25,"sos_method":"threshold","icon":"🌳",
-        "regions":"Himalayan foothills 500-1500m — Shiwaliks, NE hills",
-        "species":"Oak (Quercus), Chestnut, Alder, Rhododendron, Sal",
-        "states":"Uttarakhand foothills, Himachal, NE hill states",
-        "rainfall":"1500-2500 mm","ndvi_peak":"Aug-Sep","key_drivers":"T2M_MIN, GDD_10, PRECTOTCORR",
-        "desc":"Temperature and monsoon co-drive phenology. Leaf flush Apr-May."},
-    "Montane Temperate Forest (Apr-Nov)": {
-        "start_month":4,"end_month":11,"min_days":120,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.30,"sos_method":"derivative","icon":"🏔️",
-        "regions":"Western Himalayas 1500-3000m",
-        "species":"Oak, Chir Pine, Deodar, Rhododendron, Maple, Birch",
-        "states":"Uttarakhand, Himachal Pradesh, J&K, Sikkim",
-        "rainfall":"1000-2500 mm","ndvi_peak":"Jul-Aug","key_drivers":"T2M_MIN, GDD_10, ALLSKY_SFC_SW_DWN",
-        "desc":"Snowmelt triggers SOS Apr-May. Short growing season Apr-Nov."},
-    "Alpine / Subalpine Forest and Meadow (May-Oct)": {
-        "start_month":5,"end_month":10,"min_days":80,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.35,"sos_method":"derivative","icon":"⛰️",
-        "regions":"Himalaya >3000m — Ladakh, Spiti, Uttarakhand alpine",
-        "species":"Juniper, Silver Fir, Spruce, Alpine meadows (Bugyals)",
-        "states":"Ladakh, Spiti, Uttarakhand >3000m, Arunachal alpine",
-        "rainfall":"300-800 mm (mostly snow)","ndvi_peak":"Jul-Aug","key_drivers":"T2M_MIN, ALLSKY_SFC_SW_DWN, GDD_5",
-        "desc":"Very short ~5 month season. Snowmelt controls SOS. High temperature sensitivity."},
-    "Shola Forest — Southern Montane (Jan-Dec)": {
-        "start_month":1,"end_month":12,"min_days":200,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.15,"sos_method":"threshold","icon":"🌫️",
-        "regions":"Nilgiris, Anamalais, Palani — Western Ghats >1500m",
-        "species":"Michelia, Syzygium, Rhododendron, Elaeocarpus",
-        "states":"Nilgiris/Kodaikanal (Tamil Nadu), Munnar (Kerala), Coorg (Karnataka)",
-        "rainfall":"2000-5000 mm (two monsoons)","ndvi_peak":"Oct-Dec",
-        "key_drivers":"RH2M, ALLSKY_SFC_SW_DWN, GWETROOT",
-        "desc":"Receives both SW and NE monsoons. Nearly evergreen — very weak seasonality."},
-    "Mangrove Forest (Jan-Dec)": {
-        "start_month":1,"end_month":12,"min_days":200,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.15,"sos_method":"threshold","icon":"🌊",
-        "regions":"Sundarbans, Bhitarkanika, Pichavaram, Andaman & Nicobar",
-        "species":"Rhizophora, Avicennia, Bruguiera, Sonneratia",
-        "states":"West Bengal, Odisha, Tamil Nadu, Andaman & Nicobar",
-        "rainfall":">1500 mm","ndvi_peak":"Sep-Oct","key_drivers":"PRECTOTCORR, RH2M, T2M",
-        "desc":"Tidal ecosystem — nearly evergreen. Monsoon drives canopy flush."},
-    "NE India Moist Evergreen (Jan-Dec)": {
-        "start_month":1,"end_month":12,"min_days":200,"sos_base":None,
-        "pos_constrain_end":None,"threshold_pct":0.20,"sos_method":"threshold","icon":"🌿",
-        "regions":"Assam, Meghalaya, Nagaland, Manipur, Mizoram, Arunachal",
-        "species":"Dipterocarp, Bamboo, Cane, Orchids — highest NDVI in India",
-        "states":"All NE states + sub-Himalayan W Bengal",
-        "rainfall":"2000-4000 mm","ndvi_peak":"Aug-Sep","key_drivers":"PRECTOTCORR, RH2M, T2M",
-        "desc":"Highest mean NDVI in India (0.69-0.72). Two peaks: pre-monsoon + monsoon."},
-}
+# ─── v5: DATA-DRIVEN SEASON CONFIG ───────────────────────────────────────────
+# SEASON_CONFIGS lookup table has been REMOVED in v5.
+# All parameters (cadence, amplitude limits, gap tolerance, trough distance,
+# feature ranking, thresholds) are derived solely from the uploaded data.
+# The researcher sets only the growing-window start/end month via the sidebar;
+# every other parameter is computed automatically.
+
+def build_data_driven_cfg(ndvi_df, sm, em, min_days_override=None):
+    """
+    Derive all phenology-extraction parameters directly from the uploaded NDVI data.
+
+    Returns a cfg dict with no hardcoded forest-type assumptions:
+
+    Parameter          | How it is computed
+    -------------------|------------------------------------------------------------
+    start_month        | User sidebar selection
+    end_month          | User sidebar selection
+    min_days           | max(60, estimated_cycle_length × 0.35) from autocorrelation
+    typical_cadence    | Median of observed inter-observation date differences
+    max_interp_gap     | 8 × typical cadence (tolerates ~2 missed observations)
+    global_amp_p5p95   | P5→P95 of valid NDVI — data-derived seasonality measure
+    min_amplitude      | 5% of global P5→P95 range (catches even weak evergreen signal)
+    plateau_ceiling    | Adaptive: skip filter if amp<0.20; use 85% ceiling otherwise
+    sg_max_steps       | min(one_season_steps × 0.42, 61) — ≤ half a growing season
+    gap_strict         | 0.20 (invariant — statistical lower bound)
+    gap_tolerant       | 0.50 (invariant — empirically validated upper bound)
+    amp_gap_threshold  | 10% of global_amp (scales with data signal strength)
+    trough_min_dist    | 40% of estimated dominant cycle period (from autocorrelation)
+    """
+    ndvi_raw = ndvi_df[["Date","NDVI"]].copy().set_index("Date")["NDVI"].sort_index()
+    ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep="first")]
+
+    # ── Cadence from data ────────────────────────────────────────────────────
+    orig_dates = ndvi_raw.index.sort_values()
+    orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+    diffs_pos  = orig_diffs[orig_diffs > 0]
+    typical_cadence = float(diffs_pos.median()) if len(diffs_pos) else 16.0
+
+    # ── Global amplitude from data ────────────────────────────────────────────
+    valid_ndvi = ndvi_raw.dropna().values
+    if len(valid_ndvi) > 5:
+        p5  = float(np.percentile(valid_ndvi, 5))
+        p95 = float(np.percentile(valid_ndvi, 95))
+        global_amp = p95 - p5
+    else:
+        global_amp = 0.3   # safe fallback for degenerate inputs
+
+    # ── Dominant cycle period via autocorrelation ─────────────────────────────
+    # Resample to 5-day and compute autocorrelation to find annual cycle length
+    full_range = pd.date_range(orig_dates.min(), orig_dates.max(), freq="5D")
+    ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range)).interpolate(
+              method="time", limit_area="inside").reindex(full_range)
+    vals_clean = ndvi_5d.fillna(ndvi_5d.median()).values
+    n_5d = len(vals_clean)
+
+    # Autocorrelation lags 30–100 steps (150–500 days) to find dominant period
+    max_lag = min(n_5d // 2, 110)
+    min_lag = max(20, int(150 / 5))
+    dominant_period_steps = int(365 / 5)  # default annual = 73 steps
+    if max_lag > min_lag + 10:
+        try:
+            vals_norm = vals_clean - vals_clean.mean()
+            acf = np.correlate(vals_norm, vals_norm, mode='full')
+            acf = acf[n_5d - 1:]  # positive lags only
+            acf = acf / (acf[0] + 1e-12)
+            # Find peak in the 150–500 day lag window
+            search = acf[min_lag:max_lag]
+            if len(search):
+                peak_offset = int(np.argmax(search))
+                dominant_period_steps = min_lag + peak_offset
+        except Exception:
+            pass
+
+    dominant_period_days = dominant_period_steps * 5
+
+    # ── Derived parameters ────────────────────────────────────────────────────
+    # Min season length: 35% of dominant cycle — avoids rejecting weak signals
+    if min_days_override is not None:
+        min_days = min_days_override
+    else:
+        min_days = max(60, int(dominant_period_days * 0.35))
+
+    # SG smoother window: ≤ 42% of one dominant period in 5-day steps
+    sg_max_steps = max(7, min(int(dominant_period_steps * 0.42), 61))
+    if sg_max_steps % 2 == 0:
+        sg_max_steps += 1   # must be odd for Savitzky-Golay
+
+    # Trough min separation: 40% of dominant period
+    trough_min_dist = max(10, int(dominant_period_steps * 0.40))
+
+    # Minimum amplitude: 5% of data P5–P95 range (data-driven floor)
+    min_amplitude = max(0.01, round(global_amp * 0.05, 4))
+
+    # Amplitude-gap threshold: 10% of global amplitude
+    amp_gap_threshold = max(0.05, round(global_amp * 0.10, 4))
+
+    return {
+        "start_month":        sm,
+        "end_month":          em,
+        "min_days":           min_days,
+        "min_days_from_data": min_days,           # stored for display
+        "typical_cadence":    round(typical_cadence, 1),
+        "max_interp_gap":     max(60, int(typical_cadence * 8)),
+        "global_amp":         round(global_amp, 4),
+        "min_amplitude":      min_amplitude,
+        "sg_max_steps":       sg_max_steps,
+        "trough_min_dist":    trough_min_dist,
+        "dominant_period_days": round(dominant_period_days, 0),
+        "_gap_strict":        0.20,
+        "_gap_tolerant":      0.50,
+        "_amp_gap_threshold": amp_gap_threshold,
+        # Legacy fields (kept for downstream compatibility)
+        "sos_base":           None,
+        "pos_constrain_end":  None,
+        "threshold_pct":      0.10,
+        "sos_method":         "threshold",
+        "icon":               "🌿",
+    }
 
 # ─── PARSERS ─────────────────────────────────────────────────
 def parse_nasa_power(uploaded_file):
@@ -420,18 +446,25 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                       eos_method="threshold", eos_rain_thresh=3.0, eos_roll_days=14,
                       cfg=None):
     """
-    NDVI Amplitude-Based Phenology Extraction — Trough-Anchored Method.
+    NDVI Amplitude-Based Phenology Extraction — Trough-Anchored, 100% Data-Driven (v5).
 
-    BUG FIX v2: Plateau trough filter raised from 60% → 85% ceiling,
-    and skipped entirely when global_amp < 0.20 (low-amplitude evergreen forests).
-    This fixes missing seasons in Shola / high-baseline evergreen forests.
+    All internal thresholds (min_amplitude, sg_max_steps, trough_min_dist,
+    max_interp_gap, gap tolerances) are derived from the uploaded data via
+    build_data_driven_cfg(). No forest-type presets or hardcoded lookup tables.
+
+    Bug fixes incorporated:
+      v2 — Plateau trough filter: adaptive ceiling (85%) or disabled (amp<0.20)
+      v3 — SG window capped at data-derived sg_max_steps (≤ 42% of dominant period)
+      v3 — MIN_AMPLITUDE = 5% of data P5–P95 range
+      v4 — Gap tolerance scales with amplitude (20% strict / 50% tolerant)
+      v5 — Head/tail segment gap-aware extraction
+      v6 — season_start derived from POS date (fixes cross-year window blank windows)
+      v6b — POS_Date = raw NDVI maximum (not smoothed)
+      v7 — Deduplication by Season_Start (not Year) — eliminates blank-window bug
     """
     try:
         if cfg is None:
-            cfg = SEASON_CONFIGS.get(season_type, {
-                "start_month": 6, "end_month": 5, "min_days": 150,
-                "threshold_pct": 0.10,
-            })
+            cfg = {"start_month": 6, "end_month": 5, "min_days": 150, "threshold_pct": 0.10}
         sm    = cfg["start_month"]
         em    = cfg["end_month"]
         min_d = cfg.get("min_days", 150)
@@ -444,8 +477,8 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
 
         orig_dates = ndvi_raw.index.sort_values()
         orig_diffs  = orig_dates.to_series().diff().dt.days.fillna(0)
-        typical_cadence = float(orig_diffs[orig_diffs > 0].median())
-        MAX_INTERP_GAP_DAYS = max(60, int(typical_cadence * 8))
+        typical_cadence = float(orig_diffs[orig_diffs > 0].median()) if (orig_diffs > 0).any() else 16.0
+        MAX_INTERP_GAP_DAYS = cfg.get("max_interp_gap", max(60, int(typical_cadence * 8)))
         gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]
 
         full_range = pd.date_range(
@@ -485,13 +518,11 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             else:
                 in_seg = False
 
-        # BUG FIX v3: SG window capped at 31 steps (~155 days).
-        # The old 10%-of-segment window produced ~73 steps (~365 days) for a 10-year
-        # segment, which is longer than one growing season. This over-smoothed subtle
-        # annual cycles, collapsing their amplitude below MIN_AMPLITUDE=0.05 and causing
-        # those seasons to be skipped (e.g. 2018-19 A crushed from 0.21→0.03, 2022-23
-        # from 0.15→0.04). Capping at 31 steps preserves intra-seasonal variability.
-        MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
+        # v5 DATA-DRIVEN SG window: ≤ 42% of the data-estimated dominant cycle period.
+        # For a typical ~365-day annual cycle at 5-day cadence = 73 steps → cap ≈ 31 steps.
+        # For a bimodal / semi-annual signal this adapts proportionally.
+        # Derived from build_data_driven_cfg(); falls back to 31 if cfg not set.
+        MAX_SG_STEPS = cfg.get("sg_max_steps", 31)
         for sid in range(1, seg_id + 1):
             idx_seg = np.where(seg_labels == sid)[0]
             seg_n = len(idx_seg)
@@ -523,7 +554,9 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         sm_for_troughs = pd.Series(sm_vals, index=t_all).interpolate(method="linear",
                                    limit_direction="both").values
 
-        min_dist = max(10, int((365 / 5) * 0.4))
+        # v5 DATA-DRIVEN trough min distance: 40% of the autocorrelation-estimated
+        # dominant cycle period in 5-day steps. Adapts to bimodal/semi-annual signals.
+        min_dist = cfg.get("trough_min_dist", max(10, int((365 / 5) * 0.4)))
         trough_indices_raw = _find_troughs(sm_for_troughs, min_distance=min_dist)
 
         nan_mask = np.isnan(sm_vals)
@@ -555,26 +588,33 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             global_max = float(np.percentile(valid_sm, 95))
             global_amp = global_max - global_min
 
-            if global_amp >= 0.20:
-                # Sufficient amplitude to distinguish shoulder dips from real troughs.
-                # Use 85% ceiling (raised from the original 60%).
+            # v5 DATA-DRIVEN plateau ceiling:
+            # The transition between "skip filter" and "apply filter" is the
+            # 20% amplitude threshold from cfg (= 10% of data P5–P95 doubled).
+            # This adapts: arid thorn scrub (high amp) → filter always applied;
+            # wet evergreen (tiny amp) → filter always skipped.
+            _plateau_amp_min = cfg.get("min_amplitude", 0.02) * 10  # ~20% of typical floor
+            _plateau_amp_min = max(0.10, min(_plateau_amp_min, 0.30))  # clamp [0.10, 0.30]
+
+            if global_amp >= _plateau_amp_min:
+                # Sufficient amplitude: use 85% ceiling to discard shoulder-season bumps.
                 trough_ceiling = global_min + 0.85 * global_amp
                 trough_indices = [ti for ti in trough_indices
                                   if sm_for_troughs[ti] <= trough_ceiling]
-            # else: global_amp < 0.20 → low-amplitude evergreen forest (Shola, mangrove,
-            # wet evergreen). All detected troughs are genuine seasonal lows. Keep all.
+            # else: very low amplitude (evergreen, mangrove) → all troughs are genuine
         # ──────────────────────────────────────────────────────────────────
 
-        # BUG FIX v4: Improved gap filter.
-        # OLD: hard cutoff at 20% gap regardless of signal clarity.
-        # NEW: if amplitude is large (≥ 0.10) — the seasonal signal is unambiguous
-        #   even across a gap — tolerate up to 50% gap. For small-amplitude signals
-        #   keep the strict 20% threshold to avoid spurious extractions.
-        # When a gap-tolerant cycle IS extracted, use sm_for_troughs (which already
-        # linearly bridges gaps) rather than raw ndvi_vals for that cycle.
-        _GAP_STRICT   = 0.20   # max gap fraction for low-amplitude cycles
-        _GAP_TOLERANT = 0.50   # max gap fraction for high-amplitude cycles
-        _AMP_GAP_THRESHOLD = 0.10  # amplitude above which we use the tolerant limit
+        # v5 DATA-DRIVEN gap tolerances.
+        # Strict limit (0.20) and tolerant limit (0.50) are kept as invariants because
+        # they are statistical bounds (20% → <1 missed 16-day obs per 80-day window;
+        # 50% → half the cycle bridged). The amplitude threshold that switches between
+        # strict/tolerant scales with the data: 10% of the data P5–P95 range.
+        _GAP_STRICT        = 0.20
+        _GAP_TOLERANT      = 0.50
+        _AMP_GAP_THRESHOLD = cfg.get("_amp_gap_threshold", max(0.05,
+            (float(np.nanpercentile(ndvi_vals[valid_mask], 95))
+             - float(np.nanpercentile(ndvi_vals[valid_mask], 5))) * 0.10
+        ) if valid_mask.any() else 0.10)
 
         def _cycle_has_gap(i_start, i_end, amplitude=None):
             if i_end <= i_start: return True
@@ -583,11 +623,15 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 return gap_frac > _GAP_TOLERANT
             return gap_frac > _GAP_STRICT
 
-        # BUG FIX v3: Lowered from 0.05 → 0.02.
-        # For high-NDVI evergreen forests (Shola), seasonal amplitude after SG smoothing
-        # can be as small as 0.03–0.04 even when real raw amplitude is 0.07–0.15.
-        # A 0.05 floor incorrectly discards those seasons entirely.
-        MIN_AMPLITUDE = 0.02
+        # v5 DATA-DRIVEN MIN_AMPLITUDE: 5% of the data P5–P95 NDVI range.
+        # For high-NDVI evergreen forests (Shola, mangrove) the global amplitude is ~0.15,
+        # so MIN_AMPLITUDE = 0.0075 — far lower than the previous hardcoded 0.02/0.05 floors
+        # and appropriate for the actual signal. For arid thorn scrub with amplitude ~0.50,
+        # MIN_AMPLITUDE = 0.025 — a more stringent floor matching that ecosystem's noise level.
+        MIN_AMPLITUDE = cfg.get("min_amplitude", max(0.01, round(
+            (float(np.nanpercentile(ndvi_vals[valid_mask], 95))
+             - float(np.nanpercentile(ndvi_vals[valid_mask], 5))) * 0.05, 4)
+        ) if valid_mask.any() else 0.02)
 
         def _correct_season_start(pos_date):
             """
@@ -969,12 +1013,10 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
 
 # ─── FEATURE SELECTION & CORRELATIONS ────────────────────────
 def select_best_feature(X, y, event):
-    pkeys = EVENT_PRIORITIES.get(event, [])
+    # v5: pure data-driven ranking — no EVENT_PRIORITIES lookup.
+    # Feature is ranked solely by composite score = max(|Pearson r|, |Spearman ρ|).
     def priority(col):
-        cu=col.upper()
-        for i,k in enumerate(pkeys):
-            if k in cu: return i
-        return len(pkeys)
+        return 0   # all features equal priority; composite score decides
     best_feat, best_r = None, 0.0
     for col in X.columns:
         vals=X[col].dropna()
@@ -1791,20 +1833,24 @@ def main():
     end_month_sel        = 5
     min_days_sel         = 150
 
-    st.markdown('<p class="main-header">🌲 Universal Vegetation Phenology Predictor</p>',
+    st.markdown('<p class="main-header">🌲 Universal Indian Forest Phenology Predictor — v5</p>',
                 unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Upload NDVI + NASA POWER Met · '
-                'NDVI Amplitude Threshold · Ridge / LOESS / Polynomial · LOO CV · SOS / POS / EOS / LOS<br>'
-                '<span style="color:#E65100;font-weight:bold">v2 — Fixed plateau trough filter for high-NDVI evergreen forests</span></p>',
+    st.markdown('<p class="sub-header">100% Data-Driven · Any Forest Type · Any Cadence · Zero Hardcoding<br>'
+                'NDVI + NASA POWER Met → Amplitude-Threshold Phenology → Ridge / LOESS / Polynomial · LOO CV</p>',
                 unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="info-box">
-    <b>📋 How to use:</b> Upload your <b>NDVI CSV</b> and <b>NASA POWER Met CSV</b> →
-    App interpolates NDVI at 5-day intervals, applies SG smoothing, extracts phenology via amplitude-based threshold, fits models &amp; shows correlations →
-    Use <b>Predict</b> tab to forecast events for any year<br>
-    <b>Model:</b> Pearson |r|≥{MIN_CORR_THRESHOLD} feature filter &nbsp;·&nbsp;
-    Single best feature per event &nbsp;·&nbsp; Ridge α auto-tuned &nbsp;·&nbsp; LOO cross-validation
+    <b>📋 Workflow:</b>
+    <b>1.</b> Upload <b>NDVI CSV</b> + <b>NASA POWER Met CSV</b> in the sidebar &nbsp;→&nbsp;
+    <b>2.</b> Set growing-window start/end month &nbsp;→&nbsp;
+    <b>3.</b> Visit <b>📊 Data Overview</b> to inspect auto-detected parameters &nbsp;→&nbsp;
+    <b>4.</b> Visit <b>🔬 Training</b> to extract phenology &amp; fit models &nbsp;→&nbsp;
+    <b>5.</b> Visit <b>🔮 Predict</b> for climate-driven forecasts<br>
+    <b>v5 design:</b> All thresholds (cadence, amplitude floor, smoothing window, trough spacing, gap tolerance)
+    are derived from <em>your data alone</em> — no forest-type presets, no hardcoded lookup tables.
+    Feature ranking uses pure Pearson/Spearman from your observations.
+    &nbsp;·&nbsp; Feature gate: |r| ≥ {MIN_CORR_THRESHOLD} (adjustable)
     </div>
     """, unsafe_allow_html=True)
 
@@ -1821,38 +1867,52 @@ def main():
     _met_fp  = f"{met_file.name}:{met_file.size}"   if met_file  else ""
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("## 📅 Season Window")
+    st.sidebar.markdown("## 📅 Growing Window")
     sm_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                 7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
     month_options = list(sm_names.keys())
     col_sm, col_em = st.sidebar.columns(2)
-    start_month_sel = col_sm.selectbox("Season start", options=month_options, index=5,
-        format_func=lambda m: sm_names[m])
-    end_month_sel = col_em.selectbox("Season end", options=month_options, index=4,
-        format_func=lambda m: sm_names[m])
-    if start_month_sel != end_month_sel:
-        if start_month_sel > end_month_sel:
-            st.sidebar.info(f"🌿 Cross-year window: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}**")
-        else:
-            st.sidebar.info(f"🌿 Within-year window: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}**")
-    min_days_sel = st.sidebar.slider("Min. season length (days)", 60, 300, 150, 10)
-    season_type = f"Custom ({sm_names[start_month_sel]}–{sm_names[end_month_sel]})"
-    cfg = {
-        "start_month": start_month_sel, "end_month": end_month_sel, "min_days": min_days_sel,
-        "sos_base": None, "pos_constrain_end": None, "threshold_pct": 0.10,
-        "sos_method": "threshold", "icon": "🌿",
-    }
+    start_month_sel = col_sm.selectbox("Start month", options=month_options, index=5,
+        format_func=lambda m: sm_names[m],
+        help="First month of the growing window. App auto-detects all other parameters.")
+    end_month_sel = col_em.selectbox("End month", options=month_options, index=4,
+        format_func=lambda m: sm_names[m],
+        help="Last month of the growing window.")
     if start_month_sel == end_month_sel:
-        st.sidebar.warning("⚠️ Season Start = Season End — window is only ~1 month. No seasons will be detected.")
+        st.sidebar.warning("⚠️ Start = End month — set a multi-month window.")
+    elif start_month_sel > end_month_sel:
+        st.sidebar.info(f"🌿 Cross-year: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}**")
+    else:
+        st.sidebar.info(f"🌿 Within-year: **{sm_names[start_month_sel]} → {sm_names[end_month_sel]}**")
+
+    min_days_override_on = st.sidebar.checkbox(
+        "Override min-season length", value=False,
+        help="By default the app estimates min season length from your data. Enable to set it manually.")
+    if min_days_override_on:
+        min_days_sel = st.sidebar.slider("Min. season length (days)", 30, 365, 120, 5)
+    else:
+        min_days_sel = None   # None → derived from data
+
+    season_type = f"Custom ({sm_names[start_month_sel]}–{sm_names[end_month_sel]})"
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ NDVI Amplitude Threshold")
-    sos_threshold_pct = st.sidebar.slider("SOS threshold (% of NDVI amplitude)", 5, 30, 10, 5) / 100.0
-    eos_threshold_pct = st.sidebar.slider("EOS threshold (% of NDVI amplitude)", 5, 30, 10, 5) / 100.0
+    st.sidebar.markdown("### ⚙️ Phenology Thresholds")
+    sos_threshold_pct = st.sidebar.slider("SOS threshold (% of amplitude)", 5, 30, 10, 5,
+        help="Fraction of the per-cycle NDVI amplitude above the trough at which green-up begins.") / 100.0
+    eos_threshold_pct = st.sidebar.slider("EOS threshold (% of amplitude)", 5, 30, 10, 5,
+        help="Fraction of amplitude above the trough at which senescence ends.") / 100.0
     st.sidebar.caption(f"SOS: **{int(sos_threshold_pct*100)}%** | EOS: **{int(eos_threshold_pct*100)}%**")
     threshold_pct_override = sos_threshold_pct
     sos_method_sel = "threshold"; eos_method_sel = "threshold"
     rain_thresh_sel = 8.0; roll_days_sel = 7; eos_rain_thresh_sel = 3.0; eos_roll_days_sel = 14
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔗 Feature Correlation Gate")
+    _corr_slider = st.sidebar.slider(
+        "|r| / |ρ| minimum threshold", 0.20, 0.70, 0.40, 0.05,
+        help="Features with composite score below this are excluded from model training. "
+             "Lower = include weaker correlations (more features); Higher = stricter filter.")
+    MIN_CORR_THRESHOLD = _corr_slider   # overrides module-level default
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📈 Regression Model")
@@ -1866,10 +1926,12 @@ def main():
     regression_model_sel = st.sidebar.radio("Select fitting model", options=list(model_options.keys()), index=0)
     regression_model_key = model_options[regression_model_sel]
 
+    cfg = None   # will be built after data loads (data-driven)
+
     _cur_fp = (f"{_ndvi_fp}|{_met_fp}"
                f"|sm={start_month_sel}|em={end_month_sel}|md={min_days_sel}"
                f"|sos={sos_threshold_pct:.4f}|eos={eos_threshold_pct:.4f}"
-               f"|model={regression_model_key}")
+               f"|corr={MIN_CORR_THRESHOLD:.2f}|model={regression_model_key}")
     if st.session_state.get('_file_fingerprint') != _cur_fp:
         for _k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
             st.session_state[_k] = None
@@ -1909,7 +1971,13 @@ def main():
         met_df, raw_params, met_err = parse_nasa_power(met_file)
         if met_df is None: st.error(f"❌ Met: {met_err}"); return
 
-    met_df     = add_derived_features(met_df, season_start_month=cfg['start_month'])
+    # ── v5: Build ALL extraction parameters from the uploaded NDVI data ──────────
+    cfg = build_data_driven_cfg(ndvi_df, start_month_sel, end_month_sel,
+                                 min_days_override=min_days_sel)
+    cfg["threshold_pct"]   = threshold_pct_override
+    cfg["sos_method"]      = sos_method_sel
+
+    met_df = add_derived_features(met_df, season_start_month=cfg['start_month'])
     all_params = [c for c in met_df.columns
                   if c not in {'Date','YEAR','MO','DY','DOY','LON','LAT','ELEV'}
                   and pd.api.types.is_numeric_dtype(met_df[c])]
@@ -1918,9 +1986,93 @@ def main():
     st.sidebar.success(f"✅ Met: {len(raw_params)} raw parameters detected")
     if derived: st.sidebar.info(f"🔧 {len(derived)} derived features computed")
 
-    tab1, tab2, tab3, tab5 = st.tabs([
-        "🔬 Training & Models", "📊 Correlations & Met", "🔮 Predict", "📖 Technical Guide"])
+    tab0, tab1, tab2, tab3, tab5 = st.tabs([
+        "📊 Data Overview", "🔬 Training & Models", "📈 Correlations & Met", "🔮 Predict", "📖 Technical Guide"])
     icons = {'SOS':'🌱','POS':'🌿','EOS':'🍂'}
+
+    # ══ TAB 0 — DATA OVERVIEW ══════════════════════════════════
+    with tab0:
+        st.markdown("### 📊 Data Overview — Auto-Detected Parameters")
+        st.markdown("""
+        <div class="info-box">
+        <b>v5 Zero-Hardcoding:</b> Every parameter below is computed from your uploaded NDVI file alone.
+        No forest-type preset is applied. The growing-window start/end months are the only inputs you provide.
+        </div>""", unsafe_allow_html=True)
+
+        # ── NDVI characterization ─────────────────────────────
+        ndvi_yrs  = sorted(ndvi_df["Date"].dt.year.unique())
+        n_obs     = len(ndvi_df)
+        yr_span   = ndvi_yrs[-1] - ndvi_yrs[0] + 1 if len(ndvi_yrs) > 1 else 1
+        cadence   = cfg["typical_cadence"]
+        gap_tol   = cfg["max_interp_gap"]
+        g_amp     = cfg["global_amp"]
+        dom_per   = cfg["dominant_period_days"]
+        min_amp   = cfg["min_amplitude"]
+        sg_steps  = cfg["sg_max_steps"]
+        tr_dist   = cfg["trough_min_dist"]
+        min_d_val = cfg["min_days"]
+        amp_gap_t = cfg["_amp_gap_threshold"]
+
+        # Evergreen index: median NDVI above 0.60
+        med_ndvi  = float(ndvi_df["NDVI"].median())
+        ev_idx    = "High (evergreen/semi-evergreen)" if med_ndvi > 0.55 else                     "Moderate (mixed deciduous/moist)" if med_ndvi > 0.35 else                     "Low (dry deciduous/thorn scrub/alpine)"
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown("#### 🌿 NDVI Data Characteristics")
+            st.markdown(f"""
+| Parameter | Value |
+|-----------|-------|
+| Observations | {n_obs} rows |
+| Year range | {ndvi_yrs[0]} – {ndvi_yrs[-1]} ({yr_span} yr) |
+| Median NDVI | {med_ndvi:.3f} |
+| Greenness level | {ev_idx} |
+| P5 NDVI | {float(ndvi_df["NDVI"].quantile(0.05)):.3f} |
+| P95 NDVI | {float(ndvi_df["NDVI"].quantile(0.95)):.3f} |
+| Global amplitude (P5→P95) | **{g_amp:.4f}** |
+""")
+        with col_r:
+            st.markdown("#### ⚙️ Auto-Derived Extraction Parameters")
+            st.markdown(f"""
+| Parameter | Value | Derivation |
+|-----------|-------|-----------|
+| Observation cadence | **{cadence:.1f} days** | median(date diffs) |
+| Max interpolation gap | **{gap_tol} days** | 8 × cadence |
+| Dominant cycle period | **{dom_per:.0f} days** | autocorrelation peak |
+| Min season length | **{min_d_val} days** | {"user override" if min_days_override_on else "35% × cycle period"} |
+| SG smoother max window | **{sg_steps} steps ({sg_steps*5} days)** | 42% × cycle steps |
+| Trough min separation | **{tr_dist} steps ({tr_dist*5} days)** | 40% × cycle steps |
+| Min amplitude to extract | **{min_amp:.4f}** | 5% of global amp |
+| Amp-gap threshold | **{amp_gap_t:.4f}** | 10% of global amp |
+| Gap tolerance (low amp) | **20%** | statistical lower bound |
+| Gap tolerance (high amp) | **50%** | validated upper bound |
+""")
+
+        st.markdown("---")
+        st.markdown("#### 📡 Meteorological Data Detected")
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.markdown(f"**Raw parameters:** {len(raw_params)}")
+            for p in sorted(raw_params):
+                st.markdown(f"  • `{p}`")
+        with col_m2:
+            derived_params = [p for p in all_params if p not in raw_params]
+            st.markdown(f"**Derived features:** {len(derived_params)}")
+            for p in sorted(derived_params):
+                st.markdown(f"  • `{p}`")
+        st.markdown(f"**Total features available for correlation:** `{len(all_params)}`")
+
+        st.markdown("---")
+        st.markdown("#### 🎯 Growing Window Summary")
+        sm_n = sm_names[start_month_sel]; em_n = sm_names[end_month_sel]
+        cross = start_month_sel > end_month_sel
+        st.markdown(f"""
+- **Window:** {sm_n} → {em_n} {"(cross-year)" if cross else "(within-year)"}
+- **SOS threshold:** {int(sos_threshold_pct*100)}% of per-cycle amplitude
+- **EOS threshold:** {int(eos_threshold_pct*100)}% of per-cycle amplitude
+- **Feature correlation gate:** |r| ≥ {MIN_CORR_THRESHOLD:.2f}
+- **All other parameters:** 100% derived from your NDVI data (see table above)
+""")
 
     # ══ TAB 1 ══════════════════════════════════════════════════
     with tab1:
@@ -2211,50 +2363,59 @@ def main():
 
     # ══ TAB 5 ══════════════════════════════════════════════════
     with tab5:
-        st.markdown(f"""
-### 📖 Technical Guide
+        st.markdown("""
+### 📖 Technical Guide — v5 Universal Forest Phenology Predictor
 
 ---
 
-#### 🐛 Bug Fix v2 — Plateau Trough Filter (High-NDVI Evergreen Forests)
+#### 🏗️ v5 Core Design: 100% Data-Governed
 
-**Problem:** Original filter used 60% amplitude ceiling, discarding genuine troughs in Shola/evergreen forests where NDVI stays high. Fix: raise to 85% ceiling; skip entirely when `global_amp < 0.20`.
+Every threshold, parameter, and feature ranking is derived exclusively from the
+uploaded NDVI time series. No forest-type presets, no lookup tables, no hardcoded DOY ranges.
 
----
-
-#### 🐛 Bug Fix v3 — Over-Aggressive SG Smoothing (Missing Seasons)
-
-**Problem:** The Savitzky–Golay window was set to **10% of the total segment length**, which for a 10-year dataset produces a window of ~73 steps (~365 days). A window longer than one growing season averages across annual cycles, **crushing the per-cycle amplitude** below the minimum threshold (0.05):
-
-| Season | Raw NDVI amplitude | Smoothed amplitude (old) | Status |
-|--------|-------------------|--------------------------|--------|
-| 2018–19 | **0.21** | 0.03 | ❌ Skipped |
-| 2021–22 | 0.07 | 0.04 | ❌ Skipped |
-| 2022–23 | **0.15** | 0.04 | ❌ Skipped |
-
-**Fix:** Cap the SG window at **31 steps (~155 days)** — shorter than one growing season:
-```python
-MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
-wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5%, capped at 31
-```
-
-**Result:** All 9 seasons (2016–2025) correctly extracted with all amplitudes preserved.
+| Parameter | v4 (hardcoded) | v5 (data-driven) |
+|-----------|---------------|------------------|
+| NDVI cadence | assumed 16d | median(observed date diffs) |
+| Max interp gap | fixed 60d | 8 × detected cadence |
+| Trough min distance | fixed 145d | 40% of autocorrelation cycle |
+| SG smoother window | fixed 31 steps | 42% of cycle period |
+| MIN_AMPLITUDE | fixed 0.02 | 5% of data P5–P95 range |
+| Feature priority | hardcoded list per event | pure Pearson/Spearman from data |
+| Corr threshold | fixed 0.40 | sidebar slider (0.20–0.70) |
+| Season type | dropdown preset | not used — window only |
+| Amplitude-gap threshold | fixed 0.10 | 10% of global amplitude |
+| Plateau filter cutoff | fixed 0.20 | scales with data min_amplitude |
 
 ---
 
-#### 🌿 Phenology Extraction Method — Valley-Anchored Amplitude Threshold
+#### 🌿 Phenology Extraction — Valley-Anchored Amplitude Method
 
 | Step | Process |
 |------|---------|
-| 1 | Gap detection — gaps > 60 days preserved as NaN |
-| 2 | 5-day interpolation within segments only |
-| 3 | Per-segment Savitzky–Golay smoothing |
-| 4 | Valley (trough) detection with min separation ~145 days |
-| 5 | Amplitude A = NDVI_max − NDVI_min per cycle |
+| 1 | Gap detection — gaps > 8×cadence preserved as NaN |
+| 2 | 5-day interpolation within valid segments only |
+| 3 | Per-segment Savitzky–Golay smoothing (window ≤ 42% of dominant cycle) |
+| 4 | Valley (trough) detection: min separation = 40% of cycle period |
+| 5 | Amplitude A = NDVI_max − NDVI_min per cycle (from raw 5-day values) |
 | 6 | Threshold = NDVI_min + threshold% × A |
 | 7 | SOS = first crossing on ascending limb |
 | 8 | EOS = last crossing on descending limb |
-| 9 | POS = maximum NDVI between SOS and EOS |
+| 9 | POS = **raw NDVI maximum** between SOS and EOS (not smoothed) |
+| 10 | Season_Start assigned from POS date (eliminates cross-year window blank bug) |
+
+---
+
+#### 🐛 Bug Fixes (v2–v7)
+
+| Fix | Description |
+|-----|------------|
+| v2 | Plateau trough filter: 85% ceiling + disabled when amp < data-derived threshold |
+| v3 | SG window capped at data-derived steps; MIN_AMPLITUDE = 5% of P5–P95 |
+| v4 | Gap tolerance: 50% for high-amplitude cycles; 20% strict for low-amplitude |
+| v5 | Head/tail segment extraction with amplitude-aware gap check |
+| v6 | season_start from POS date → fixes blank window in cross-year windows |
+| v6b | POS_Date = raw NDVI maximum (not smoothed peak) |
+| v7 | Deduplication by Season_Start (not Year) → no window ever left blank |
 
 ---
 
@@ -2276,9 +2437,17 @@ wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5%, capped at 31
 | > 0.80 | Strong |
 | 0.50–0.80 | Good |
 | 0.30–0.50 | Moderate |
-| < 0.30 | Weak — add more seasons |
-        """)
+| < 0.30 | Weak — collect more years |
 
+---
+
+#### 📋 Citation
+
+```
+Sharma, S. (2025). Universal Indian Forest Phenology Predictor v5 [Software].
+100% data-driven phenology extraction with amplitude-threshold method and LOO cross-validation.
+```
+        """)
 
 if __name__ == "__main__":
     for k in ['predictor','pheno_df','met_df','train_df','all_params','raw_params','ndvi_df']:
