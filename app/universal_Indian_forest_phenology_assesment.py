@@ -1850,7 +1850,7 @@ def main():
     <b>v5 design:</b> All thresholds (cadence, amplitude floor, smoothing window, trough spacing, gap tolerance)
     are derived from <em>your data alone</em> — no forest-type presets, no hardcoded lookup tables.
     Feature ranking uses pure Pearson/Spearman from your observations.
-    &nbsp;·&nbsp; Feature gate: |r| ≥ {MIN_CORR_THRESHOLD} (adjustable)
+    &nbsp;·&nbsp; Feature gate: |r| ≥ 0.40 by default (adjustable in sidebar)
     </div>
     """, unsafe_allow_html=True)
 
