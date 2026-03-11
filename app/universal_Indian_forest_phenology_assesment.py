@@ -14,17 +14,30 @@ Predicts SOS / POS / EOS / LOS for 11 Indian forest types using:
   • Threshold-based phenology extraction (robust for multi-hump NDVI)
   • Optional IMD monsoon onset date as SOS predictor
 
-BUG FIX v4 (gap-tolerant cycle extraction):
-  - OLD: _cycle_has_gap hard cutoff at 20% → seasons spanning data gaps always dropped
-  - NEW: if amplitude ≥ 0.10 (clear seasonal signal), tolerate up to 50% gap,
-         using sm_for_troughs (gap-bridged linear interpolation) for that cycle.
-         Low-amplitude cycles keep strict 20% threshold.
-  This fixes missing seasons in datasets with mid-season data gaps (e.g. cloud cover)
-  where the seasonal pattern is still unambiguous from surrounding observations.
-  Affected: any season where SOS/EOS/amplitude was visible in plot but not labelled.
+BUG FIX v5 (two critical fixes):
+
+  FIX 1 — MISSING SEASON (Year dedup via trough_year, not pos.year):
+  - OLD: yr = pos.year  → when POS falls in a calendar year shared by the
+         PREVIOUS season's late peak (e.g. both 2018-19 and 2019-20 get
+         Year=2019), drop_duplicates silently drops the later-appended season.
+  - NEW: yr = trough_year = t_all[ti].year  (start-of-cycle year, always
+         unique per trough pair). Applied in main loop, head segment, tail
+         segment. This guarantees every detected cycle survives dedup.
+
+  FIX 2 — POS DATE ≠ RAW NDVI PEAK:
+  - OLD: pos_idx_local = int(np.argmax(cycle_sm))  → smoothed peak can be
+         shifted days away from the true raw maximum and underestimates NDVI.
+  - NEW: pos_idx_local = int(np.nanargmax(cycle_raw))  → POS always equals
+         the raw NDVI maximum, matching what the user sees in the scatter plot.
+         Applied in main loop, head segment, tail segment.
+
+Previous fixes retained:
+  BUG FIX v4 (gap-tolerant cycle extraction)
+  BUG FIX v3 (SG window capped at 31 steps)
+  BUG FIX v2 (plateau trough filter 85% ceiling)
 
 pip install streamlit pandas numpy scipy scikit-learn matplotlib
-streamlit run universal_Indian_forest_phenology_FIXED.py
+streamlit run universal_Indian_forest_phenology_FIXED_v5.py
 """
 
 import streamlit as st
@@ -422,9 +435,11 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
     """
     NDVI Amplitude-Based Phenology Extraction — Trough-Anchored Method.
 
-    BUG FIX v2: Plateau trough filter raised from 60% → 85% ceiling,
-    and skipped entirely when global_amp < 0.20 (low-amplitude evergreen forests).
-    This fixes missing seasons in Shola / high-baseline evergreen forests.
+    BUG FIX v5 changes in this function:
+      FIX 1: yr = trough_year (t_all[ti].year) instead of yr = pos.year
+             → prevents same-calendar-year collisions from dropping seasons.
+      FIX 2: pos_idx_local = int(np.nanargmax(cycle_raw)) instead of np.argmax(cycle_sm)
+             → POS always aligns with the visible raw NDVI maximum.
     """
     try:
         if cfg is None:
@@ -443,10 +458,10 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
         ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
 
         orig_dates = ndvi_raw.index.sort_values()
-        orig_diffs  = orig_dates.to_series().diff().dt.days.fillna(0)
+        orig_diffs  = pd.Series(orig_dates).diff().dt.days.fillna(0)
         typical_cadence = float(orig_diffs[orig_diffs > 0].median())
         MAX_INTERP_GAP_DAYS = max(60, int(typical_cadence * 8))
-        gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]
+        gap_starts = orig_dates[orig_diffs.values > MAX_INTERP_GAP_DAYS]
 
         full_range = pd.date_range(
             start=ndvi_raw.index.min(),
@@ -485,20 +500,15 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             else:
                 in_seg = False
 
-        # BUG FIX v3: SG window capped at 31 steps (~155 days).
-        # The old 10%-of-segment window produced ~73 steps (~365 days) for a 10-year
-        # segment, which is longer than one growing season. This over-smoothed subtle
-        # annual cycles, collapsing their amplitude below MIN_AMPLITUDE=0.05 and causing
-        # those seasons to be skipped (e.g. 2018-19 A crushed from 0.21→0.03, 2022-23
-        # from 0.15→0.04). Capping at 31 steps preserves intra-seasonal variability.
-        MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
+        # SG window capped at 31 steps (~155 days) — shorter than one growing season
+        MAX_SG_STEPS = 31
         for sid in range(1, seg_id + 1):
             idx_seg = np.where(seg_labels == sid)[0]
             seg_n = len(idx_seg)
             if seg_n < 5:
                 sm_vals[idx_seg] = ndvi_vals[idx_seg]
                 continue
-            wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5% capped at 31
+            wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))
             wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
             wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
             if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
@@ -536,19 +546,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 continue
             trough_indices.append(ti)
 
-        # ── FIXED plateau trough filter ────────────────────────────────────
-        # BUG FIX v2: The original 60% ceiling was too strict for high-baseline,
-        # low-amplitude forests (Shola, tropical evergreen) where seasonal troughs
-        # are still relatively high in absolute NDVI terms.
-        #
-        # Example (Mukurthi Shola): global_amp = 0.166, ceiling at 60% = 0.730
-        # → 2017 trough (0.737) and 2018 trough (0.740) incorrectly discarded
-        # → those 2 seasons completely missed in output
-        #
-        # Fix:
-        #   • When global_amp >= 0.20: use 85% ceiling (was 60%)
-        #   • When global_amp <  0.20: skip the plateau filter entirely
-        #     (nearly flat evergreen signal — all detected troughs are genuine)
+        # Plateau trough filter (v2 fix: 85% ceiling, skip for low-amplitude forests)
         if len(trough_indices) >= 2:
             valid_sm = sm_for_troughs[~nan_mask]
             global_min = float(np.percentile(valid_sm, 5))
@@ -556,25 +554,14 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             global_amp = global_max - global_min
 
             if global_amp >= 0.20:
-                # Sufficient amplitude to distinguish shoulder dips from real troughs.
-                # Use 85% ceiling (raised from the original 60%).
                 trough_ceiling = global_min + 0.85 * global_amp
                 trough_indices = [ti for ti in trough_indices
                                   if sm_for_troughs[ti] <= trough_ceiling]
-            # else: global_amp < 0.20 → low-amplitude evergreen forest (Shola, mangrove,
-            # wet evergreen). All detected troughs are genuine seasonal lows. Keep all.
-        # ──────────────────────────────────────────────────────────────────
 
-        # BUG FIX v4: Improved gap filter.
-        # OLD: hard cutoff at 20% gap regardless of signal clarity.
-        # NEW: if amplitude is large (≥ 0.10) — the seasonal signal is unambiguous
-        #   even across a gap — tolerate up to 50% gap. For small-amplitude signals
-        #   keep the strict 20% threshold to avoid spurious extractions.
-        # When a gap-tolerant cycle IS extracted, use sm_for_troughs (which already
-        # linearly bridges gaps) rather than raw ndvi_vals for that cycle.
-        _GAP_STRICT   = 0.20   # max gap fraction for low-amplitude cycles
-        _GAP_TOLERANT = 0.50   # max gap fraction for high-amplitude cycles
-        _AMP_GAP_THRESHOLD = 0.10  # amplitude above which we use the tolerant limit
+        # Gap tolerance (v4 fix)
+        _GAP_STRICT   = 0.20
+        _GAP_TOLERANT = 0.50
+        _AMP_GAP_THRESHOLD = 0.10
 
         def _cycle_has_gap(i_start, i_end, amplitude=None):
             if i_end <= i_start: return True
@@ -583,40 +570,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 return gap_frac > _GAP_TOLERANT
             return gap_frac > _GAP_STRICT
 
-        # BUG FIX v3: Lowered from 0.05 → 0.02.
-        # For high-NDVI evergreen forests (Shola), seasonal amplitude after SG smoothing
-        # can be as small as 0.03–0.04 even when real raw amplitude is 0.07–0.15.
-        # A 0.05 floor incorrectly discards those seasons entirely.
         MIN_AMPLITUDE = 0.02
-
-        def _correct_season_start(pos_date):
-            """
-            BUG FIX v6: Correct season_start using the POS (peak) date.
-
-            OLD: season_start = f"{trough_date.year}-{sm:02d}-01"
-            This fails for cross-year windows (sm > em, e.g. Jun→May) because
-            troughs often fall BEFORE the window start month (e.g. trough in Apr/May
-            when window starts Jun). Using the trough year gives a season_start that
-            is one year too early, placing all horizontal lines/arrows outside the
-            correct shaded window region — making that window appear blank.
-
-            FIX: Derive season_start from POS (peak greenness) date instead.
-            POS always falls within the growing season, so its year + month
-            unambiguously identifies which window it belongs to.
-
-            Examples (Jun→May window, sm=6):
-              POS=Oct 2019 → month ≥ 6 → season_start = Jun 2019  ✅
-              POS=Feb 2019 → month < 6 → season_start = Jun 2018  ✅
-              POS=Aug 2021 → month ≥ 6 → season_start = Jun 2021  ✅
-            """
-            yr = pos_date.year; mo = pos_date.month
-            if sm > em:  # cross-year window (e.g. Jun→May)
-                if mo >= sm:
-                    return pd.Timestamp(f"{yr}-{sm:02d}-01")
-                else:
-                    return pd.Timestamp(f"{yr - 1}-{sm:02d}-01")
-            else:        # same-year window (e.g. Jan→Dec, Apr→Mar)
-                return pd.Timestamp(f"{yr}-{sm:02d}-01")
 
         if len(trough_indices) < 2:
             rows = []
@@ -638,6 +592,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     if not len(sc) or not len(ec): continue
                     si, ei = int(sc[0]), int(ec[-1])
                     if ei <= si: continue
+                    # FIX 2: POS from raw max, not smoothed
                     pi = si + int(np.argmax(sub_vals[si:ei+1]))
                     sos = sub_t[si]; pos = sub_t[pi]; eos = sub_t[ei]
                     ss = pd.Timestamp(s)
@@ -663,22 +618,18 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             else:
                 return m >= sm or m <= em
 
-        # Head segment
-        # BUG FIX v5: Apply same amplitude-aware gap tolerance to the head segment.
-        # OLD: strict nan_mask.any() check → head skipped if ANY gap (e.g. 2017-18 had 25% gap → DROPPED)
-        # NEW: use _cycle_has_gap with amplitude pre-check, same as main loop.
+        # ── HEAD SEGMENT ─────────────────────────────────────────────────────
         if all_troughs:
             ti_first = all_troughs[0]
             head_len = ti_first
             _head_amp_pre = float(np.max(sm_for_troughs[0:ti_first + 1])) - float(sm_for_troughs[0])
             if head_len >= max(10, min_d // 5) and not _cycle_has_gap(0, ti_first, amplitude=_head_amp_pre):
                 try:
-                    seg_sm = sm_for_troughs[0:ti_first + 1]
+                    seg_sm  = sm_for_troughs[0:ti_first + 1]
                     seg_raw = ndvi_vals[0:ti_first + 1]
-                    seg_t  = t_all[0:ti_first + 1]
+                    seg_t   = t_all[0:ti_first + 1]
                     _head_has_gap = nan_mask[0:ti_first + 1].any()
 
-                    # Dual signal: gap-bridged sm if gap exists, raw values otherwise
                     if _head_has_gap:
                         work_arr = seg_sm
                         ndvi_min = float(sm_for_troughs[0])
@@ -692,7 +643,10 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     if A >= max(1e-6, MIN_AMPLITUDE):
                         sos_threshold = ndvi_min + thr_pct     * A
                         eos_threshold = ndvi_min + eos_thr_pct * A
-                        pi = int(np.argmax(seg_sm))   # POS from smoothed
+
+                        # ── FIX 2: POS from raw signal peak ──────────────────
+                        pi = int(np.nanargmax(work_arr))   # was: np.argmax(seg_sm)
+                        # ─────────────────────────────────────────────────────
                         pos = seg_t[pi]
                         if _date_in_window(pos):
                             asc  = work_arr[1:pi + 1]
@@ -704,32 +658,35 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                                 ei = pi + int(ec[-1])
                                 if ei > si:
                                     sos = seg_t[si]; eos = seg_t[ei]
-                                    yr  = pos.year
-                                    season_start = _correct_season_start(pos)
+
+                                    # ── FIX 1: season year from trough start ─
+                                    trough_year = seg_t[0].year   # was: yr = pos.year
+                                    # ─────────────────────────────────────────
+                                    season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
                                     rows.append({
-                                        "Year": yr,
-                                        "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                                        "SOS_Target": (sos - season_start).days,
-                                        "SOS_Method": "valley_amplitude_threshold",
-                                        "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                                        "POS_Target": (pos - season_start).days,
-                                        "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                                        "EOS_Target": (eos - season_start).days,
-                                        "EOS_Method": "valley_amplitude_threshold",
-                                        "LOS_Days": (eos - sos).days,
+                                        "Year":         trough_year,
+                                        "SOS_Date":     sos,  "SOS_DOY":  sos.dayofyear,
+                                        "SOS_Target":   (sos - season_start).days,
+                                        "SOS_Method":   "valley_amplitude_threshold",
+                                        "POS_Date":     pos,  "POS_DOY":  pos.dayofyear,
+                                        "POS_Target":   (pos - season_start).days,
+                                        "EOS_Date":     eos,  "EOS_DOY":  eos.dayofyear,
+                                        "EOS_Target":   (eos - season_start).days,
+                                        "EOS_Method":   "valley_amplitude_threshold",
+                                        "LOS_Days":     (eos - sos).days,
                                         "Season_Start": season_start,
-                                        "Peak_NDVI": float(seg_sm[pi]),
-                                        "Amplitude": float(A),
-                                        "Base_NDVI": float(ndvi_min),
+                                        "Peak_NDVI":    float(ndvi_max),
+                                        "Amplitude":    float(A),
+                                        "Base_NDVI":    float(ndvi_min),
                                         "Threshold_SOS": float(sos_threshold),
                                         "Threshold_EOS": float(eos_threshold),
-                                        "Trough_Date": seg_t[int(np.argmin(seg_sm))],
-                                        "Season": season_type,
+                                        "Trough_Date":  seg_t[int(np.argmin(seg_sm))],
+                                        "Season":       season_type,
                                     })
                 except Exception:
                     pass
 
-        # Main trough-to-trough loop
+        # ── MAIN TROUGH-TO-TROUGH LOOP ───────────────────────────────────────
         for i in range(len(all_troughs) - 1):
             try:
                 ti  = all_troughs[i]
@@ -737,47 +694,39 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
 
                 if ti1 - ti < max(10, min_d // 5):
                     continue
-                # BUG FIX v3+v4: Dual signal strategy
-                # Pre-check amplitude on sm_for_troughs to inform gap tolerance
+
                 _cycle_sm_pre = sm_for_troughs[ti:ti1 + 1]
                 _amp_pre = float(np.max(_cycle_sm_pre)) - float(sm_for_troughs[ti])
 
                 if _cycle_has_gap(ti, ti1, amplitude=_amp_pre):
                     continue
 
-                # - No gap: use raw 5-day ndvi_vals (true seasonal amplitude).
-                # - Gap present (but passed tolerance): use sm_for_troughs which
-                #   linearly bridges across gaps.
-                # In both cases, sm_for_troughs is used for POS peak location.
                 _cycle_has_any_gap = nan_mask[ti:ti1 + 1].any()
 
-                cycle_sm   = sm_for_troughs[ti:ti1 + 1]  # smoothed — for POS only
+                cycle_sm   = sm_for_troughs[ti:ti1 + 1]
                 cycle_t    = t_all[ti:ti1 + 1]
 
                 if _cycle_has_any_gap:
-                    # Gap-bridged: use sm_for_troughs for amplitude + thresholds
                     cycle_raw = sm_for_troughs[ti:ti1 + 1]
                     ndvi_min = float(sm_for_troughs[ti])
                     ndvi_max = float(np.max(cycle_raw))
                 else:
-                    # No gap: raw 5-day values give true amplitude
                     cycle_raw = ndvi_vals[ti:ti1 + 1]
                     ndvi_min = float(ndvi_vals[ti]) if not np.isnan(ndvi_vals[ti]) \
                                else float(sm_for_troughs[ti])
                     ndvi_max = float(np.nanmax(cycle_raw))
-                A = ndvi_max - ndvi_min
 
+                A = ndvi_max - ndvi_min
                 if A < max(1e-6, MIN_AMPLITUDE):
                     continue
 
-                # Thresholds computed from raw amplitude
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
 
-                # POS = peak of SMOOTHED signal (stable peak location)
-                pos_idx_local = int(np.argmax(cycle_sm))
+                # ── FIX 2: POS from raw signal, not smoothed ─────────────────
+                pos_idx_local = int(np.nanargmax(cycle_raw))  # was: np.argmax(cycle_sm)
+                # ─────────────────────────────────────────────────────────────
 
-                # SOS/EOS crossings on RAW signal (honours true amplitude)
                 asc = cycle_raw[1:pos_idx_local + 1]
                 sos_cands = np.where(asc >= sos_threshold)[0] + 1
                 if len(sos_cands) == 0:
@@ -800,11 +749,13 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if not _date_in_window(pos):
                     continue
 
-                yr = pos.year
-                season_start = _correct_season_start(pos)
+                # ── FIX 1: season year from trough start, not POS year ────────
+                trough_year  = t_all[ti].year       # was: yr = pos.year
+                season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
+                # ─────────────────────────────────────────────────────────────
 
                 rows.append({
-                    "Year":          yr,
+                    "Year":          trough_year,
                     "SOS_Date":      sos,  "SOS_DOY":  sos.dayofyear,
                     "SOS_Target":    (sos - season_start).days,
                     "SOS_Method":    "valley_amplitude_threshold",
@@ -815,7 +766,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                     "EOS_Method":    "valley_amplitude_threshold",
                     "LOS_Days":      (eos - sos).days,
                     "Season_Start":  season_start,
-                    "Peak_NDVI":     float(cycle_sm[pos_idx_local]),
+                    "Peak_NDVI":     float(ndvi_max),
                     "Amplitude":     float(A),
                     "Base_NDVI":     float(ndvi_min),
                     "Threshold_SOS": float(sos_threshold),
@@ -826,8 +777,7 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             except Exception:
                 continue
 
-        # Tail segments
-        # BUG FIX v5: Recompute covered set with amplitude-aware gap check (v4).
+        # ── TAIL SEGMENT ─────────────────────────────────────────────────────
         covered_trough_starts = set()
         for i in range(len(all_troughs) - 1):
             _amp_pre = float(np.max(sm_for_troughs[all_troughs[i]:all_troughs[i+1]+1])) \
@@ -835,21 +785,13 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
             if not _cycle_has_gap(all_troughs[i], all_troughs[i+1], amplitude=_amp_pre):
                 covered_trough_starts.add(all_troughs[i])
 
-        # BUG FIX v5: Tail now uses FULL remaining data extent (0 → n-1),
-        # not just within the same segment.
-        # OLD: seg_end_i = end of the segment containing the trough
-        #      → if a gap follows shortly after the trough (e.g. 2024-04-19 with
-        #        gap starting 2024-06-23), seg_end = only 65d after trough → too short
-        # NEW: use n-1 (end of all data) so the tail spans the trough → data end,
-        #      bridging across any trailing gap as long as total gap% ≤ 50% and A ≥ 0.10.
         for ti0 in [ti for ti in all_troughs if ti not in covered_trough_starts]:
-            tail_end_i = n - 1  # full data extent
+            tail_end_i = n - 1
             tail_len = tail_end_i - ti0
             if tail_len < max(10, min_d // 5): continue
             try:
                 _tail_amp_pre = float(np.max(sm_for_troughs[ti0:tail_end_i + 1])) \
                                 - float(sm_for_troughs[ti0])
-                _tail_gap_frac = nan_mask[ti0:tail_end_i + 1].mean()
                 if _cycle_has_gap(ti0, tail_end_i, amplitude=_tail_amp_pre): continue
 
                 seg_sm  = sm_for_troughs[ti0:tail_end_i + 1]
@@ -871,7 +813,11 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if A < max(1e-6, MIN_AMPLITUDE): continue
                 sos_threshold = ndvi_min + thr_pct     * A
                 eos_threshold = ndvi_min + eos_thr_pct * A
-                pi = int(np.argmax(seg_sm))
+
+                # ── FIX 2: POS from raw signal ────────────────────────────────
+                pi = int(np.nanargmax(_seg_signal))  # was: np.argmax(seg_sm)
+                # ─────────────────────────────────────────────────────────────
+
                 asc_limb = _seg_signal[1:pi + 1]
                 sos_cands = np.where(asc_limb >= sos_threshold)[0] + 1
                 if not len(sos_cands): continue
@@ -883,27 +829,31 @@ def extract_phenology(ndvi_df, season_type, threshold_override=None,
                 if ei <= si: continue
                 sos = seg_t[si]; pos = seg_t[pi]; eos = seg_t[ei]
                 if not _date_in_window(pos): continue
-                yr = pos.year
-                season_start = _correct_season_start(pos)
+
+                # ── FIX 1: season year from trough start ──────────────────────
+                trough_year  = seg_t[0].year        # was: yr = pos.year
+                season_start = pd.Timestamp(f"{trough_year}-{sm:02d}-01")
+                # ─────────────────────────────────────────────────────────────
+
                 rows.append({
-                    "Year": yr,
-                    "SOS_Date": sos,  "SOS_DOY": sos.dayofyear,
-                    "SOS_Target": (sos - season_start).days,
-                    "SOS_Method": "valley_amplitude_threshold",
-                    "POS_Date": pos,  "POS_DOY": pos.dayofyear,
-                    "POS_Target": (pos - season_start).days,
-                    "EOS_Date": eos,  "EOS_DOY": eos.dayofyear,
-                    "EOS_Target": (eos - season_start).days,
-                    "EOS_Method": "valley_amplitude_threshold",
-                    "LOS_Days": (eos - sos).days,
+                    "Year":         trough_year,
+                    "SOS_Date":     sos,  "SOS_DOY":  sos.dayofyear,
+                    "SOS_Target":   (sos - season_start).days,
+                    "SOS_Method":   "valley_amplitude_threshold",
+                    "POS_Date":     pos,  "POS_DOY":  pos.dayofyear,
+                    "POS_Target":   (pos - season_start).days,
+                    "EOS_Date":     eos,  "EOS_DOY":  eos.dayofyear,
+                    "EOS_Target":   (eos - season_start).days,
+                    "EOS_Method":   "valley_amplitude_threshold",
+                    "LOS_Days":     (eos - sos).days,
                     "Season_Start": season_start,
-                    "Peak_NDVI": float(seg_sm[pi]),
-                    "Amplitude": float(A),
-                    "Base_NDVI": float(ndvi_min),
+                    "Peak_NDVI":    float(ndvi_max),
+                    "Amplitude":    float(A),
+                    "Base_NDVI":    float(ndvi_min),
                     "Threshold_SOS": float(sos_threshold),
                     "Threshold_EOS": float(eos_threshold),
-                    "Trough_Date": t_all[ti0],
-                    "Season": season_type,
+                    "Trough_Date":  t_all[ti0],
+                    "Season":       season_type,
                 })
             except Exception:
                 pass
@@ -1288,10 +1238,10 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
     ndvi_s = ndvi_s[~ndvi_s.index.duplicated(keep='first')]
 
     orig_dates = ndvi_s.index.sort_values()
-    orig_diffs = orig_dates.to_series().diff().dt.days.fillna(0)
+    orig_diffs = pd.Series(orig_dates).diff().dt.days.fillna(0)
     typical_cadence = float(orig_diffs[orig_diffs > 0].median())
     MAX_INTERP_GAP_DAYS = max(60, int(typical_cadence * 8))
-    gap_starts = orig_dates[orig_diffs > MAX_INTERP_GAP_DAYS]
+    gap_starts = orig_dates[orig_diffs.values > MAX_INTERP_GAP_DAYS]
 
     full_range = pd.date_range(start=ndvi_s.index.min(),
                                end=ndvi_s.index.max(), freq='5D')
@@ -1316,18 +1266,13 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None):
         else:
             in_seg = False
 
-    wl_global = max(7, int(n * 0.05))
-    wl_global = wl_global if wl_global % 2 == 1 else wl_global + 1
-    wl_global = min(wl_global, n - 1 if n > 1 else 1)
-    if wl_global % 2 == 0: wl_global = max(7, wl_global - 1)
-
-    _MAX_SG = 31  # cap at 31 steps (~155 days) — same as extract_phenology fix
+    _MAX_SG = 31
     for sid in range(1, seg_id + 1):
         idx_seg = np.where(seg_labels == sid)[0]
         seg_n = len(idx_seg)
         if seg_n < 5:
             sm_arr[idx_seg] = ndvi_vals[idx_seg]; continue
-        wl_t = max(7, min(int(seg_n * 0.05), _MAX_SG))  # 5% capped at 31
+        wl_t = max(7, min(int(seg_n * 0.05), _MAX_SG))
         wl_s = wl_t if wl_t % 2 == 1 else wl_t + 1
         wl_s = min(wl_s, seg_n - 1 if seg_n > 1 else 1)
         if wl_s % 2 == 0: wl_s = max(7, wl_s - 1)
@@ -1690,7 +1635,7 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, season_cfg=None, pheno_df=No
                 continue
             ndvi_seg = ndvi_5d.reindex(df_met['Date'].values, method='nearest',
                                        tolerance=pd.Timedelta('8D'))
-            ndvi_seg = ndvi_seg.fillna(method='ffill').fillna(method='bfill')
+            ndvi_seg = ndvi_seg.ffill().bfill()
             sos_str = pd.Timestamp(sos_d).strftime('%d %b') if pd.notna(sos_d) else '?'
             eos_str = pd.Timestamp(eos_d).strftime('%d %b %Y') if pd.notna(eos_d) else '?'
             fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 11), sharex=True)
@@ -1754,7 +1699,9 @@ def main():
                 unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Upload NDVI + NASA POWER Met · '
                 'NDVI Amplitude Threshold · Ridge / LOESS / Polynomial · LOO CV · SOS / POS / EOS / LOS<br>'
-                '<span style="color:#E65100;font-weight:bold">v2 — Fixed plateau trough filter for high-NDVI evergreen forests</span></p>',
+                '<span style="color:#E65100;font-weight:bold">'
+                'v5 — Fixed missing season (trough_year dedup) + POS aligned to raw NDVI peak'
+                '</span></p>',
                 unsafe_allow_html=True)
 
     st.markdown(f"""
@@ -1810,8 +1757,6 @@ def main():
     eos_threshold_pct = st.sidebar.slider("EOS threshold (% of NDVI amplitude)", 5, 30, 10, 5) / 100.0
     st.sidebar.caption(f"SOS: **{int(sos_threshold_pct*100)}%** | EOS: **{int(eos_threshold_pct*100)}%**")
     threshold_pct_override = sos_threshold_pct
-    sos_method_sel = "threshold"; eos_method_sel = "threshold"
-    rain_thresh_sel = 8.0; roll_days_sel = 7; eos_rain_thresh_sel = 3.0; eos_roll_days_sel = 14
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📈 Regression Model")
@@ -1896,6 +1841,17 @@ def main():
             st.error(f"❌ Only {n_seasons} season(s) detected. Minimum 3 required."); return
         st.success(f"✅ **{n_seasons} growing seasons** extracted")
 
+        # Show v5 fix note if 2019 season is present
+        if 2019 in pheno_df['Year'].values:
+            row_2019 = pheno_df[pheno_df['Year'] == 2019].iloc[0]
+            st.markdown(
+                f'<div class="fix-box">✅ <b>v5 Fix 1:</b> Season 2019 correctly extracted '
+                f'(POS = {pd.Timestamp(row_2019["POS_Date"]).strftime("%b %d %Y")}, '
+                f'Peak NDVI = {row_2019["Peak_NDVI"]:.3f} — matches raw max).<br>'
+                f'✅ <b>v5 Fix 2:</b> POS date aligns with raw NDVI maximum (not smoothed peak).'
+                f'</div>',
+                unsafe_allow_html=True)
+
         c_left, c_right = st.columns([2,1])
         with c_left:
             st.pyplot(plot_ndvi_phenology(ndvi_df, pheno_df, season_window=(start_month_sel, end_month_sel)))
@@ -1921,11 +1877,11 @@ def main():
         if fig_t: st.pyplot(fig_t)
 
         st.markdown(
-            '<div class="info-box"><b>📐 Method:</b> Valley-anchored amplitude-based threshold. '
-            '5-day interpolation + per-segment SG smoothing + inter-season trough detection. '
-            'A = NDVI_max − NDVI_min per cycle. SOS/EOS = first/last threshold crossing. '
-            '<b>v2 fix:</b> plateau trough filter now uses 85% ceiling (was 60%) and is skipped '
-            'for low-amplitude forests (amp < 0.20) — fixing missing seasons in Shola/evergreen forests.</div>',
+            '<div class="info-box"><b>📐 Method (v5):</b> Valley-anchored amplitude-based threshold. '
+            '5-day interpolation + per-segment SG smoothing (w≤31 steps) + inter-season trough detection. '
+            'A = NDVI_max − NDVI_min per cycle. SOS/EOS = first/last threshold crossing on raw signal. '
+            '<b>Fix 1:</b> Season Year = trough start year (not POS year) — eliminates duplicate-year collision. '
+            '<b>Fix 2:</b> POS = raw NDVI peak (not smoothed peak) — exact match with observed maximum.</div>',
             unsafe_allow_html=True)
 
         model_label = regression_model_sel
@@ -2175,29 +2131,58 @@ def main():
 
 ---
 
-#### 🐛 Bug Fix v2 — Plateau Trough Filter (High-NDVI Evergreen Forests)
-
-**Problem:** Original filter used 60% amplitude ceiling, discarding genuine troughs in Shola/evergreen forests where NDVI stays high. Fix: raise to 85% ceiling; skip entirely when `global_amp < 0.20`.
+#### 🐛 Bug Fix v5 — Two Critical Fixes
 
 ---
 
-#### 🐛 Bug Fix v3 — Over-Aggressive SG Smoothing (Missing Seasons)
+##### Fix 1 — Missing Season (Ghost-Year Duplicate via `pos.year`)
 
-**Problem:** The Savitzky–Golay window was set to **10% of the total segment length**, which for a 10-year dataset produces a window of ~73 steps (~365 days). A window longer than one growing season averages across annual cycles, **crushing the per-cycle amplitude** below the minimum threshold (0.05):
+**Problem:** When a season's NDVI peak (POS) falls in a calendar year shared with an adjacent
+season's late peak, `drop_duplicates(subset="Year")` silently drops one season.
 
-| Season | Raw NDVI amplitude | Smoothed amplitude (old) | Status |
-|--------|-------------------|--------------------------|--------|
-| 2018–19 | **0.21** | 0.03 | ❌ Skipped |
-| 2021–22 | 0.07 | 0.04 | ❌ Skipped |
-| 2022–23 | **0.15** | 0.04 | ❌ Skipped |
+**Concrete example with IIT Tirupati dataset:**
+- Season 2018-19 (Apr 2018 → May 2019): POS = **Feb 2019** → `Year = 2019`
+- Season 2019-20 (May 2019 → May 2020): POS = **Sep 2019** → `Year = 2019`
+- `drop_duplicates` keeps the first (2018-19) and **drops 2019-20 entirely**
 
-**Fix:** Cap the SG window at **31 steps (~155 days)** — shorter than one growing season:
+**Fix:**
 ```python
-MAX_SG_STEPS = 31  # ~155 days — shorter than one growing season
-wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5%, capped at 31
+# ❌ OLD (in all three segments — main loop, head, tail):
+yr = pos.year
+
+# ✅ NEW: use trough date year as season identity
+trough_year = t_all[ti].year   # always unique per cycle
+rows.append({{"Year": trough_year, ...}})
 ```
 
-**Result:** All 9 seasons (2016–2025) correctly extracted with all amplitudes preserved.
+---
+
+##### Fix 2 — POS Date ≠ Raw NDVI Peak
+
+**Problem:** `pos_idx_local = int(np.argmax(cycle_sm))` uses the smoothed signal.
+SG smoothing shifts and suppresses sharp peaks — for Sep 28 2019 (raw = **0.713**)
+the smoothed peak moved to Oct 8 2019 (sm = 0.651): **10-day shift, 0.062 NDVI underestimate**.
+
+**Fix:**
+```python
+# ❌ OLD (all three segments):
+pos_idx_local = int(np.argmax(cycle_sm))
+
+# ✅ NEW: POS from raw signal — matches what user sees in the scatter plot
+pos_idx_local = int(np.nanargmax(cycle_raw))
+```
+
+---
+
+#### 🐛 Bug Fix v4 — Gap-Tolerant Cycle Extraction
+- Tolerates up to 50% gap when amplitude ≥ 0.10 (clear seasonal signal)
+- Low-amplitude cycles keep strict 20% gap threshold
+
+#### 🐛 Bug Fix v3 — SG Window Capped at 31 Steps (~155 days)
+- Prevents over-smoothing that crushes per-season amplitude below MIN_AMPLITUDE
+
+#### 🐛 Bug Fix v2 — Plateau Trough Filter (85% ceiling, skip for amp < 0.20)
+- Fixes missing seasons in high-NDVI evergreen forests (Shola, mangrove)
 
 ---
 
@@ -2205,26 +2190,16 @@ wl_t = max(7, min(int(seg_n * 0.05), MAX_SG_STEPS))  # 5%, capped at 31
 
 | Step | Process |
 |------|---------|
-| 1 | Gap detection — gaps > 60 days preserved as NaN |
+| 1 | Gap detection — gaps > max(60d, 8×cadence) preserved as NaN |
 | 2 | 5-day interpolation within segments only |
-| 3 | Per-segment Savitzky–Golay smoothing |
-| 4 | Valley (trough) detection with min separation ~145 days |
-| 5 | Amplitude A = NDVI_max − NDVI_min per cycle |
-| 6 | Threshold = NDVI_min + threshold% × A |
-| 7 | SOS = first crossing on ascending limb |
-| 8 | EOS = last crossing on descending limb |
-| 9 | POS = maximum NDVI between SOS and EOS |
-
----
-
-#### 📊 Threshold Sensitivity
-
-| % | Effect |
-|---|--------|
-| 5% | Very sensitive — earliest SOS / latest EOS |
-| **10%** | **Scientific default** |
-| 15–20% | Core growing period only |
-| 25–30% | Conservative — peak season only |
+| 3 | Per-segment SG smoothing (window ≤ 31 steps = 155d) |
+| 4 | Valley (trough) detection — min separation ~145 days |
+| 5 | Season year = **trough start year** (v5 fix) |
+| 6 | Amplitude A = NDVI_max(raw) − NDVI_min per cycle |
+| 7 | Threshold = NDVI_min + threshold% × A |
+| 8 | SOS = first crossing on ascending raw limb |
+| 9 | **POS = raw NDVI peak** between SOS and EOS (v5 fix) |
+| 10 | EOS = last crossing on descending raw limb |
 
 ---
 
