@@ -1073,7 +1073,11 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD,
     elif n_obs <= 5: effective_min_r = min(min_r, 0.25)
     else:            effective_min_r = min_r
 
-    collinear_thr = 0.97 if n_obs <= 5 else 0.85
+    # With small n, pairwise |r| between ANY two features is often >0.85 by chance.
+    # Use a conservative threshold so only near-duplicate features are pruned.
+    if n_obs <= 10:   collinear_thr = 0.97
+    elif n_obs <= 20: collinear_thr = 0.90
+    else:             collinear_thr = 0.85
 
     usable = []
     for col in X.columns:
@@ -1115,7 +1119,7 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD,
 
     if user_max_features is not None: effective_max = user_max_features
     elif n_obs <= 3:  effective_max = 1
-    elif n_obs <= 5:  effective_max = min(max_features, 2)
+    elif n_obs <= 5:  effective_max = min(max_features, 3)
     else:             effective_max = max_features
 
     max_safe   = max(1, n_obs - 1)
@@ -2429,12 +2433,13 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🔢 Maximum Features in Model")
-    max_features_override = st.sidebar.slider("Max climate variables per model", 1, 4, 1, 1, key="max_feat_slider")
+    max_features_override = st.sidebar.slider("Max climate variables per model", 1, 4, 3, 1, key="max_feat_slider")
     if max_features_override >= 2:
         st.sidebar.markdown(
             '<div style="background:#FFF8E1;padding:8px 12px;border-radius:8px;'
             'border-left:3px solid #F9A825;font-size:0.80rem;margin-top:4px">'
-            '⚠️ Using 2+ features with fewer than 6 seasons can overfit.</div>',
+            '⚠️ Using 3+ features with fewer than 6 seasons can overfit. '
+            'Reduce to 1–2 if R² looks suspiciously high.</div>',
             unsafe_allow_html=True)
 
     cfg = {"start_month": start_m, "end_month": end_m, "min_days": min_days}
