@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# Environment variables
+.env
+.env.local
+*.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data exports (large CSVs not in the repo's data/ folder)
+exports/
+output/
+*.tmp
+
+# Model checkpoints (if saved locally)
+*.pkl
+*.joblib
+*.h5
+
+# Logs
+*.log
+logs/
