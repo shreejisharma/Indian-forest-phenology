@@ -732,7 +732,11 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
 
         # ── Step 1: Build time-indexed raw NDVI ──────────────
         ndvi_raw = ndvi_df[["Date", "NDVI"]].copy().set_index("Date").sort_index()
-        ndvi_raw = ndvi_raw[~ndvi_raw.index.duplicated(keep='first')]
+        # When duplicate dates exist (e.g. two merged sensors), average both
+        # values rather than discarding one — this gives the most representative
+        # NDVI and avoids artificially high or low trough/peak values.
+        if ndvi_raw.index.duplicated().any():
+            ndvi_raw = ndvi_raw.groupby(ndvi_raw.index)['NDVI'].mean().rename('NDVI').to_frame()
 
         # ── Step 2: Data-derived cadence & gap parameters ────
         orig_dates  = ndvi_raw.index.sort_values()
@@ -1607,7 +1611,8 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None, interp_freq=5):
                label='NDVI (raw obs)', zorder=3)
 
     ndvi_s = ndvi_raw.set_index('Date')['NDVI'].sort_index()
-    ndvi_s = ndvi_s[~ndvi_s.index.duplicated(keep='first')]
+    if ndvi_s.index.duplicated().any():
+        ndvi_s = ndvi_s.groupby(ndvi_s.index).mean()
     orig_dates = ndvi_s.index.sort_values()
     orig_diffs = pd.Series(orig_dates).diff().dt.days.fillna(0)
     pos_diffs  = orig_diffs[orig_diffs > 0]
@@ -1958,7 +1963,8 @@ def plot_data_summary(ndvi_info, met_info):
 
 def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df, interp_freq=5):
     ndvi_s = ndvi_df.set_index('Date')['NDVI'].sort_index()
-    ndvi_s = ndvi_s[~ndvi_s.index.duplicated(keep='first')]
+    if ndvi_s.index.duplicated().any():
+        ndvi_s = ndvi_s.groupby(ndvi_s.index).mean()
     full_r = pd.date_range(start=ndvi_s.index.min(), end=ndvi_s.index.max(), freq=f'{interp_freq}D')
     ndvi_5d = ndvi_s.reindex(ndvi_s.index.union(full_r)).interpolate(method='time').reindex(full_r)
     if pheno_df is None or len(pheno_df) == 0:
@@ -2085,9 +2091,11 @@ def main():
     month_opts = list(sm_names.keys())
     col_sm, col_em = st.sidebar.columns(2)
     start_m = col_sm.selectbox("Start month", options=month_opts, index=5,
-                               format_func=lambda m: sm_names[m])
+                               format_func=lambda m: sm_names[m],
+                               key="start_month_sel")
     end_m   = col_em.selectbox("End month",   options=month_opts, index=4,
-                               format_func=lambda m: sm_names[m])
+                               format_func=lambda m: sm_names[m],
+                               key="end_month_sel")
     if start_m != end_m:
         if start_m > end_m:
             st.sidebar.info(f"Cross-year window: **{sm_names[start_m]} → {sm_names[end_m]}**")
@@ -2098,6 +2106,7 @@ def main():
 
     min_days = st.sidebar.slider(
         "Minimum season length (days)", 30, 300, 100, 10,
+        key="min_days_slider",
         help="Seasons shorter than this value are ignored. Increase if short noise cycles appear.")
 
     st.sidebar.markdown("---")
@@ -2105,8 +2114,10 @@ def main():
     st.sidebar.caption(
         "These thresholds define when green-up starts (SOS) and ends (EOS), "
         "expressed as a percentage of each season's NDVI amplitude.")
-    sos_thr = st.sidebar.slider("SOS threshold  (% of amplitude)", 5, 40, 10, 5) / 100.0
-    eos_thr = st.sidebar.slider("EOS threshold  (% of amplitude)", 5, 40, 10, 5) / 100.0
+    sos_thr = st.sidebar.slider("SOS threshold  (% of amplitude)", 5, 40, 10, 5,
+                                key="sos_thr_slider") / 100.0
+    eos_thr = st.sidebar.slider("EOS threshold  (% of amplitude)", 5, 40, 10, 5,
+                                key="eos_thr_slider") / 100.0
     st.sidebar.caption(
         f"Current: SOS at **{int(sos_thr*100)}%** · EOS at **{int(eos_thr*100)}%** "
         "of each season's NDVI swing. Higher % = stricter (later SOS, earlier EOS).")
@@ -2125,13 +2136,15 @@ def main():
         "Polynomial Regression (Deg 3)":"poly3",
         "Gaussian Process":             "gpr",
     }
-    model_sel = st.sidebar.radio("Model type", list(model_opts.keys()), index=0)
+    model_sel = st.sidebar.radio("Model type", list(model_opts.keys()), index=0,
+                                 key="model_type_radio")
     model_key = model_opts[model_sel]
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🗓️ Climate Window")
     feat_window = st.sidebar.slider(
         "Days before event to average climate", 7, 60, 15, 1,
+        key="feat_window_slider",
         help="How many days of meteorological data before each event date are averaged to form predictors.")
 
     st.sidebar.markdown("---")
@@ -2645,7 +2658,8 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
             return
 
         st.markdown("---")
-        pred_year = st.number_input("Year to predict for", 2020, 2050, 2026)
+        pred_year = st.number_input("Year to predict for", 2020, 2050, 2026,
+                                    key="pred_year_input")
 
         if st.button("▶  Run Prediction", type="primary"):
             results = {}
