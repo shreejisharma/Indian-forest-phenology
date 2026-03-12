@@ -1,5 +1,5 @@
 """
-Forest Phenology Analyser
+Forest Phenology Analyser v3
 =========================
 Upload NDVI and meteorological data to extract seasonal phenology events (SOS, POS, EOS, LOS),
 identify climate drivers, train predictive models, and forecast future phenology dates.
@@ -10,9 +10,9 @@ Requirements:
     pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
 
 Run:
-    streamlit run forest_phenology_analyser_v2.py
+    streamlit run forest_phenology_v3.py
 
-PREDICTION ENGINE: Ported from Universal Indian Forest Phenology Predictor v5.3
+PREDICTION ENGINE: Auto-best model selection (v5.3 ported)
   - Fits ALL models simultaneously: Ridge, LOESS, Poly-2, Poly-3, GPR
   - Auto-selects best model per event by LOO R² (not user-forced)
   - User model radio = preference hint; auto-picks if preferred model is worse
@@ -52,7 +52,6 @@ except ImportError:
 
 # ─── LOESS fallback (no external dependency) ─────────────────
 def _loess_predict_fallback(x_train, y_train, x_new, frac=0.75):
-    """Pure-numpy LOESS — used only when statsmodels is not installed."""
     n = len(x_train)
     k = max(2, int(np.ceil(frac * n)))
     result = np.zeros(len(x_new))
@@ -87,6 +86,7 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
+/* ── App header ── */
 .app-header {
     background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 60%, #388E3C 100%);
     padding: 32px 40px 24px; border-radius: 16px; margin-bottom: 24px;
@@ -99,6 +99,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     color: #fff; font-size: 0.78rem; font-weight: 600;
     padding: 3px 10px; border-radius: 20px; margin: 4px 4px 0 0;
 }
+
+/* ── Metric cards ── */
 .metric-card {
     background: #fff; padding: 20px 16px; border-radius: 14px;
     text-align: center; box-shadow: 0 2px 12px rgba(0,0,0,0.07);
@@ -109,6 +111,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .metric-card .value { color: #1B5E20; font-size: 1.85rem; font-weight: 700; margin: 0; }
 .metric-card .sub   { color: #757575; font-size: 0.76rem; margin-top: 4px; }
 
+/* ── Banners ── */
 .banner-info  { background: #E3F2FD; padding: 14px 18px; border-radius: 10px;
     border-left: 4px solid #1976D2; margin: 10px 0; font-size: 0.88rem; }
 .banner-warn  { background: #FFF8E1; padding: 14px 18px; border-radius: 10px;
@@ -118,22 +121,103 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .banner-error { background: #FFEBEE; padding: 14px 18px; border-radius: 10px;
     border-left: 4px solid #E53935; margin: 10px 0; font-size: 0.88rem; }
 
-.eq-box { background: #F8F9FA; padding: 14px 16px; border-radius: 10px;
-    border-left: 4px solid #7B1FA2; font-family: 'Courier New', monospace;
-    font-size: 0.83rem; margin: 8px 0; word-break: break-all; color: #212121; }
+/* ── Equation boxes — rich multi-line layout ── */
+.eq-box {
+    background: linear-gradient(135deg, #F3E5F5 0%, #F8F9FA 100%);
+    padding: 16px 20px; border-radius: 12px;
+    border-left: 4px solid #7B1FA2;
+    margin: 10px 0; word-break: break-word;
+}
+.eq-label {
+    display: block; font-family: 'Inter', sans-serif;
+    font-size: 0.78rem; font-weight: 700; color: #7B1FA2;
+    text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px;
+}
+.eq-main {
+    display: block; font-family: 'Courier New', monospace;
+    font-size: 0.90rem; color: #1A1A2E; font-weight: 600;
+    line-height: 1.55; margin-bottom: 6px;
+    background: rgba(255,255,255,0.65); padding: 8px 12px;
+    border-radius: 6px;
+}
+.eq-meta {
+    display: block; font-family: 'Inter', sans-serif;
+    font-size: 0.78rem; color: #555; margin-bottom: 4px;
+    padding: 2px 0;
+}
+.eq-models {
+    display: block; font-family: 'Inter', sans-serif;
+    font-size: 0.76rem; color: #888;
+    background: rgba(123,31,162,0.06); padding: 5px 10px;
+    border-radius: 5px; margin-top: 4px;
+}
 
-.upload-panel { background: #F9FBF9; padding: 24px 28px; border-radius: 14px;
-    border: 2px dashed #A5D6A7; margin: 20px 0; }
-.upload-panel h3 { color: #1B5E20; margin-bottom: 12px; font-size: 1.05rem; }
-.upload-panel code { background: #E8F5E9; padding: 2px 6px; border-radius: 4px;
-    font-size: 0.82rem; }
+/* ── Model badge ── */
+.model-badge {
+    display: inline-block; padding: 2px 9px; border-radius: 12px;
+    font-size: 0.73rem; font-weight: 700; letter-spacing: 0.3px;
+    margin-left: 6px; vertical-align: middle;
+}
+.model-badge.ridge  { background: #E8F5E9; color: #1B5E20; border: 1px solid #A5D6A7; }
+.model-badge.loess  { background: #E3F2FD; color: #0D47A1; border: 1px solid #90CAF9; }
+.model-badge.poly2  { background: #FFF3E0; color: #E65100; border: 1px solid #FFCC80; }
+.model-badge.poly3  { background: #FBE9E7; color: #BF360C; border: 1px solid #FFAB91; }
+.model-badge.gpr    { background: #F3E5F5; color: #6A1B9A; border: 1px solid #CE93D8; }
+.model-badge.mean   { background: #FAFAFA; color: #757575; border: 1px solid #E0E0E0; }
 
-.section-title { font-size: 1.15rem; font-weight: 700; color: #1B5E20;
-    margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #C8E6C9; }
-.term { background: #E8F5E9; padding: 2px 8px; border-radius: 5px;
-    font-weight: 600; color: #1B5E20; font-size: 0.88rem; }
-.stat-card { background: #FAFFFE; padding: 12px 16px; border-radius: 10px;
-    border: 1px solid #C8E6C9; margin: 4px 0; font-size: 0.88rem; }
+/* ── Upload panel ── */
+.upload-panel {
+    background: linear-gradient(135deg, #F9FBF9 0%, #F1F8F1 100%);
+    padding: 28px 32px; border-radius: 16px;
+    border: 2px dashed #A5D6A7; margin: 20px 0;
+    box-shadow: 0 2px 12px rgba(27,94,32,0.06);
+}
+.upload-panel h3 { color: #1B5E20; margin-bottom: 14px; font-size: 1.08rem; font-weight: 700; }
+.upload-panel code {
+    background: #E8F5E9; padding: 2px 7px; border-radius: 4px;
+    font-size: 0.83rem; color: #2E7D32;
+}
+.upload-panel .up-section {
+    background: rgba(255,255,255,0.7); border-radius: 10px;
+    padding: 12px 16px; margin: 10px 0; border: 1px solid #C8E6C9;
+}
+.upload-panel .up-label {
+    font-weight: 700; color: #1B5E20; font-size: 0.88rem; margin-bottom: 4px;
+}
+.upload-panel .feature-item {
+    display: inline-block; background: rgba(27,94,32,0.09);
+    color: #1B5E20; font-size: 0.78rem; font-weight: 600;
+    padding: 3px 9px; border-radius: 14px; margin: 2px 2px 0 0;
+}
+
+/* ── Section titles ── */
+.section-title {
+    font-size: 1.15rem; font-weight: 700; color: #1B5E20;
+    margin: 24px 0 12px; padding-bottom: 6px;
+    border-bottom: 2px solid #C8E6C9;
+}
+
+/* ── Stat cards and terms ── */
+.stat-card {
+    background: #FAFFFE; padding: 12px 16px; border-radius: 10px;
+    border: 1px solid #C8E6C9; margin: 4px 0; font-size: 0.88rem;
+}
+.term {
+    background: #E8F5E9; padding: 2px 8px; border-radius: 5px;
+    font-weight: 600; color: #1B5E20; font-size: 0.88rem;
+}
+
+/* ── Prediction event header ── */
+.pred-event-header {
+    padding: 14px 18px; border-radius: 10px;
+    margin: 10px 0; border-left-width: 4px; border-left-style: solid;
+}
+.pred-event-header .ev-title {
+    font-size: 1.0rem; font-weight: 700; margin-bottom: 2px;
+}
+.pred-event-header .ev-meta {
+    font-size: 0.82rem; color: #555; margin: 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -154,7 +238,7 @@ SNAPSHOT_FEATURES = {'GDD_cum', 'GDD_CUM', 'CPPT', 'CT2M'}
 
 
 # ═══════════════════════════════════════════════════════════════
-# DATA-ADAPTIVE UTILITIES  (unchanged)
+# DATA-ADAPTIVE UTILITIES
 # ═══════════════════════════════════════════════════════════════
 
 def detect_ndvi_cadence(ndvi_df):
@@ -321,7 +405,7 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
 
 
 # ═══════════════════════════════════════════════════════════════
-# PARSERS  (unchanged)
+# PARSERS
 # ═══════════════════════════════════════════════════════════════
 
 def parse_nasa_power(uploaded_file):
@@ -459,7 +543,7 @@ def _filter_ndvi_site(df, date_col, ndvi_col, site_key):
 
 
 # ═══════════════════════════════════════════════════════════════
-# DERIVED MET FEATURES  (unchanged)
+# DERIVED MET FEATURES
 # ═══════════════════════════════════════════════════════════════
 
 def _season_cumsum(series, dates, sm_):
@@ -533,7 +617,7 @@ def add_derived_features(met_df, season_start_month=1):
 
 
 # ═══════════════════════════════════════════════════════════════
-# TRAINING FEATURE BUILDER  (unchanged)
+# TRAINING FEATURE BUILDER
 # ═══════════════════════════════════════════════════════════════
 
 def make_training_features(pheno_df, met_df, params, window=15):
@@ -572,7 +656,7 @@ def make_training_features(pheno_df, met_df, params, window=15):
 
 
 # ═══════════════════════════════════════════════════════════════
-# PHENOLOGY EXTRACTION  (unchanged)
+# PHENOLOGY EXTRACTION
 # ═══════════════════════════════════════════════════════════════
 
 def _find_troughs(ndvi_values, min_distance=10):
@@ -921,7 +1005,7 @@ def _make_row(year, season_start, sos, pos, eos, ndvi_max, A, ndvi_min,
 
 
 # ═══════════════════════════════════════════════════════════════
-# FEATURE SELECTION  (unchanged)
+# FEATURE SELECTION
 # ═══════════════════════════════════════════════════════════════
 
 def get_all_correlations(X, y):
@@ -1058,27 +1142,10 @@ def select_multi_features(X, y, max_features=5, min_r=MIN_CORR_THRESHOLD,
 
 
 # ═══════════════════════════════════════════════════════════════
-# ══ v5.3 PREDICTION ENGINE ════════════════════════════════════
+# v5.3 PREDICTION ENGINE
 # ═══════════════════════════════════════════════════════════════
-# Replaces: loo_ridge(), fit_loess(), loo_poly() + fit_event_model()
-# Adds:     loo_cv(), fit_all_models(), auto-best selection by LOO R²
-# ─────────────────────────────────────────────────────────────
 
 def loo_cv(X_vals: np.ndarray, y_vals: np.ndarray, model_fn) -> tuple:
-    """
-    Generic Leave-One-Out cross-validation (ported from v5.3 PhenologyEngine.loo_cv).
-
-    Parameters
-    ----------
-    X_vals   : (n, p) array of features (already scaled/transformed if needed)
-    y_vals   : (n,) array of targets
-    model_fn : callable() → a fresh sklearn-compatible model instance
-
-    Returns
-    -------
-    (r2, mae) — LOO R² and mean absolute error
-    Degrades gracefully: n=2 → returns Pearson r² proxy; n<2 → returns (nan, nan)
-    """
     n = len(y_vals)
     if n < 2:
         return np.nan, np.nan
@@ -1110,36 +1177,9 @@ def loo_cv(X_vals: np.ndarray, y_vals: np.ndarray, model_fn) -> tuple:
 def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                    preferred_key: str = "ridge",
                    user_max_features: int = None) -> dict:
-    """
-    Fit ALL models simultaneously (Ridge, LOESS, Poly-2, Poly-3, GPR),
-    evaluate each by LOO R², then return a results dict containing:
-
-        {
-          'best_name':   str,          # model with highest LOO R²
-          'best_fit':    dict,         # full result dict for the best model
-          'all_models':  {name: dict}, # every model's result
-          'features':    list[str],
-          'r2':          float,
-          'mae':         float,
-          'n':           int,
-        }
-
-    The user's preferred_key is used as a *tiebreaker* when two models are within
-    0.02 R² of each other — so the user's choice is honoured when it's competitive.
-
-    Each per-model dict mirrors the old fit_event_model() return schema so that
-    predict() / equation_str() / corr_table_for_display() need minimal changes.
-
-    Ported from v5.3 PhenologyEngine.fit_models() with adaptations for:
-      - data-size auto-degradation (n<=3 → Ridge only)
-      - user feature count override
-      - statsmodels LOESS with fallback
-      - keeping the old 'pipe' key for obs-vs-pred plotting
-    """
     yt = y.values.astype(float)
     n  = len(yt)
 
-    # ── 1. Adaptive feature selection ─────────────────────────────────────
     adaptive_min_r = MIN_CORR_THRESHOLD
     if n <= 4:  adaptive_min_r = max(0.25, MIN_CORR_THRESHOLD - 0.15)
     elif n <= 6: adaptive_min_r = max(0.30, MIN_CORR_THRESHOLD - 0.10)
@@ -1148,7 +1188,6 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                                      min_r=adaptive_min_r,
                                      user_max_features=user_max_features)
 
-    # ── Mean-only fallback ─────────────────────────────────────────────────
     if not features:
         md = float(yt.mean())
         mean_fit = {
@@ -1166,12 +1205,9 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
 
     Xf = X_all[features].fillna(X_all[features].median())
     Xv = Xf.values
-
-    # Shared scaler for Ridge, LOESS-PCA, GPR
     sc = StandardScaler()
     Xs = sc.fit_transform(Xv)
 
-    # Best |r| with any single feature (for display)
     best_single_r = 0.0
     for f in features:
         try:
@@ -1183,24 +1219,20 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
 
     all_models: dict = {}
 
-    # ── RIDGE ──────────────────────────────────────────────────────────────
+    # RIDGE
     try:
         rcv = RidgeCV(alphas=np.logspace(-3, 4, 30), cv=None)
         rcv.fit(Xs, yt)
         best_alpha = float(rcv.alpha_)
-
         pipe_ridge = Pipeline([('sc', StandardScaler()), ('r', Ridge(alpha=best_alpha))])
         pipe_ridge.fit(Xv, yt)
         _sc    = pipe_ridge.named_steps['sc']
         _ridge = pipe_ridge.named_steps['r']
         coef_unstd = list(_ridge.coef_ / _sc.scale_)
         intercept_unstd = float(_ridge.intercept_ - np.dot(_ridge.coef_ / _sc.scale_, _sc.mean_))
-
         r2_ridge, mae_ridge = loo_cv(
             Xs, yt,
-            lambda a=best_alpha: Pipeline([('sc2', StandardScaler()),
-                                           ('r2', Ridge(alpha=a))])
-        )
+            lambda a=best_alpha: Pipeline([('sc2', StandardScaler()), ('r2', Ridge(alpha=a))]))
         all_models['Ridge'] = {
             'mode': 'ridge', 'features': features, 'r2': r2_ridge, 'mae': mae_ridge,
             'alpha': best_alpha, 'coef': coef_unstd, 'intercept': intercept_unstd,
@@ -1210,24 +1242,16 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
     except Exception:
         pass
 
-    # ── LOESS ──────────────────────────────────────────────────────────────
-    # For multi-feature input: project onto first PC, then LOESS in 1-D
-    # (identical to v5.3 strategy)
+    # LOESS
     try:
         if _LOESS_AVAILABLE:
             from sklearn.decomposition import PCA as _PCA
-
             if Xs.shape[1] == 1:
-                Xloess = Xs[:, 0]
-                _loess_pca = None
+                Xloess = Xs[:, 0]; _loess_pca = None
             else:
                 _pca = _PCA(n_components=1)
-                Xloess = _pca.fit_transform(Xs)[:, 0]
-                _loess_pca = _pca
-
+                Xloess = _pca.fit_transform(Xs)[:, 0]; _loess_pca = _pca
             frac_val = min(0.75, max(0.25, 6.0 / max(n, 1)))
-
-            # LOO for LOESS
             loess_preds = []
             for i in range(n):
                 idx_tr = [j for j in range(n) if j != i]
@@ -1236,39 +1260,30 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                 try:
                     sm_arr = _sm_lowess(y_tr, x_tr, frac=frac_val, return_sorted=True)
                     sm_sorted = sm_arr[np.argsort(sm_arr[:, 0])]
-                    f_interp = _scipy_interp1d(
-                        sm_sorted[:, 0], sm_sorted[:, 1],
-                        bounds_error=False,
-                        fill_value=(sm_sorted[0, 1], sm_sorted[-1, 1]))
+                    f_interp = _scipy_interp1d(sm_sorted[:, 0], sm_sorted[:, 1],
+                                               bounds_error=False,
+                                               fill_value=(sm_sorted[0, 1], sm_sorted[-1, 1]))
                     loess_preds.append(float(f_interp(x_val)))
                 except Exception:
                     loess_preds.append(float(np.mean(y_tr)))
-
             lp     = np.array(loess_preds)
             ss_res = np.sum((yt - lp) ** 2)
             ss_tot = np.sum((yt - yt.mean()) ** 2) + 1e-12
             r2l    = float(np.clip(1 - ss_res / ss_tot, -1, 1))
             mael   = float(np.mean(np.abs(yt - lp)))
 
-            # Store LOESS as a callable wrapper (mirrors v5.3 _LoessModel)
             class _LoessWrapper:
                 def __init__(self, x_train, y_train, frac, pca_obj, scaler_obj):
-                    self.x_train  = x_train
-                    self.y_train  = y_train
-                    self.frac     = frac
-                    self.pca_obj  = pca_obj
-                    self.sc       = scaler_obj
+                    self.x_train = x_train; self.y_train = y_train
+                    self.frac = frac; self.pca_obj = pca_obj; self.sc = scaler_obj
                 def predict(self, X_new):
                     Xs_new = self.sc.transform(X_new)
                     xn = (self.pca_obj.transform(Xs_new)[:, 0]
                           if self.pca_obj is not None else Xs_new[:, 0])
-                    sm_arr = _sm_lowess(self.y_train, self.x_train,
-                                        frac=self.frac, return_sorted=True)
+                    sm_arr = _sm_lowess(self.y_train, self.x_train, frac=self.frac, return_sorted=True)
                     sm_sorted = sm_arr[np.argsort(sm_arr[:, 0])]
-                    f_i = _scipy_interp1d(
-                        sm_sorted[:, 0], sm_sorted[:, 1],
-                        bounds_error=False,
-                        fill_value=(sm_sorted[0, 1], sm_sorted[-1, 1]))
+                    f_i = _scipy_interp1d(sm_sorted[:, 0], sm_sorted[:, 1], bounds_error=False,
+                                          fill_value=(sm_sorted[0, 1], sm_sorted[-1, 1]))
                     return f_i(xn)
 
             all_models['LOESS'] = {
@@ -1276,12 +1291,9 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                 'alpha': None, 'coef': [], 'intercept': 0.0,
                 'best_r': best_single_r, 'n': n,
                 'pipe': _LoessWrapper(Xloess, yt, frac_val, _loess_pca, sc),
-                'scaler': None,   # scaler embedded in wrapper
-                'model_key': 'loess',
-                'x_train': Xloess, 'y_train': yt,
+                'scaler': None, 'model_key': 'loess', 'x_train': Xloess, 'y_train': yt,
             }
         else:
-            # Fallback: pure-numpy LOESS (univariate only, first feature)
             feat1 = features[0]
             x1d   = Xf[feat1].values.astype(float)
             x1d_sc = (x1d - x1d.mean()) / (x1d.std() + 1e-9)
@@ -1304,8 +1316,7 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
     except Exception:
         pass
 
-    # ── POLYNOMIAL deg-2 and deg-3 ─────────────────────────────────────────
-    # Only attempt if n > degree + 2 (otherwise perfectly overfit)
+    # POLYNOMIAL deg-2 and deg-3
     for deg in [2, 3]:
         if n <= deg + 2:
             continue
@@ -1316,7 +1327,6 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                 ('r',    RidgeCV(alphas=np.logspace(-3, 4, 20))),
             ])
             poly_pipe.fit(Xv, yt)
-
             r2p, maep = loo_cv(
                 Xv, yt,
                 lambda d=deg: Pipeline([
@@ -1330,32 +1340,28 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
                 'mode': f'poly{deg}', 'features': features, 'r2': r2p, 'mae': maep,
                 'alpha': 1.0, 'coef': [], 'intercept': 0.0,
                 'best_r': best_single_r, 'n': n,
-                'pipe': poly_pipe, 'scaler': None,
-                'model_key': f'poly{deg}',
+                'pipe': poly_pipe, 'scaler': None, 'model_key': f'poly{deg}',
             }
         except Exception:
             pass
 
-    # ── GPR ────────────────────────────────────────────────────────────────
+    # GPR
     if n >= 5:
         try:
             kernel = ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(0.1)
             gpr = GaussianProcessRegressor(
                 kernel=kernel, n_restarts_optimizer=5, normalize_y=True, random_state=42)
             gpr.fit(Xs, yt)
-
             r2g, maeg = loo_cv(
                 Xs, yt,
                 lambda: GaussianProcessRegressor(
                     kernel=ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(0.1),
-                    normalize_y=True, random_state=42)
-            )
+                    normalize_y=True, random_state=42))
             all_models['GPR'] = {
                 'mode': 'gpr', 'features': features, 'r2': r2g, 'mae': maeg,
                 'alpha': None, 'coef': [], 'intercept': 0.0,
                 'best_r': best_single_r, 'n': n,
-                'pipe': None, 'scaler': sc,
-                'gpr_model': gpr, 'gpr_scaler': sc,
+                'pipe': None, 'scaler': sc, 'gpr_model': gpr, 'gpr_scaler': sc,
                 'model_key': 'gpr',
             }
         except Exception:
@@ -1367,8 +1373,7 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
             'mode': 'mean', 'features': [], 'r2': 0.0,
             'mae': float(np.mean(np.abs(yt - md))),
             'alpha': None, 'coef': [], 'intercept': md,
-            'best_r': 0.0, 'mean_doy': md, 'n': n,
-            'pipe': None, 'model_key': 'mean',
+            'best_r': 0.0, 'mean_doy': md, 'n': n, 'pipe': None, 'model_key': 'mean',
         }
         return {
             'best_name': 'mean', 'best_fit': mean_fit,
@@ -1376,11 +1381,8 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
             'features': [], 'r2': 0.0, 'mae': mean_fit['mae'], 'n': n,
         }
 
-    # ── Auto-select best by LOO R² with user preference as tiebreaker ──────
-    # Map user model radio keys → internal model names
     _key_to_name = {
-        'ridge': 'Ridge', 'loess': 'LOESS',
-        'poly2': 'Poly-2', 'poly3': 'Poly-3', 'gpr': 'GPR',
+        'ridge': 'Ridge', 'loess': 'LOESS', 'poly2': 'Poly-2', 'poly3': 'Poly-3', 'gpr': 'GPR',
     }
     preferred_name = _key_to_name.get(preferred_key, 'Ridge')
 
@@ -1391,7 +1393,6 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
     best_name_auto = max(all_models, key=_model_r2)
     best_r2_auto   = _model_r2(best_name_auto)
 
-    # Honour user preference if it's within 0.02 R² of the automatic best
     if (preferred_name in all_models and
             abs(_model_r2(preferred_name) - best_r2_auto) <= 0.02):
         best_name = preferred_name
@@ -1399,7 +1400,6 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
         best_name = best_name_auto
 
     best_fit = all_models[best_name]
-
     return {
         'best_name':  best_name,
         'best_fit':   best_fit,
@@ -1412,18 +1412,17 @@ def fit_all_models(X_all: pd.DataFrame, y: pd.Series,
 
 
 # ═══════════════════════════════════════════════════════════════
-# UNIVERSAL PREDICTOR CLASS  (updated to use fit_all_models)
+# UNIVERSAL PREDICTOR CLASS
 # ═══════════════════════════════════════════════════════════════
 
 class UniversalPredictor:
     def __init__(self):
-        self._fits       = {}   # event → full result dict from fit_all_models()
+        self._fits       = {}
         self.r2          = {}
         self.mae         = {}
         self.n_seasons   = {}
         self.corr_tables = {}
 
-    # ── train() ───────────────────────────────────────────────
     def train(self, train_df, all_params, model_key="ridge", user_max_features=None):
         meta      = {'Year', 'Event', 'Target_DOY', 'LOS_Days', 'Peak_NDVI', 'Season_Start'}
         feat_cols = [c for c in train_df.columns
@@ -1438,15 +1437,12 @@ class UniversalPredictor:
             X   = sub[feat_cols].fillna(sub[feat_cols].median())
             y   = sub['Target_DOY']
             self.corr_tables[event] = get_all_correlations(X, y)
-
-            result = fit_all_models(X, y,
-                                    preferred_key=model_key,
+            result = fit_all_models(X, y, preferred_key=model_key,
                                     user_max_features=user_max_features)
             self._fits[event]  = result
             self.r2[event]     = result['r2']
             self.mae[event]    = result['mae']
 
-    # ── predict() ─────────────────────────────────────────────
     def predict(self, inputs: dict, event: str,
                 year: int = 2026, season_start_month: int = 6):
         if event not in self._fits:
@@ -1457,40 +1453,31 @@ class UniversalPredictor:
 
         if best_fit['mode'] == 'mean':
             rel_days = int(round(best_fit.get('mean_doy', best_fit.get('intercept', 0))))
-
         elif best_fit['mode'] == 'loess':
-            # pipe is a _LoessWrapper (statsmodels path) or x_train/y_train (fallback)
             pipe = best_fit.get('pipe')
             if pipe is not None and hasattr(pipe, 'predict'):
                 X_new    = np.array([[inputs.get(f, 0.0) for f in features]])
                 pred     = pipe.predict(X_new)
                 rel_days = int(np.clip(round(float(pred[0])), 0, 500))
             else:
-                # Pure-numpy fallback path
-                x_train = best_fit.get('x_train')
-                y_train = best_fit.get('y_train')
+                x_train = best_fit.get('x_train'); y_train = best_fit.get('y_train')
                 feat1   = features[0] if features else None
                 if x_train is not None and y_train is not None and feat1:
                     x_val = float(inputs.get(feat1, 0.0))
                     x_val_sc = (x_val - x_train.mean()) / (x_train.std() + 1e-9)
-                    pred     = _loess_predict_fallback(x_train, y_train,
-                                                       np.array([x_val_sc]), frac=0.75)[0]
+                    pred     = _loess_predict_fallback(x_train, y_train, np.array([x_val_sc]), frac=0.75)[0]
                     rel_days = int(np.clip(round(float(pred)), 0, 500))
                 else:
                     rel_days = int(round(float(np.mean(best_fit.get('y_train', [0])))))
-
         elif best_fit['mode'] == 'gpr':
-            gpr = best_fit.get('gpr_model')
-            gpr_sc = best_fit.get('gpr_scaler')
+            gpr = best_fit.get('gpr_model'); gpr_sc = best_fit.get('gpr_scaler')
             if gpr is not None and gpr_sc is not None:
                 X_new    = np.array([[inputs.get(f, 0.0) for f in features]])
                 pred     = gpr.predict(gpr_sc.transform(X_new))[0]
                 rel_days = int(np.clip(round(float(pred)), 0, 500))
             else:
                 rel_days = int(round(self.mae.get(event, 0)))
-
         else:
-            # Ridge or Poly — use pipe.predict()
             pipe = best_fit.get('pipe')
             if pipe is not None:
                 X_new    = np.array([[inputs.get(f, 0.0) for f in features]])
@@ -1509,19 +1496,16 @@ class UniversalPredictor:
             'r2':        self.r2[event],
             'mae':       self.mae[event],
             'event':     event,
-            'model':     result['best_name'],          # which model was used
+            'model':     result['best_name'],
             'all_r2':    {k: v.get('r2', np.nan) for k, v in result['all_models'].items()},
         }
 
-    # ── equation_str() ────────────────────────────────────────
     def equation_str(self, event: str, season_start_month: int = 6) -> str:
-        """Return a human-readable model equation for the best-selected model."""
         n_ev = self.n_seasons.get(event, 0)
         if event not in self._fits:
-            return (f"Need ≥ 2 seasons with met data to fit a model "
-                    f"(currently {n_ev})")
-        result   = self._fits[event]
-        best_fit = result['best_fit']
+            return (f"Need ≥ 2 seasons with met data to fit a model (currently {n_ev})")
+        result    = self._fits[event]
+        best_fit  = result['best_fit']
         best_name = result['best_name']
         all_models = result['all_models']
 
@@ -1529,7 +1513,6 @@ class UniversalPredictor:
                7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
         lbl = f"{event}_days_from_{mo.get(season_start_month,'Jan')}1"
 
-        # Build a short comparison of all model LOO R² values
         model_scores = "  ·  ".join(
             f"{nm}: R²={v.get('r2', np.nan):.3f}"
             for nm, v in all_models.items()
@@ -1560,7 +1543,6 @@ class UniversalPredictor:
                     f"R²(LOO)={best_fit['r2']:.3f}  ·  MAE=±{best_fit['mae']:.1f} d]\n"
                     f"    All models — {model_scores}")
 
-        # Ridge: show full equation
         terms = [f"{best_fit.get('intercept', 0.0):.3f}"]
         for feat, coef in zip(result['features'], best_fit.get('coef', [])):
             s = '+' if coef >= 0 else '-'
@@ -1571,7 +1553,6 @@ class UniversalPredictor:
                 f"R²(LOO)={best_fit['r2']:.3f}  ·  MAE=±{best_fit['mae']:.1f} d]\n"
                 f"    All models — {model_scores}")
 
-    # ── corr_table_for_display()  (unchanged) ─────────────────
     def corr_table_for_display(self, event: str) -> pd.DataFrame:
         if event not in self._fits:
             return pd.DataFrame()
@@ -1597,8 +1578,7 @@ class UniversalPredictor:
                         feat_r = row['Pearson_r']
                         if (abs(feat_r) > 0.85 and abs(sel_r) > 0.85 and
                                 (feat_r * sel_r > 0 or abs(abs(feat_r) - abs(sel_r)) < 0.15)):
-                            is_collinear = True
-                            collinear_with = selected_first
+                            is_collinear = True; collinear_with = selected_first
                     except Exception:
                         pass
                 if is_collinear and collinear_with:
@@ -1607,23 +1587,20 @@ class UniversalPredictor:
                     role = '➖  Did not improve model accuracy — not added'
             else:
                 role = '⬜  Below correlation threshold'
-            rows.append({'Feature':    feat,
+            rows.append({'Feature': feat,
                          'Pearson r':  row['Pearson_r'],
                          'Spearman ρ': row.get('Spearman_rho', float('nan')),
                          'Composite':  row.get('Composite', row['|r|']),
                          'Role':       role})
         return pd.DataFrame(rows)
 
-    # ── export_coefficients()  (updated for new structure) ────
     def export_coefficients(self, season_start_month: int = 6) -> pd.DataFrame:
         records = []
         for event in ['SOS', 'POS', 'EOS']:
-            if event not in self._fits:
-                continue
+            if event not in self._fits: continue
             result   = self._fits[event]
             best_fit = result['best_fit']
             best_name = result['best_name']
-
             if best_fit['mode'] == 'mean':
                 records.append({'Event': event, 'Feature': 'INTERCEPT',
                                 'Coefficient': best_fit.get('mean_doy', best_fit.get('intercept', 0)),
@@ -1633,13 +1610,13 @@ class UniversalPredictor:
                 for feat, coef in zip(result['features'], best_fit['coef']):
                     records.append({'Event': event, 'Feature': feat,
                                     'Coefficient': round(coef, 6),
-                                    'Model': f'Ridge (best of all)',
+                                    'Model': 'Ridge (best of all)',
                                     'Alpha': best_fit.get('alpha'),
                                     'R2_LOO': round(best_fit['r2'], 4),
                                     'MAE_days': round(best_fit['mae'], 2)})
                 records.append({'Event': event, 'Feature': 'INTERCEPT',
                                 'Coefficient': round(best_fit.get('intercept', 0), 4),
-                                'Model': f'Ridge (best of all)',
+                                'Model': 'Ridge (best of all)',
                                 'Alpha': best_fit.get('alpha'),
                                 'R2_LOO': round(best_fit['r2'], 4),
                                 'MAE_days': round(best_fit['mae'], 2)})
@@ -1649,20 +1626,17 @@ class UniversalPredictor:
                                 'Model': f'{best_name} (best of all)',
                                 'R2_LOO': round(best_fit['r2'], 4),
                                 'MAE_days': round(best_fit['mae'], 2)})
-
-            # Also export all-model comparison
             for mname, mfit in result['all_models'].items():
                 if mname == best_name: continue
                 records.append({'Event': event, 'Feature': '(comparison)',
-                                'Coefficient': float('nan'),
-                                'Model': f'{mname}',
+                                'Coefficient': float('nan'), 'Model': f'{mname}',
                                 'R2_LOO': round(mfit.get('r2', np.nan), 4) if not np.isnan(mfit.get('r2', np.nan)) else float('nan'),
                                 'MAE_days': round(mfit.get('mae', np.nan), 2) if not np.isnan(mfit.get('mae', np.nan)) else float('nan')})
         return pd.DataFrame(records)
 
 
 # ═══════════════════════════════════════════════════════════════
-# SENSITIVITY ANALYSIS  (unchanged)
+# SENSITIVITY ANALYSIS
 # ═══════════════════════════════════════════════════════════════
 
 def compute_sensitivity_analysis(predictor, train_df):
@@ -1709,7 +1683,7 @@ def compute_sensitivity_analysis(predictor, train_df):
 
 
 # ═══════════════════════════════════════════════════════════════
-# PLOTS  (unchanged except _card and tab5 which use new structure)
+# PLOTS
 # ═══════════════════════════════════════════════════════════════
 
 def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None, interp_freq=5):
@@ -1802,16 +1776,13 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None, interp_freq=5):
         seg_st = pd.Timestamp(td); seg_en = pd.Timestamp(ed) + pd.Timedelta(days=20)
         if pd.notna(base):
             ax.hlines(base, seg_st, seg_en, colors='#F57F17', lw=1.1, ls=':', alpha=0.75,
-                      label='Base NDVI' if not base_p else '', zorder=4)
-            base_p = True
+                      label='Base NDVI' if not base_p else '', zorder=4); base_p = True
         if pd.notna(thr_s):
             ax.hlines(thr_s, seg_st, seg_en, colors='#66BB6A', lw=1.2, ls='--', alpha=0.70,
-                      label='SOS threshold' if not thr_sos_p else '', zorder=4)
-            thr_sos_p = True
+                      label='SOS threshold' if not thr_sos_p else '', zorder=4); thr_sos_p = True
         if pd.notna(thr_e):
             ax.hlines(thr_e, seg_st, seg_en, colors='#FFA726', lw=1.2, ls='--', alpha=0.70,
-                      label='EOS threshold' if not thr_eos_p else '', zorder=4)
-            thr_eos_p = True
+                      label='EOS threshold' if not thr_eos_p else '', zorder=4); thr_eos_p = True
         if pd.notna(pd_) and pd.notna(amp) and amp > 0.01 and pd.notna(base):
             px = pd.Timestamp(pd_)
             ax.annotate('', xy=(px, pk), xytext=(px, base),
@@ -1886,7 +1857,6 @@ def plot_pheno_trends(pheno_df):
 
 
 def plot_obs_vs_pred(predictor, train_df):
-    """Obs vs predicted — works with new _fits structure."""
     events = []
     for ev in ['SOS', 'POS', 'EOS']:
         if ev not in predictor._fits: continue
@@ -2011,7 +1981,6 @@ def plot_correlation_summary(predictor):
 def plot_data_summary(ndvi_info, met_info):
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
     fig.patch.set_facecolor('#F8FBF7')
-
     ax = axes[0]
     p5, p95 = ndvi_info['ndvi_p5'], ndvi_info['ndvi_p95']
     mean_v, std_v = ndvi_info['ndvi_mean'], ndvi_info['ndvi_std']
@@ -2021,10 +1990,8 @@ def plot_data_summary(ndvi_info, met_info):
     ax.axvline(mean_v, color='#1B5E20', lw=2.0, label=f'Mean = {mean_v:.3f}')
     ax.axvline(p5,  color='#F57F17', lw=1.5, ls='--', label=f'P5  = {p5:.3f}')
     ax.axvline(p95, color='#E53935', lw=1.5, ls='--', label=f'P95 = {p95:.3f}')
-    ax.set_title(f'NDVI Distribution\n(data range = {ndvi_info["data_range"]:.3f})',
-                 fontsize=10, fontweight='bold')
-    ax.set_xlabel('NDVI'); ax.legend(fontsize=8.5); ax.set_facecolor('#FAFFF8')
-    ax.grid(True, alpha=0.22)
+    ax.set_title(f'NDVI Distribution\n(data range = {ndvi_info["data_range"]:.3f})', fontsize=10, fontweight='bold')
+    ax.set_xlabel('NDVI'); ax.legend(fontsize=8.5); ax.set_facecolor('#FAFFF8'); ax.grid(True, alpha=0.22)
 
     ax2 = axes[1]
     if met_info:
@@ -2035,10 +2002,8 @@ def plot_data_summary(ndvi_info, met_info):
         ax2.barh(y_pos, means, xerr=stds, color='#1976D2', alpha=0.70, ecolor='#0D47A1',
                  capsize=3, edgecolor='white')
         ax2.set_yticks(y_pos); ax2.set_yticklabels(top_params, fontsize=9)
-        ax2.set_title('Met Parameters\n(mean ± std from uploaded data)',
-                      fontsize=10, fontweight='bold')
-        ax2.set_xlabel('Value'); ax2.set_facecolor('#FAFFF8')
-        ax2.grid(True, alpha=0.20, axis='x')
+        ax2.set_title('Met Parameters\n(mean ± std from uploaded data)', fontsize=10, fontweight='bold')
+        ax2.set_xlabel('Value'); ax2.set_facecolor('#FAFFF8'); ax2.grid(True, alpha=0.20, axis='x')
     else:
         ax2.text(0.5, 0.5, 'No met parameters', ha='center', va='center', transform=ax2.transAxes)
 
@@ -2117,8 +2082,7 @@ def plot_sensitivity_heatmap(sensitivity, predictor, train_df):
     ax_bar.axvline(0, color='#37474F', lw=1.0)
     ax_bar.set_yticks(y_pos); ax_bar.set_yticklabels(all_feats, fontsize=10)
     ax_bar.set_xlabel('Days shifted per 1σ increase in feature', fontsize=9, fontweight='bold')
-    ax_bar.set_title('Driver Analysis — Effect on Event Timing',
-                     fontsize=10, fontweight='bold', color='#1B4332', pad=8)
+    ax_bar.set_title('Driver Analysis — Effect on Event Timing', fontsize=10, fontweight='bold', color='#1B4332', pad=8)
     ax_bar.grid(True, axis='x', alpha=0.22, ls='--'); ax_bar.set_facecolor('#FAFFF8')
     ax_bar.legend(title='Event', fontsize=9, title_fontsize=9, loc='lower right', framealpha=0.92,
                   handles=[plt.matplotlib.patches.Patch(color=ev_colors[e], label=e) for e in ev_list])
@@ -2324,6 +2288,63 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df, interp_freq=5):
 
 
 # ═══════════════════════════════════════════════════════════════
+# HELPER: Build rich equation HTML box
+# ═══════════════════════════════════════════════════════════════
+
+def _model_badge_html(model_name: str) -> str:
+    """Return a coloured inline badge for a model name."""
+    key_map = {
+        'Ridge': 'ridge', 'LOESS': 'loess',
+        'Poly-2': 'poly2', 'Poly-3': 'poly3',
+        'GPR': 'gpr', 'mean': 'mean',
+    }
+    css_cls = key_map.get(model_name, 'ridge')
+    return (f'<span class="model-badge {css_cls}">{model_name}</span>')
+
+
+def _build_eq_box_html(eq_raw: str, ev: str, best_name: str) -> str:
+    """
+    Parse the multi-line equation_str() output and render into a rich
+    .eq-box with .eq-label / .eq-main / .eq-meta / .eq-models sections.
+    """
+    ev_labels = {
+        'SOS': '🌱 Start of Season — SOS Model',
+        'POS': '🌿 Peak of Season — POS Model',
+        'EOS': '🍂 End of Season — EOS Model',
+    }
+    badge = _model_badge_html(best_name)
+    label = f"{ev_labels.get(ev, ev)} {badge}"
+
+    lines = eq_raw.strip().split('\n')
+    main_line = lines[0].strip() if lines else eq_raw
+
+    meta_line   = ''
+    models_line = ''
+    for ln in lines[1:]:
+        ln = ln.strip()
+        if ln.startswith('[Best model') or ln.startswith('[No feature'):
+            meta_line = ln.strip('[]')
+        elif ln.startswith('All models'):
+            models_line = ln
+
+    # fallback: if no bracket found, treat second line as meta
+    if not meta_line and len(lines) > 1:
+        meta_line = lines[1].strip().strip('[]')
+
+    html = (
+        f'<div class="eq-box">'
+        f'<span class="eq-label">{label}</span>'
+        f'<span class="eq-main">{main_line}</span>'
+    )
+    if meta_line:
+        html += f'<span class="eq-meta">📊 {meta_line}</span>'
+    if models_line:
+        html += f'<span class="eq-models">🔬 {models_line}</span>'
+    html += '</div>'
+    return html
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN APP
 # ═══════════════════════════════════════════════════════════════
 
@@ -2333,12 +2354,13 @@ def main():
         <h1>🌿 Forest Phenology Analyser</h1>
         <p>Upload your NDVI and meteorological data to automatically extract seasonal events,
         train predictive models, and forecast future phenology for any Indian forest type.<br>
-        <b>Prediction engine: auto-selects best model (Ridge / LOESS / Poly / GPR) by LOO R²</b></p>
-        <span class="badge">🌱 SOS — Start of Season</span>
-        <span class="badge">🌿 POS — Peak of Season</span>
-        <span class="badge">🍂 EOS — End of Season</span>
-        <span class="badge">📏 LOS — Length of Season</span>
-        <span class="badge">🤖 Auto-best model selection</span>
+        <b>All models fitted simultaneously — best auto-selected per event by LOO R²</b></p>
+        <span class="badge">🌱 SOS</span>
+        <span class="badge">🌿 POS</span>
+        <span class="badge">🍂 EOS</span>
+        <span class="badge">📏 LOS</span>
+        <span class="badge">🤖 Auto-best model</span>
+        <span class="badge">📐 Ridge · LOESS · Poly · GPR</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2369,15 +2391,12 @@ def main():
     if start_m == end_m:
         st.sidebar.warning("⚠️ Start and end month are the same — no seasons will be detected.")
 
-    min_days = st.sidebar.slider("Minimum season length (days)", 30, 300, 100, 10,
-                                 key="min_days_slider")
+    min_days = st.sidebar.slider("Minimum season length (days)", 30, 300, 100, 10, key="min_days_slider")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## ⚙️ Detection Sensitivity")
-    sos_thr = st.sidebar.slider("SOS threshold  (% of amplitude)", 5, 40, 10, 5,
-                                key="sos_thr_slider") / 100.0
-    eos_thr = st.sidebar.slider("EOS threshold  (% of amplitude)", 5, 40, 10, 5,
-                                key="eos_thr_slider") / 100.0
+    sos_thr = st.sidebar.slider("SOS threshold  (% of amplitude)", 5, 40, 10, 5, key="sos_thr_slider") / 100.0
+    eos_thr = st.sidebar.slider("EOS threshold  (% of amplitude)", 5, 40, 10, 5, key="eos_thr_slider") / 100.0
     st.sidebar.caption(
         f"Current: SOS at **{int(sos_thr*100)}%** · EOS at **{int(eos_thr*100)}%** of each season's NDVI swing.")
 
@@ -2393,27 +2412,24 @@ def main():
         "Polynomial Regression (Deg 3)":    "poly3",
         "Gaussian Process":                 "gpr",
     }
-    model_sel = st.sidebar.radio("Preferred model", list(model_opts.keys()), index=0,
-                                 key="model_type_radio")
+    model_sel = st.sidebar.radio("Preferred model", list(model_opts.keys()), index=0, key="model_type_radio")
     model_key = model_opts[model_sel]
 
     if not _LOESS_AVAILABLE:
         st.sidebar.markdown(
             '<div style="background:#FFF8E1;padding:6px 10px;border-radius:6px;'
             'border-left:3px solid #F9A825;font-size:0.78rem;margin-top:4px">'
-            '⚠️ <b>statsmodels</b> not installed — LOESS will use a pure-numpy fallback '
-            '(univariate only). Install with: <code>pip install statsmodels</code></div>',
+            '⚠️ <b>statsmodels</b> not installed — LOESS uses pure-numpy fallback. '
+            'Install with: <code>pip install statsmodels</code></div>',
             unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🗓️ Climate Window")
-    feat_window = st.sidebar.slider("Days before event to average climate", 7, 60, 15, 1,
-                                    key="feat_window_slider")
+    feat_window = st.sidebar.slider("Days before event to average climate", 7, 60, 15, 1, key="feat_window_slider")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 🔢 Maximum Features in Model")
-    max_features_override = st.sidebar.slider("Max climate variables per model", 1, 4, 1, 1,
-                                              key="max_feat_slider")
+    max_features_override = st.sidebar.slider("Max climate variables per model", 1, 4, 1, 1, key="max_feat_slider")
     if max_features_override >= 2:
         st.sidebar.markdown(
             '<div style="background:#FFF8E1;padding:8px 12px;border-radius:8px;'
@@ -2438,25 +2454,29 @@ def main():
 <div class="upload-panel">
 <h3>👈 Upload your two data files using the sidebar to begin</h3>
 
-<b>File 1 — NDVI CSV</b><br>
-Any CSV with a date column and an NDVI column. Column names are detected automatically.
-<br><br>
-<code>Date, NDVI</code><br>
-<code>2016-01-01, 0.42</code>
+<div class="up-section">
+<div class="up-label">📄 File 1 — NDVI CSV</div>
+Any CSV with a date column and an NDVI column. Column names are auto-detected.<br>
+Example format: <code>Date, NDVI</code> &nbsp;→&nbsp; <code>2016-01-01, 0.42</code>
+</div>
 
-<br><br>
-<b>File 2 — Meteorological CSV</b><br>
+<div class="up-section">
+<div class="up-label">🌦️ File 2 — Meteorological CSV</div>
 Daily climate data. Download free from
 <a href="https://power.larc.nasa.gov/data-access-viewer/" target="_blank">NASA POWER</a>
-(Daily → Point → your coordinates → CSV).
-<br><br>
+(Daily → Point → your site coordinates → CSV).
+<br><i>⚠️ Use continuous <b>daily</b> records — not NDVI-cadence sampled files.</i>
+</div>
 
-<b>What this tool does:</b><br>
-• Extracts SOS, POS, EOS from the NDVI curve — fully data-driven<br>
-• Fits <b>all models</b> (Ridge, LOESS, Poly-2, Poly-3, GPR) simultaneously<br>
-• <b>Auto-selects the best model</b> per event by Leave-One-Out R²<br>
-• Your preferred model is honoured when it's competitive (within 0.02 R²)<br>
-• Predicts future phenology dates from forecast weather<br>
+<div style="margin-top:14px">
+<b>What this tool does automatically:</b><br>
+<span class="feature-item">📈 Extracts SOS · POS · EOS</span>
+<span class="feature-item">🤖 Fits Ridge · LOESS · Poly-2 · Poly-3 · GPR</span>
+<span class="feature-item">🏆 Auto-selects best model by LOO R²</span>
+<span class="feature-item">🎯 Predicts future phenology</span>
+<span class="feature-item">🔍 Sensitivity analysis</span>
+<span class="feature-item">📊 Driver ranking</span>
+</div>
 </div>
         """, unsafe_allow_html=True)
         return
@@ -2606,7 +2626,7 @@ Daily climate data. Download free from
             'auto-selected per event. Your preferred model is used when it\'s within 0.02 R² '
             'of the automatic best.</div>', unsafe_allow_html=True)
 
-        with st.spinner(f"Fitting all models and selecting best by LOO R²…"):
+        with st.spinner("Fitting all models and selecting best by LOO R²…"):
             train_df  = make_training_features(pheno_df, met_df, all_params, window=feat_window)
             predictor = UniversalPredictor()
             predictor.train(train_df, all_params, model_key=model_key,
@@ -2661,14 +2681,15 @@ Daily climate data. Download free from
             n_ev = predictor.n_seasons.get(ev, 0)
             if ev not in predictor._fits:
                 col.markdown(
-                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="metric-card">'
+                    f'<div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
                     f'<div class="value" style="color:#9E9E9E;font-size:1.3rem">Not fitted</div>'
                     f'<div class="sub">{"Need ≥ 2 seasons" if n_ev < 2 else "No correlated feature"}'
                     f'<br>{n_ev} season(s) available</div></div>', unsafe_allow_html=True)
                 return
 
-            result   = predictor._fits[ev]
-            best_fit = result['best_fit']
+            result    = predictor._fits[ev]
+            best_fit  = result['best_fit']
             best_name = result['best_name']
             r2   = predictor.r2.get(ev, 0)
             mae  = predictor.mae.get(ev, 0)
@@ -2677,23 +2698,26 @@ Daily climate data. Download free from
 
             if best_fit['mode'] == 'mean':
                 col.markdown(
-                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="metric-card">'
+                    f'<div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
                     f'<div class="value" style="color:#9E9E9E">Mean only</div>'
                     f'<div class="sub">No climate variable met the threshold.<br>'
                     f'Prediction = historical average · ±{mae:.1f} days</div></div>',
                     unsafe_allow_html=True)
             else:
                 clr = '#1B5E20' if r2 > 0.6 else '#E65100' if r2 > 0.3 else '#B71C1C'
-                # Build all-model comparison line
+                badge_html = _model_badge_html(best_name)
                 all_r2_str = "  ·  ".join(
-                    f"{nm}: {v.get('r2', np.nan):.2f}"
+                    f"<b>{nm}</b>: {v.get('r2', 0):.2f}"
                     for nm, v in result['all_models'].items()
-                    if not np.isnan(v.get('r2', np.nan))
+                    if not np.isnan(v.get('r2', float('nan')))
                 )
                 col.markdown(
-                    f'<div class="metric-card"><div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
+                    f'<div class="metric-card">'
+                    f'<div class="label">{icons[ev]} {ev} — {ev_full[ev]}</div>'
                     f'<div class="value" style="color:{clr}">{r2*100:.1f}%</div>'
-                    f'<div class="sub">Best: <b>{best_name}</b> · {n} seasons<br>'
+                    f'<div class="sub">'
+                    f'Best: {badge_html} · {n} seasons<br>'
                     f'Driver(s): <b>{", ".join(feats) or "—"}</b><br>'
                     f'Typical error: ±{mae:.1f} days<br>'
                     f'<span style="font-size:0.72rem;color:#9E9E9E">All models — {all_r2_str}</span>'
@@ -2709,22 +2733,25 @@ Daily climate data. Download free from
                     f'Correlations and R² values are not statistically meaningful at n≤3.</div>',
                     unsafe_allow_html=True)
 
-        # Fitted equations
+        # ── FITTED EQUATIONS (rich HTML boxes) ────────────────
         st.markdown('<p class="section-title">Model Equations (Best Auto-Selected)</p>',
                     unsafe_allow_html=True)
         st.caption(
-            "Each equation shows the best-performing model for that event. "
-            "All models were fitted and the one with highest LOO R² was selected.")
+            "Each equation shows the best-performing model. "
+            "All models (Ridge · LOESS · Poly-2 · Poly-3 · GPR) were fitted; "
+            "the one with highest LOO R² was selected automatically.")
 
         t_sos, t_pos, t_eos = st.tabs([
             f"{icons['SOS']} Start of Season (SOS)",
             f"{icons['POS']} Peak of Season (POS)",
             f"{icons['EOS']} End of Season (EOS)"])
+
         for ui_tab, ev in zip([t_sos, t_pos, t_eos], ['SOS', 'POS', 'EOS']):
             with ui_tab:
-                eq   = predictor.equation_str(ev, season_start_month=start_m)
-                eq_h = eq.replace('\n', '<br>').replace('  ', '&nbsp;&nbsp;')
-                st.markdown(f'<div class="eq-box">{eq_h}</div>', unsafe_allow_html=True)
+                eq_raw    = predictor.equation_str(ev, season_start_month=start_m)
+                best_name = predictor._fits[ev]['best_name'] if ev in predictor._fits else 'mean'
+                # Render rich HTML equation box
+                st.markdown(_build_eq_box_html(eq_raw, ev, best_name), unsafe_allow_html=True)
 
                 # All-model comparison table
                 if ev in predictor._fits:
@@ -2732,18 +2759,18 @@ Daily climate data. Download free from
                     best_nm  = predictor._fits[ev]['best_name']
                     cmp_rows = []
                     for nm, mfit in all_mods.items():
-                        r2v  = mfit.get('r2', np.nan)
-                        maev = mfit.get('mae', np.nan)
+                        r2v  = mfit.get('r2', float('nan'))
+                        maev = mfit.get('mae', float('nan'))
                         cmp_rows.append({
-                            'Model':    nm,
-                            'LOO R²':   round(r2v, 3) if not np.isnan(r2v) else float('nan'),
+                            'Model':      nm,
+                            'LOO R²':     round(r2v, 3) if not np.isnan(r2v) else float('nan'),
                             'MAE (days)': round(maev, 1) if not np.isnan(maev) else float('nan'),
-                            'Selected': '✅ Best' if nm == best_nm else '',
+                            'Status':     '✅ Auto-selected best' if nm == best_nm else '',
                         })
                     if cmp_rows:
-                        st.markdown("**All models comparison:**")
+                        st.markdown("**All models fitted — comparison:**")
                         st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True,
-                                     hide_index=True, height=180)
+                                     hide_index=True, height=200)
 
                 ct = predictor.corr_table_for_display(ev)
                 if not ct.empty:
@@ -2826,8 +2853,7 @@ Daily climate data. Download free from
                 else:
                     st.info("No correlation data available.")
 
-        st.markdown('<p class="section-title">NDVI and Climate — Year by Year</p>',
-                    unsafe_allow_html=True)
+        st.markdown('<p class="section-title">NDVI and Climate — Year by Year</p>', unsafe_allow_html=True)
         _met  = st.session_state.get('met_df')
         _ndvi = st.session_state.get('ndvi_df')
         _rp   = st.session_state.get('raw_params', [])
@@ -2859,7 +2885,7 @@ Daily climate data. Download free from
             if not ridge_events:
                 st.markdown(
                     '<div class="banner-warn">⚠️ Sensitivity analysis requires at least one Ridge '
-                    'model as the auto-selected best model. Currently the best models for all events '
+                    'model as the auto-selected best. Currently the best models for all events '
                     'are non-Ridge types (LOESS / Poly / GPR). Coefficients are only interpretable '
                     'for Ridge. Switch preferred model to Ridge or upload more data.</div>',
                     unsafe_allow_html=True)
@@ -2889,13 +2915,13 @@ Daily climate data. Download free from
                             sign   = '+' if d_days > 0 else ''
                             dirstr = 'delays' if d_days > 0 else 'advances'
                             col_d.markdown(
-                                f"<div style='background:{ev_colors_hex[ev]};padding:16px;border-radius:10px;"
-                                f"border-left:4px solid {ev_border_hex[ev]};margin:6px 0'>"
-                                f"<div style='font-size:0.78rem;color:#666;font-weight:600'>"
+                                f"<div class='pred-event-header' "
+                                f"style='background:{ev_colors_hex[ev]};border-color:{ev_border_hex[ev]}'>"
+                                f"<div class='ev-title' style='color:{ev_border_hex[ev]}'>"
                                 f"{ev_icons[ev]} {ev_labels_full[ev]}</div>"
                                 f"<div style='font-size:1.4rem;font-weight:700;color:{ev_border_hex[ev]};margin:4px 0'>"
                                 f"{dom['feature']}</div>"
-                                f"<div style='font-size:0.85rem;color:#555'>"
+                                f"<div class='ev-meta'>"
                                 f"↑ 1σ increase {dirstr} {ev} by <b>{sign}{d_days:.1f} days</b></div>"
                                 f"<div style='font-size:0.78rem;color:#888;margin-top:4px'>"
                                 f"{len(sens_ev)} variable(s) in model</div></div>",
@@ -2934,7 +2960,7 @@ Daily climate data. Download free from
                                            sdf.to_csv(index=False), "sensitivity_analysis.csv", "text/csv")
 
     # ══════════════════════════════════════════════════════════
-    # TAB 5 — PREDICT
+    # TAB 5 — PREDICT  (enhanced with per-event model badges)
     # ══════════════════════════════════════════════════════════
     with tab5:
         st.markdown('<p class="section-title">Predict Phenology Dates for Any Year</p>',
@@ -2972,6 +2998,7 @@ Daily climate data. Download free from
             r2  = predictor_ss.r2.get(ev, 0)
             mae = predictor_ss.mae.get(ev, 0)
             best_name = result['best_name']
+            badge_h = _model_badge_html(best_name)
 
             hist_hint = ""
             if pheno_ss is not None and f'{ev}_Date' in pheno_ss.columns:
@@ -2979,14 +3006,16 @@ Daily climate data. Download free from
                 if len(ev_dates) > 0:
                     med_m = int(ev_dates.dt.month.median())
                     med_d = int(ev_dates.dt.day.median())
-                    hist_hint = f" · Historically around {mo[med_m]} {med_d} (±{mae:.0f} days)"
+                    hist_hint = f" · Historically ~{mo[med_m]} {med_d} (±{mae:.0f} d)"
 
+            # Rich per-event header with coloured border and model badge
             st.markdown(
-                f"<div style='background:{ev_colors_hex[ev]};padding:14px 18px;border-radius:10px;"
-                f"border-left:4px solid {ev_border_hex[ev]};margin:10px 0'>"
-                f"<b>{ev_labels_full[ev]}</b>"
-                f"<span style='font-size:0.82rem;color:#666'>&nbsp;&nbsp;"
-                f"Best model: <b>{best_name}</b> · R²={r2:.0%}{hist_hint}</span></div>",
+                f"<div class='pred-event-header' "
+                f"style='background:{ev_colors_hex[ev]};border-color:{ev_border_hex[ev]}'>"
+                f"<div class='ev-title' style='color:{ev_border_hex[ev]}'>"
+                f"{ev_labels_full[ev]} {badge_h}</div>"
+                f"<div class='ev-meta'>R²(LOO) = {r2:.0%}{hist_hint}</div>"
+                f"</div>",
                 unsafe_allow_html=True)
 
             col_list = st.columns(min(len(feats), 4))
@@ -3055,11 +3084,13 @@ Daily climate data. Download free from
                 cols = st.columns(len(results))
                 for col, (ev, res) in zip(cols, results.items()):
                     ev_full = {'SOS':'Start of Season','POS':'Peak of Season','EOS':'End of Season'}
+                    mdl_badge = _model_badge_html(res.get('model', '—'))
                     col.markdown(
-                        f'<div class="metric-card"><div class="label">{icons[ev]} {ev_full[ev]}</div>'
+                        f'<div class="metric-card">'
+                        f'<div class="label">{icons[ev]} {ev_full[ev]}</div>'
                         f'<div class="value">{res["date"].strftime("%b %d")}</div>'
                         f'<div class="sub">Day {res["doy"]} of {res["date"].year}<br>'
-                        f'Model: <b>{res.get("model","—")}</b> · R²={res["r2"]:.0%}<br>'
+                        f'Model: {mdl_badge} · R²={res["r2"]:.0%}<br>'
                         f'Typical error: ±{res["mae"]:.0f} days</div></div>',
                         unsafe_allow_html=True)
 
@@ -3098,28 +3129,32 @@ No forest-type configuration required — fully data-driven.
 
 ---
 
-### 🤖 Prediction Engine (v2 — Auto-Best Model Selection)
+### 🤖 Prediction Engine — Auto-Best Model Selection
 
-In this version all models are fitted simultaneously:
+All models are fitted simultaneously per event:
 
-| Model | When it wins |
-|---|---|
-| **Ridge Regression** | Small datasets (n<6); stable, interpretable |
-| **LOESS** | Nonlinear relationships with a single driver |
-| **Polynomial (deg 2/3)** | Unimodal or curved responses |
-| **Gaussian Process** | Complex nonlinear patterns; needs n≥5 |
+| Model | When it wins | Notes |
+|---|---|---|
+| **Ridge Regression** | Small datasets (n<6), stable | Interpretable coefficients |
+| **LOESS** | Nonlinear single-driver relationships | Uses PCA projection for multi-feature |
+| **Polynomial deg-2** | Unimodal / curved responses | Ridge-regularised |
+| **Polynomial deg-3** | Higher-order curvature | Needs n>5 |
+| **Gaussian Process** | Complex nonlinear patterns | Needs n≥5 |
 
 The model with the **highest LOO R²** is automatically selected per event.
-Your preferred model (sidebar) is used when it's within **0.02 R²** of the automatic best.
+Your preferred model (sidebar) is honoured when it is within **0.02 R²** of the automatic best.
 
 ---
 
 ### 📘 Key Terms
 
-**SOS / POS / EOS / LOS** — Start, Peak, End, Length of Season.
-**DOY** — Day of Year (1=Jan 1, 365=Dec 31).
-**LOO R²** — Leave-One-Out R²: each season predicted from all others. Honest out-of-sample accuracy.
-**Amplitude** — Peak NDVI minus baseline NDVI for a given season.
+<span class="term">SOS</span> Start of Season — when NDVI first rises to the SOS threshold  
+<span class="term">POS</span> Peak of Season — highest NDVI within the season window  
+<span class="term">EOS</span> End of Season — when NDVI falls back below the EOS threshold  
+<span class="term">LOS</span> Length of Season — days from SOS to EOS  
+<span class="term">DOY</span> Day of Year (1 = Jan 1, 365 = Dec 31)  
+<span class="term">LOO R²</span> Leave-One-Out R² — out-of-sample accuracy; each season predicted from all others  
+<span class="term">Amplitude</span> Peak NDVI minus baseline NDVI for each season cycle  
 
 ---
 
@@ -3143,19 +3178,21 @@ Your preferred model (sidebar) is used when it's within **0.02 R²** of the auto
 | >0.80 | Strong predictor |
 | 0.50–0.80 | Good |
 | 0.30–0.50 | Moderate |
-| <0.30 | Weak |
+| <0.30 | Weak — use predictions with caution |
 
 ---
 
 ### 📂 Data Format
 
-**NDVI CSV** — Any CSV with date + NDVI columns (auto-detected).
+**NDVI CSV** — Any CSV with date + NDVI columns (column names auto-detected).  
+Example: `Date, NDVI`
 
-**Met CSV** — Continuous **daily** data. Download free from
+**Met CSV** — Continuous **daily** climate data. Download free from
 [NASA POWER](https://power.larc.nasa.gov/data-access-viewer/) (Daily → Point → your site → CSV).
-⚠️ Do NOT use a file sampled at NDVI cadence (5/16-day) — the app needs dense daily records
+
+⚠️ Do NOT use a met file sampled at NDVI cadence (5/16-day) — the app needs dense daily records
 to compute meaningful climate averages in each pre-event window.
-        """)
+        """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
