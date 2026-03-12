@@ -259,6 +259,110 @@ def characterize_met_data(met_df, raw_params):
     return info
 
 
+def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
+    """
+    Diagnose the quality of climate data available for model training.
+
+    Returns a dict with:
+      - met_cadence_days: median gap between met observations
+      - met_is_paired_with_ndvi: True if MET dates exactly match NDVI dates
+      - met_has_large_gaps: True if any gap > 60 days
+      - met_gap_periods: list of (gap_start, gap_end) strings
+      - per_event_coverage: dict[event] → dict with n_seasons_with_data,
+                             n_seasons_total, seasons_missing, coverage_pct
+      - warnings: list of human-readable warning strings
+    """
+    result = {
+        'met_cadence_days': None,
+        'met_is_paired_with_ndvi': False,
+        'met_has_large_gaps': False,
+        'met_gap_periods': [],
+        'per_event_coverage': {},
+        'warnings': [],
+    }
+
+    if met_df is None or len(met_df) == 0:
+        result['warnings'].append("Meteorological file is empty.")
+        return result
+
+    # ── MET cadence ──────────────────────────────────────────
+    met_dates = pd.to_datetime(met_df['Date']).sort_values()
+    diffs = met_dates.diff().dt.days.dropna()
+    pos_diffs = diffs[diffs > 0]
+    if len(pos_diffs) > 0:
+        result['met_cadence_days'] = float(pos_diffs.median())
+
+    # ── Check if MET dates are paired with NDVI ──────────────
+    if ndvi_df is not None:
+        ndvi_dates_set = set(pd.to_datetime(ndvi_df['Date']).dt.date.tolist())
+        met_dates_set  = set(met_dates.dt.date.tolist())
+        overlap = len(ndvi_dates_set & met_dates_set)
+        total   = len(met_dates_set)
+        if total > 0 and overlap / total >= 0.90:
+            result['met_is_paired_with_ndvi'] = True
+            result['warnings'].append(
+                "⚠️ Your meteorological file appears to be sampled at the same dates as your NDVI "
+                "rather than being a continuous daily record. This severely limits the app's ability "
+                "to compute climate windows before each season event — many windows will be empty or "
+                "have very few data points. "
+                "For best results, upload a continuous daily meteorological CSV (e.g. from NASA POWER "
+                "Daily for your coordinates)."
+            )
+
+    # ── Large gaps ───────────────────────────────────────────
+    gap_mask = diffs > 60
+    if gap_mask.any():
+        result['met_has_large_gaps'] = True
+        gap_end_dates = met_dates[diffs.index[gap_mask]]
+        gap_start_dates = met_dates.shift(1)[diffs.index[gap_mask]]
+        for gs, ge in zip(gap_start_dates, gap_end_dates):
+            gap_str = f"{pd.Timestamp(gs).strftime('%b %Y')} → {pd.Timestamp(ge).strftime('%b %Y')}"
+            result['met_gap_periods'].append(gap_str)
+        result['warnings'].append(
+            f"⚠️ Large gaps detected in meteorological data: "
+            + ", ".join(result['met_gap_periods'])
+            + ". Seasons whose event windows fall inside these gaps will be excluded from model training, "
+            "reducing the effective sample size."
+        )
+
+    # ── Per-event coverage ───────────────────────────────────
+    if pheno_df is not None and len(pheno_df) > 0:
+        n_total = len(pheno_df)
+        for ev in ['SOS', 'POS', 'EOS']:
+            date_col = f'{ev}_Date'
+            if date_col not in pheno_df.columns:
+                continue
+            n_with_data = 0
+            seasons_missing = []
+            for _, row in pheno_df.iterrows():
+                evt_dt = row[date_col]
+                if pd.isna(evt_dt):
+                    seasons_missing.append(int(row['Year']))
+                    continue
+                mask = ((met_df['Date'] >= pd.Timestamp(evt_dt) - timedelta(days=window)) &
+                        (met_df['Date'] <= pd.Timestamp(evt_dt)))
+                n_rows = len(met_df[mask])
+                if n_rows >= 1:
+                    n_with_data += 1
+                else:
+                    seasons_missing.append(int(row['Year']))
+            result['per_event_coverage'][ev] = {
+                'n_seasons_with_data': n_with_data,
+                'n_seasons_total':     n_total,
+                'seasons_missing':     seasons_missing,
+                'coverage_pct':        round(100 * n_with_data / n_total, 0) if n_total > 0 else 0,
+            }
+            if n_with_data < n_total:
+                missing_yrs = ", ".join(str(y) for y in seasons_missing)
+                result['warnings'].append(
+                    f"⚠️ {ev} model: {n_total - n_with_data} season(s) have NO meteorological data "
+                    f"in the {window}-day pre-event window (year(s): {missing_yrs}). "
+                    f"Only {n_with_data} of {n_total} seasons can be used for training."
+                )
+
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════
 # PARSERS
 # ═══════════════════════════════════════════════════════════════
@@ -1961,6 +2065,328 @@ def plot_data_summary(ndvi_info, met_info):
     return fig
 
 
+def compute_sensitivity_analysis(predictor, train_df):
+    """
+    Port of JSX runSensitivity() — adapted for real model coefficients.
+
+    For each fitted Ridge event model:
+      sensitivity (days/σ) = coef_unstandardised × std(feature)
+      i.e. how many days the event shifts for a 1-std-dev increase in that feature.
+
+    Returns a dict:
+      {event: {feature: {'days_per_std': float, 'pct_of_mean': float, 'direction': str}}}
+    Also returns a summary dict of dominant driver per event.
+    """
+    result      = {}
+    dominants   = {}
+    feat_stds   = {}
+
+    meta_cols = {'Year', 'Event', 'Target_DOY', 'LOS_Days', 'Peak_NDVI', 'Season_Start'}
+    feat_cols = [c for c in train_df.columns if c not in meta_cols
+                 and pd.api.types.is_numeric_dtype(train_df[c])]
+    for f in feat_cols:
+        vals = train_df[f].dropna()
+        feat_stds[f] = float(vals.std()) if len(vals) > 1 else 1.0
+
+    for ev in ['SOS', 'POS', 'EOS']:
+        if ev not in predictor._fits:
+            continue
+        fit = predictor._fits[ev]
+        if fit['mode'] != 'ridge' or not fit.get('coef') or not fit.get('features'):
+            continue
+
+        sub       = train_df[train_df['Event'] == ev]['Target_DOY'].dropna()
+        mean_tgt  = float(sub.mean()) if len(sub) > 0 else 1.0
+
+        ev_result = {}
+        for feat, coef in zip(fit['features'], fit['coef']):
+            std_f       = feat_stds.get(feat, 1.0)
+            days_shift  = coef * std_f
+            pct_of_mean = (days_shift / max(abs(mean_tgt), 1)) * 100
+            ev_result[feat] = {
+                'days_per_std': round(days_shift, 1),
+                'pct_of_mean':  round(pct_of_mean, 2),
+                'direction':    'delays' if days_shift > 0 else 'advances',
+                'coef':         round(coef, 5),
+                'std':          round(std_f, 3),
+            }
+
+        result[ev] = ev_result
+
+        if ev_result:
+            dom = max(ev_result, key=lambda f: abs(ev_result[f]['days_per_std']))
+            dominants[ev] = {
+                'feature':    dom,
+                'days_per_std': ev_result[dom]['days_per_std'],
+                'direction':  ev_result[dom]['direction'],
+            }
+
+    return result, dominants
+
+
+def plot_sensitivity_heatmap(sensitivity, predictor, train_df):
+    """
+    Port of JSX Sensitivity Heatmap + Driver Analysis tabs.
+
+    Two-panel figure:
+      Left:  Heatmap (features × events) — red=delays, blue=advances, magnitude=abs(days/σ)
+      Right: Bar chart — ranked features for each event side by side
+    """
+    ev_list   = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in sensitivity]
+    all_feats = sorted({f for ev in ev_list for f in sensitivity[ev]},
+                       key=lambda f: max(abs(sensitivity[ev].get(f, {}).get('days_per_std', 0))
+                                         for ev in ev_list), reverse=True)
+
+    if not ev_list or not all_feats:
+        return None
+
+    # ── Build matrices ─────────────────────────────────────────
+    n_feats = len(all_feats)
+    n_evs   = len(ev_list)
+    mat     = np.zeros((n_feats, n_evs))
+    for j, ev in enumerate(ev_list):
+        for i, f in enumerate(all_feats):
+            mat[i, j] = sensitivity[ev].get(f, {}).get('days_per_std', 0)
+
+    abs_max = max(abs(mat).max(), 1.0)
+
+    ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    fig = plt.figure(figsize=(16, max(5, n_feats * 0.7 + 3)))
+    fig.patch.set_facecolor('#F8FBF7')
+    gs  = fig.add_gridspec(1, 2, width_ratios=[1.3, 1.8], wspace=0.45)
+
+    # ── LEFT: Heatmap ──────────────────────────────────────────
+    ax_hm = fig.add_subplot(gs[0])
+    im = ax_hm.imshow(mat, aspect='auto', cmap='RdBu_r', vmin=-abs_max, vmax=abs_max)
+    ax_hm.set_xticks(range(n_evs))
+    ax_hm.set_xticklabels(ev_list, fontsize=12, fontweight='bold')
+    ax_hm.set_yticks(range(n_feats))
+    ax_hm.set_yticklabels(all_feats, fontsize=10)
+    for i in range(n_feats):
+        for j in range(n_evs):
+            v  = mat[i, j]
+            tc = 'white' if abs(v) > abs_max * 0.55 else '#1A1A1A'
+            sign = '+' if v >= 0 else ''
+            ax_hm.text(j, i, f'{sign}{v:.1f}d', ha='center', va='center',
+                       fontsize=9, fontweight='bold', color=tc)
+    cb = plt.colorbar(im, ax=ax_hm, fraction=0.046, pad=0.04)
+    cb.set_label('Days shifted per 1σ increase', fontsize=8)
+    cb.ax.tick_params(labelsize=8)
+    ax_hm.set_title('Sensitivity Heatmap\n(+red = delays event  ·  −blue = advances event)',
+                    fontsize=10, fontweight='bold', color='#1B4332', pad=8)
+    ax_hm.spines[:].set_visible(False)
+    for j, ev in enumerate(ev_list):
+        ax_hm.add_patch(plt.matplotlib.patches.FancyBboxPatch(
+            (j - 0.48, -0.48), 0.96, n_feats - 0.04,
+            boxstyle='round,pad=0.02', linewidth=2,
+            edgecolor=ev_colors.get(ev, '#555'), facecolor='none', zorder=5))
+
+    # ── RIGHT: Grouped bar chart ───────────────────────────────
+    ax_bar = fig.add_subplot(gs[1])
+    bar_h  = 0.22
+    y_pos  = np.arange(n_feats)
+    offsets = np.linspace(-(n_evs - 1) / 2, (n_evs - 1) / 2, n_evs) * bar_h
+
+    for j, ev in enumerate(ev_list):
+        vals     = [mat[i, j] for i in range(n_feats)]
+        bar_clrs = [ev_colors.get(ev, '#888') if abs(v) > 0.5 else '#CFCFCF' for v in vals]
+        bars = ax_bar.barh(y_pos + offsets[j], vals, height=bar_h * 0.85,
+                           color=bar_clrs, edgecolor='white', lw=0.3,
+                           label=ev, alpha=0.88)
+
+    ax_bar.axvline(0, color='#37474F', lw=1.0)
+    ax_bar.set_yticks(y_pos)
+    ax_bar.set_yticklabels(all_feats, fontsize=10)
+    ax_bar.set_xlabel('Days shifted per 1σ increase in feature', fontsize=9, fontweight='bold')
+    ax_bar.set_title('Driver Analysis — Effect on Event Timing\n'
+                     '(how many days each feature shifts each event)',
+                     fontsize=10, fontweight='bold', color='#1B4332', pad=8)
+    ax_bar.grid(True, axis='x', alpha=0.22, ls='--')
+    ax_bar.set_facecolor('#FAFFF8')
+    ax_bar.legend(title='Event', fontsize=9, title_fontsize=9, loc='lower right', framealpha=0.92,
+                  handles=[plt.matplotlib.patches.Patch(color=ev_colors[e], label=e) for e in ev_list])
+    ax_bar.spines['top'].set_visible(False)
+    ax_bar.spines['right'].set_visible(False)
+
+    fig.suptitle('Climate Driver Sensitivity — How Much Each Variable Shifts Each Season Event\n'
+                 '(based on fitted model coefficients × observed feature variability)',
+                 fontsize=12, fontweight='bold', color='#1B4332', y=1.01)
+    fig.tight_layout()
+    return fig
+
+
+def plot_driver_dominance_cards(sensitivity, dominants):
+    """
+    Port of JSX Driver Interpretation panel — matplotlib version.
+    One panel per event showing ranked features with direction + magnitude annotation.
+    """
+    ev_list = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in sensitivity and sensitivity[ev]]
+    if not ev_list:
+        return None
+
+    ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    fig, axes = plt.subplots(1, len(ev_list), figsize=(6 * len(ev_list), max(4, len(ev_list) * 1.5 + 2)))
+    if len(ev_list) == 1:
+        axes = [axes]
+    fig.patch.set_facecolor('#F8FBF7')
+
+    for ax, ev in zip(axes, ev_list):
+        ev_sens  = sensitivity[ev]
+        ranked   = sorted(ev_sens.items(), key=lambda x: abs(x[1]['days_per_std']), reverse=True)
+        feats    = [r[0] for r in ranked]
+        vals     = [r[1]['days_per_std'] for r in ranked]
+        colors   = ['#E53935' if v > 0 else '#1E88E5' for v in vals]
+        abs_max  = max((abs(v) for v in vals), default=1.0)
+        offset   = abs_max * 0.04   # fixed label offset — no walrus operator
+
+        ax.barh(range(len(feats)), vals, color=colors, alpha=0.82,
+                edgecolor='white', lw=0.5, zorder=3)
+
+        for i, (feat, val) in enumerate(zip(feats, vals)):
+            sign   = '+' if val >= 0 else ''
+            direct = '→ delays' if val > 0 else '→ advances'
+            x_pos  = val + offset * (1 if val >= 0 else -1)
+            ha     = 'left' if val >= 0 else 'right'
+            ax.text(x_pos, i, f'{sign}{val:.1f}d  {direct}',
+                    va='center', ha=ha, fontsize=8.5, color='#222222', zorder=4)
+
+        # Numbered rank badges (JSX: numbered colored boxes)
+        for i, (feat, val) in enumerate(zip(feats[:3], vals[:3])):
+            badge_x = -abs_max * 1.28
+            ax.text(badge_x, i, f'#{i+1}', va='center', ha='center',
+                    fontsize=8, fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.25', facecolor=colors[i], edgecolor='none'))
+
+        ax.set_yticks(range(len(feats)))
+        ax.set_yticklabels(feats, fontsize=10)
+        ax.set_xlim(-abs_max * 1.45, abs_max * 1.6)
+        ax.axvline(0, color='#37474F', lw=1.2, zorder=2)
+        ax.set_xlabel('Days shifted per 1σ increase', fontsize=9)
+        ax.set_title(f'{ev} — Driver Ranking\nDominant: '
+                     f'{dominants.get(ev, {}).get("feature", "—")}',
+                     fontsize=11, fontweight='bold', color=ev_colors.get(ev, '#333'))
+        ax.set_facecolor('#FAFFF8')
+        ax.grid(True, axis='x', alpha=0.2, ls='--', zorder=1)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    fig.suptitle('Climate Driver Ranking per Phenological Event\n'
+                 '(red = delays event  ·  blue = advances event  ·  magnitude = days per 1σ)',
+                 fontsize=11, fontweight='bold', color='#1B4332')
+    fig.tight_layout()
+    return fig
+
+
+def plot_radar_chart(sensitivity, selected_event='SOS'):
+    """
+    Port of JSX Factor Radar tab — spider/radar chart showing
+    absolute driver influence on a selected event.
+    Also shows Cross-metric Driver Dominance grid (JSX bottom panel).
+    """
+    import matplotlib.patches as mpatches
+    from matplotlib.patches import FancyBboxPatch
+
+    ev_list = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in sensitivity and sensitivity[ev]]
+    if not ev_list:
+        return None
+
+    ev_colors  = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
+    ev_icons   = {'SOS': '🌱', 'POS': '🌿', 'EOS': '🍂'}
+    ev_labels  = {'SOS': 'Start of Season', 'POS': 'Peak of Season', 'EOS': 'End of Season'}
+
+    # All unique features across events (union)
+    all_feats = sorted({f for ev in ev_list for f in sensitivity[ev]})
+    N = len(all_feats)
+    if N < 3:
+        return None
+
+    # ── Figure layout: radar left, cross-metric grid right ──
+    fig = plt.figure(figsize=(15, 6))
+    fig.patch.set_facecolor('#F8FBF7')
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.1, 1], wspace=0.4)
+
+    # ── LEFT: Radar chart for selected_event ────────────────
+    ax_radar = fig.add_subplot(gs[0], polar=True)
+    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+    angles += angles[:1]  # close polygon
+
+    for ev in ev_list:
+        vals_radar = [abs(sensitivity[ev].get(f, {}).get('days_per_std', 0)) for f in all_feats]
+        vals_radar += vals_radar[:1]
+        lw    = 2.5 if ev == selected_event else 1.0
+        alpha = 0.30 if ev == selected_event else 0.10
+        color = ev_colors[ev]
+        ax_radar.plot(angles, vals_radar, color=color, linewidth=lw, label=ev)
+        ax_radar.fill(angles, vals_radar, color=color, alpha=alpha)
+
+    ax_radar.set_xticks(angles[:-1])
+    ax_radar.set_xticklabels(all_feats, fontsize=9, color='#444')
+    ax_radar.set_facecolor('#FAFFF8')
+    ax_radar.grid(color='#CCCCCC', linestyle='--', alpha=0.5)
+    ax_radar.spines['polar'].set_color('#DDDDDD')
+    ax_radar.set_title(f'Factor Influence Magnitude\n(absolute days per 1σ)',
+                       fontsize=11, fontweight='bold', color='#1B4332', pad=20)
+    ax_radar.legend(loc='upper right', bbox_to_anchor=(1.35, 1.15),
+                    fontsize=9, framealpha=0.85,
+                    handles=[mpatches.Patch(color=ev_colors[e], label=e) for e in ev_list])
+
+    # ── RIGHT: Cross-metric dominance grid (JSX "CROSS-METRIC DRIVER DOMINANCE") ──
+    ax_grid = fig.add_subplot(gs[1])
+    ax_grid.set_xlim(0, 1)
+    ax_grid.set_ylim(0, 1)
+    ax_grid.axis('off')
+    ax_grid.set_title('Cross-Event Driver Dominance\n(top driver for each event)',
+                      fontsize=11, fontweight='bold', color='#1B4332', pad=14)
+
+    n_ev   = len(ev_list)
+    cell_h = 0.80 / n_ev
+    y_start = 0.88
+
+    for i, ev in enumerate(ev_list):
+        ev_sens = sensitivity[ev]
+        if not ev_sens:
+            continue
+        dom_feat  = max(ev_sens, key=lambda f: abs(ev_sens[f]['days_per_std']))
+        dom_val   = ev_sens[dom_feat]['days_per_std']
+        dom_dir   = 'delays' if dom_val > 0 else 'advances'
+        sign      = '+' if dom_val > 0 else ''
+        bar_color = ev_colors[ev]
+
+        y_box = y_start - i * (cell_h + 0.05)
+        box = FancyBboxPatch((0.04, y_box - cell_h + 0.01), 0.92, cell_h - 0.01,
+                             boxstyle='round,pad=0.02', linewidth=1.5,
+                             edgecolor=bar_color, facecolor=bar_color + '18')
+        ax_grid.add_patch(box)
+
+        # Event label
+        ax_grid.text(0.08, y_box - 0.012, f'{ev}  {ev_labels[ev]}',
+                     fontsize=9, color=bar_color, fontweight='bold', va='top')
+        # Dominant feature name
+        ax_grid.text(0.08, y_box - 0.038, dom_feat,
+                     fontsize=13, color='#1A1A1A', fontweight='bold', va='top')
+        # Effect description
+        ax_grid.text(0.08, y_box - 0.068,
+                     f'↑ 1σ {dom_dir} {ev} by {sign}{dom_val:.1f} days',
+                     fontsize=9, color='#555555', va='top')
+
+        # All features ranked as mini bar
+        ranked_feats = sorted(ev_sens.items(), key=lambda x: abs(x[1]['days_per_std']), reverse=True)
+        bar_x = 0.60
+        for j, (feat, finfo) in enumerate(ranked_feats[:4]):
+            frac = abs(finfo['days_per_std']) / max(abs(v['days_per_std']) for v in ev_sens.values())
+            fc   = '#E53935' if finfo['days_per_std'] > 0 else '#1E88E5'
+            ax_grid.barh(y_box - 0.025 - j * 0.022, frac * 0.32,
+                         left=bar_x, height=0.016,
+                         color=fc, alpha=0.75)
+            ax_grid.text(bar_x + frac * 0.32 + 0.01, y_box - 0.025 - j * 0.022,
+                         feat, fontsize=7, va='center', color='#555')
+
+    fig.suptitle('Radar: Factor Influence on Events  ·  Cross-Event Driver Summary',
+                 fontsize=12, fontweight='bold', color='#1B4332')
+    fig.tight_layout()
+    return fig
+
+
 def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df, interp_freq=5):
     ndvi_s = ndvi_df.set_index('Date')['NDVI'].sort_index()
     if ndvi_s.index.duplicated().any():
@@ -2249,10 +2675,11 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
         st.sidebar.info(f"+ {len(derived)} derived features computed automatically")
 
     # ── TABS ──────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Data Summary",
         "🔬 Season Extraction & Models",
         "📈 Climate Correlations",
+        "🎯 Driver Sensitivity",
         "🔮 Predict",
         "📖 User Guide"])
 
@@ -2378,6 +2805,49 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
             predictor.train(train_df, all_params, model_key=model_key,
                             user_max_features=max_features_override)
 
+        # ── MET COVERAGE AUDIT ────────────────────────────────
+        met_audit = audit_met_coverage(met_df, ndvi_df, pheno_df, window=feat_window)
+
+        # Show all audit warnings prominently
+        for w in met_audit['warnings']:
+            st.markdown(f'<div class="banner-warn">{w}</div>', unsafe_allow_html=True)
+
+        # Per-event coverage summary table
+        cov = met_audit['per_event_coverage']
+        if cov:
+            cov_rows = []
+            for ev in ['SOS', 'POS', 'EOS']:
+                if ev not in cov: continue
+                c = cov[ev]
+                missing_str = (", ".join(str(y) for y in c['seasons_missing'])
+                               if c['seasons_missing'] else "None")
+                reliable = "✅ OK" if c['n_seasons_with_data'] >= 5 else (
+                    "⚠️ Low" if c['n_seasons_with_data'] >= 3 else "❌ Very low")
+                cov_rows.append({
+                    'Event': ev,
+                    'Seasons with climate data': c['n_seasons_with_data'],
+                    'Total seasons': c['n_seasons_total'],
+                    'Coverage': f"{c['coverage_pct']:.0f}%",
+                    'Missing years': missing_str,
+                    'Model reliability': reliable,
+                })
+            if cov_rows:
+                st.markdown("**Climate window coverage per event:**")
+                st.dataframe(pd.DataFrame(cov_rows), use_container_width=True, hide_index=True)
+
+        # MET cadence note
+        if met_audit['met_cadence_days'] and met_audit['met_cadence_days'] > 3:
+            cadence_d = met_audit['met_cadence_days']
+            if cadence_d >= 4:
+                st.markdown(
+                    f'<div class="banner-warn">⚠️ <b>Meteorological data cadence: ~{cadence_d:.0f} days.</b> '
+                    f'The climate windows used for model training typically contain only '
+                    f'~{max(1, int(feat_window / cadence_d))} observation(s) per {feat_window}-day window. '
+                    f'This greatly reduces the reliability of climate averages. '
+                    f'For best results, upload a <b>continuous daily meteorological file</b> '
+                    f'(e.g. NASA POWER Daily → Point → your coordinates → CSV).</div>',
+                    unsafe_allow_html=True)
+
         st.session_state.update({
             'pheno_df': pheno_df, 'met_df': met_df, 'train_df': train_df,
             'predictor': predictor, 'all_params': all_params,
@@ -2428,6 +2898,19 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
                     unsafe_allow_html=True)
 
         _card(c1, 'SOS'); _card(c2, 'POS'); _card(c3, 'EOS')
+
+        # Per-event n warning
+        for ev in ['SOS', 'POS', 'EOS']:
+            n_ev = predictor.n_seasons.get(ev, 0)
+            if 0 < n_ev <= 3:
+                st.markdown(
+                    f'<div class="banner-error">🔴 <b>{ev} model uses only {n_ev} season(s).</b> '
+                    f'With n={n_ev}, any set of {n_ev} values that are monotonically ordered '
+                    f'will produce |r| ≈ 1.0 — this is a mathematical artefact, '
+                    f'<b>not evidence that T2M (or any variable) is the true driver.</b> '
+                    f'The selected variable is essentially random when n ≤ 3. '
+                    f'Upload more years of complete NDVI + daily MET data to get meaningful results.</div>',
+                    unsafe_allow_html=True)
 
         if n_seasons < 4:
             st.markdown(
@@ -2524,6 +3007,23 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
         if fig_c:
             st.pyplot(fig_c, use_container_width=True)
 
+        # Warn if any event has n≤3 — correlations are mathematically unreliable
+        small_n_events = [(ev, predictor_ss.n_seasons.get(ev, 0))
+                         for ev in ['SOS','POS','EOS']
+                         if 0 < predictor_ss.n_seasons.get(ev, 0) <= 3]
+        if small_n_events:
+            ev_strs = ", ".join(f"{ev} (n={n})" for ev, n in small_n_events)
+            st.markdown(
+                f'<div class="banner-error">🔴 <b>Correlation values are not meaningful for: {ev_strs}.</b><br>'
+                f'With only 3 data points, <i>any</i> three values that are monotonically ordered '
+                f'(increasing or decreasing) will produce a Pearson r of exactly ±1.0 — regardless '
+                f'of whether there is a true biological relationship. '
+                f'Spearman ρ with n=3 can only take values −1, −0.5, 0, +0.5, or +1.0 by definition.<br>'
+                f'<b>Do not interpret these correlations as evidence of a climate driver.</b> '
+                f'Upload a continuous daily meteorological file covering all seasons to get reliable results.'
+                f'</div>',
+                unsafe_allow_html=True)
+
         st.markdown('<p class="section-title">Full Correlation Table</p>', unsafe_allow_html=True)
         st.caption(
             "Pearson r and Spearman ρ measure the linear and rank correlation between each "
@@ -2571,9 +3071,161 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
                 st.info("No complete seasons with overlapping climate data found.")
 
     # ══════════════════════════════════════════════════════════
-    # TAB 4 — PREDICT
+    # TAB 4 — DRIVER SENSITIVITY  (ported from phenology_model.jsx)
     # ══════════════════════════════════════════════════════════
     with tab4:
+        st.markdown('<p class="section-title">Climate Driver Sensitivity Analysis</p>',
+                    unsafe_allow_html=True)
+        predictor_ss = st.session_state.get('predictor')
+        train_df_ss  = st.session_state.get('train_df')
+        if predictor_ss is None:
+            st.info("Complete the Season Extraction step first (🔬 Season Extraction & Models tab).")
+        else:
+            # Check if any Ridge model is fitted (needed for coef-based sensitivity)
+            ridge_events = [ev for ev in ['SOS','POS','EOS']
+                            if ev in predictor_ss._fits
+                            and predictor_ss._fits[ev].get('mode') == 'ridge'
+                            and predictor_ss._fits[ev].get('coef')]
+
+            if not ridge_events:
+                st.markdown(
+                    '<div class="banner-warn">⚠️ Sensitivity analysis requires at least one Ridge '
+                    'regression model with fitted coefficients. Currently no Ridge models could be '
+                    'fitted — this happens when there are too few seasons or no strong climate '
+                    'correlations. Upload more data or switch to Ridge Regression in the sidebar.'
+                    '</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div class="banner-info">ℹ️ This analysis shows <b>how much each climate variable '
+                    'shifts each season event</b>, measured in days per 1 standard-deviation increase '
+                    'in that variable. Red bars mean the variable <b>delays</b> the event; '
+                    'blue bars mean it <b>advances</b> it. '
+                    'This is computed directly from the fitted model coefficients × the observed '
+                    'variability of each feature in your dataset.</div>',
+                    unsafe_allow_html=True)
+
+                sensitivity, dominants = compute_sensitivity_analysis(predictor_ss, train_df_ss)
+
+                if not sensitivity:
+                    st.warning("No sensitivity data available — check that Ridge models are fitted.")
+                else:
+                    # ── Dominant driver summary cards ──────────────
+                    st.markdown('<p class="section-title">Dominant Driver per Event</p>',
+                                unsafe_allow_html=True)
+                    ev_colors_hex  = {'SOS': '#E8F5E9', 'POS': '#E3F2FD', 'EOS': '#FFF3E0'}
+                    ev_border_hex  = {'SOS': '#2E7D32', 'POS': '#1565C0', 'EOS': '#E65100'}
+                    ev_icons       = {'SOS': '🌱', 'POS': '🌿', 'EOS': '🍂'}
+                    ev_labels_full = {'SOS': 'Start of Season', 'POS': 'Peak of Season',
+                                      'EOS': 'End of Season'}
+                    dom_cols = st.columns(len(ridge_events))
+                    for col_d, ev in zip(dom_cols, ridge_events):
+                        dom = dominants.get(ev)
+                        sens_ev = sensitivity.get(ev, {})
+                        if dom:
+                            d_days = dom['days_per_std']
+                            sign   = '+' if d_days > 0 else ''
+                            dirstr = 'delays' if d_days > 0 else 'advances'
+                            col_d.markdown(
+                                f"<div style='background:{ev_colors_hex[ev]};padding:16px;border-radius:10px;"
+                                f"border-left:4px solid {ev_border_hex[ev]};margin:6px 0'>"
+                                f"<div style='font-size:0.78rem;color:#666;font-weight:600;'>"
+                                f"{ev_icons[ev]} {ev_labels_full[ev]}</div>"
+                                f"<div style='font-size:1.4rem;font-weight:700;color:{ev_border_hex[ev]};margin:4px 0'>"
+                                f"{dom['feature']}</div>"
+                                f"<div style='font-size:0.85rem;color:#555'>"
+                                f"↑ 1σ increase {dirstr} {ev} by "
+                                f"<b>{sign}{d_days:.1f} days</b></div>"
+                                f"<div style='font-size:0.78rem;color:#888;margin-top:4px'>"
+                                f"{len(sens_ev)} variable(s) in model</div>"
+                                f"</div>",
+                                unsafe_allow_html=True)
+                        else:
+                            col_d.markdown(
+                                f"<div style='background:#F5F5F5;padding:16px;border-radius:10px;"
+                                f"border-left:4px solid #9E9E9E;margin:6px 0'>"
+                                f"<div style='font-size:0.78rem;color:#666'>{ev_icons[ev]} {ev}</div>"
+                                f"<div style='font-size:1rem;color:#9E9E9E'>No Ridge model</div>"
+                                f"</div>",
+                                unsafe_allow_html=True)
+
+                    # ── Sensitivity heatmap ──────────────────────
+                    st.markdown('<p class="section-title">Sensitivity Heatmap & Driver Ranking</p>',
+                                unsafe_allow_html=True)
+                    st.caption(
+                        "Each cell shows how many days the event shifts when that climate variable "
+                        "increases by 1 standard deviation (σ). This accounts for real variability "
+                        "in your data — a variable with a large coefficient but low variability may "
+                        "have less practical impact than one with a moderate coefficient but high variability.")
+                    fig_hm = plot_sensitivity_heatmap(sensitivity, predictor_ss, train_df_ss)
+                    if fig_hm:
+                        st.pyplot(fig_hm, use_container_width=True)
+                        plt.close(fig_hm)
+
+                    # ── Per-event driver cards ───────────────────
+                    st.markdown('<p class="section-title">Driver Interpretation — Ranked per Event</p>',
+                                unsafe_allow_html=True)
+                    fig_dc = plot_driver_dominance_cards(sensitivity, dominants)
+                    if fig_dc:
+                        st.pyplot(fig_dc, use_container_width=True)
+                        plt.close(fig_dc)
+
+                    # ── Radar chart + cross-metric dominance (from JSX Factor Radar tab) ──
+                    st.markdown('<p class="section-title">Factor Radar & Cross-Event Driver Dominance</p>',
+                                unsafe_allow_html=True)
+                    st.caption(
+                        "The radar chart shows absolute factor influence magnitude per event — "
+                        "larger area = stronger driver. "
+                        "The right panel (ported from the JSX Factor Radar tab) shows the top "
+                        "driver for each event with a ranked mini-bar of all features.")
+                    # Let user pick which event to highlight on radar
+                    available_evs = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in sensitivity]
+                    radar_ev = st.radio(
+                        "Highlight event on radar:",
+                        available_evs,
+                        horizontal=True,
+                        key="radar_ev_sel",
+                        format_func=lambda e: {'SOS': '🌱 SOS', 'POS': '🌿 POS', 'EOS': '🍂 EOS'}[e])
+                    fig_rd = plot_radar_chart(sensitivity, selected_event=radar_ev)
+                    if fig_rd:
+                        st.pyplot(fig_rd, use_container_width=True)
+                        plt.close(fig_rd)
+                    else:
+                        st.info("Radar chart needs at least 3 climate features in the model.")
+
+                    # ── Full sensitivity table ───────────────────
+                    st.markdown('<p class="section-title">Full Sensitivity Table</p>',
+                                unsafe_allow_html=True)
+                    rows = []
+                    for ev in ['SOS', 'POS', 'EOS']:
+                        if ev not in sensitivity: continue
+                        for feat, vals in sensitivity[ev].items():
+                            rows.append({
+                                'Event':            ev,
+                                'Climate Variable': feat,
+                                'Coefficient':      vals['coef'],
+                                'Feature Std (σ)':  vals['std'],
+                                'Days per 1σ ↑':    vals['days_per_std'],
+                                '% of mean target': f"{vals['pct_of_mean']:+.1f}%",
+                                'Effect':           f"↑ 1σ {vals['direction']} {ev} by "
+                                                    f"{abs(vals['days_per_std']):.1f} days",
+                            })
+                    if rows:
+                        sdf = pd.DataFrame(rows)
+                        sty = sdf.style.background_gradient(
+                            subset=['Days per 1σ ↑'], cmap='RdBu_r',
+                            vmin=-max(abs(sdf['Days per 1σ ↑'])),
+                            vmax= max(abs(sdf['Days per 1σ ↑'])))
+                        st.dataframe(sty, use_container_width=True, hide_index=True)
+
+                        # Download
+                        st.download_button(
+                            "📥 Download Sensitivity Table (CSV)",
+                            sdf.to_csv(index=False), "sensitivity_analysis.csv", "text/csv")
+
+    # ══════════════════════════════════════════════════════════
+    # TAB 5 — PREDICT
+    # ══════════════════════════════════════════════════════════
+    with tab5:
         st.markdown('<p class="section-title">Predict Phenology Dates for Any Year</p>',
                     unsafe_allow_html=True)
         predictor_ss = st.session_state.get('predictor')
@@ -2731,9 +3383,9 @@ Parameters such as temperature, rainfall, humidity, and radiation are detected a
                                    "predictions.csv", "text/csv")
 
     # ══════════════════════════════════════════════════════════
-    # TAB 5 — USER GUIDE
+    # TAB 6 — USER GUIDE
     # ══════════════════════════════════════════════════════════
-    with tab5:
+    with tab6:
         st.markdown('<p class="section-title">User Guide</p>', unsafe_allow_html=True)
 
         st.markdown("""
@@ -2809,7 +3461,9 @@ using all other seasons, giving an honest estimate of out-of-sample accuracy.
 - Typical sources: MODIS MOD13A2 / MYD13A2, Sentinel-2, Landsat time series
 
 **Meteorological file:**
-- Daily CSV from [NASA POWER](https://power.larc.nasa.gov/data-access-viewer/) or your own source
+- Must be a **continuous daily CSV** — one row per day with no large gaps
+- ⚠️ **Do NOT use a file sampled at the same dates as your NDVI** (e.g. every 5 or 16 days). The app needs dense daily data to compute meaningful climate averages in the 15–60 day window before each season event. A 5-day MET file gives only ~3 readings per window, which is statistically meaningless.
+- Download free daily data from [NASA POWER](https://power.larc.nasa.gov/data-access-viewer/) → **Daily** → Point → your site coordinates → CSV
 - Column names such as `T2M` (temperature), `PRECTOTCORR` (rainfall), `RH2M` (humidity), `ALLSKY_SFC_SW_DWN` (radiation) are recognised automatically
 - Derived variables (Growing Degree Days, log-rainfall, seasonal cumulative values) are computed automatically from what is available
 
