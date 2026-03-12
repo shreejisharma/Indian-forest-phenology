@@ -485,7 +485,7 @@ def _parse_date_robust(series, doy_series=None):
         }
         best_key = max(scores, key=scores.get)
         return {'default': parsed_default, 'dayfirst': parsed_dayfirst,
-                'explicit': best_explicit or parsed_default}[best_key]
+                'explicit': best_explicit if best_explicit is not None else parsed_default}[best_key]
     candidates = [parsed_default, parsed_dayfirst]
     if best_explicit is not None and best_explicit_n >= len(series) * 0.85:
         candidates.append(best_explicit)
