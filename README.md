@@ -1,20 +1,15 @@
-# 🌲 Universal Forest Phenology Assessment — v5
+# 🌲 Universal Indian Forest Phenology Predictor — v5
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/Streamlit-1.32%2B-FF4B4B?logo=streamlit&logoColor=white" />
   <img src="https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?logo=scikit-learn&logoColor=white" />
   <img src="https://img.shields.io/badge/Design-100%25_Data--Driven-brightgreen" />
-  <img src="https://img.shields.io/badge/Forest%20Types-Universal-2E7D32" />
-  <img src="https://img.shields.io/badge/Satellite-MODIS%20%7C%20Sentinel--2-blue" />
+  <img src="https://img.shields.io/badge/Forest%20Types-Universal-blue" />
   <img src="https://img.shields.io/badge/License-MIT-lightgrey" />
 </p>
 
-A **100% data-driven Streamlit application** for extracting and predicting phenological events —
-**Start of Season (SOS)**, **Peak of Season (POS)**, and **End of Season (EOS)** — from any uploaded
-NDVI time series and NASA POWER meteorological data. Works for **any Indian forest type** with
-zero hardcoded presets — every threshold, cadence, amplitude floor, and feature ranking is derived
-exclusively from your data.
+A **fully data-driven Streamlit application** for extracting and predicting phenological events — **Start of Season (SOS)**, **Peak of Season (POS)**, and **End of Season (EOS)** — across all Indian forest types. Upload your NDVI time series and NASA POWER meteorological data; every threshold, feature, and model coefficient is derived from your data — no hardcoded presets.
 
 **[▶ Open Live App](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**
 
@@ -23,85 +18,73 @@ exclusively from your data.
 ## Overview
 
 | Item | Detail |
-|------|--------|
-| **Forest types** | Universal — any Indian forest type (or any ecosystem worldwide) |
+|---|---|
+| **Works with** | All Indian forest types — Tropical Dry/Moist Deciduous, Wet Evergreen, Shola, Thorn, Mangrove, NE India, Himalayan, Alpine — **no forest-type selection needed** |
 | **Phenological events** | SOS · POS · EOS · LOS (Length of Season) |
 | **NDVI input** | Any CSV with `Date` + `NDVI` columns (MODIS MOD13Q1, Sentinel-2, or other) |
 | **Meteorological input** | NASA POWER daily export (headers auto-detected and skipped) |
-| **Model** | Ridge / LOESS / Polynomial / Gaussian Process — LOO cross-validated |
-| **Feature selection** | 100% data-driven — pure Pearson \|r\| + Spearman \|ρ\| composite ranking |
+| **Models** | Ridge · LOESS · Polynomial (deg 2/3) · Gaussian Process — all LOO cross-validated |
+| **Feature selection** | Pearson \|r\| ≥ 0.40 filter → collinearity removal → incremental LOO R² check |
 | **Minimum data** | 3 growing seasons (≥ 5 recommended for reliable R²) |
-| **Version** | v5 — zero hardcoding; all parameters computed from uploaded data |
+
+---
+
+## What's New in v5 — 100% Data-Driven
+
+| Parameter | v4 (hardcoded) | v5 (data-driven) |
+|-----------|---------------|------------------|
+| NDVI cadence | assumed 16d | median of observed date differences |
+| Max gap threshold | fixed 60d | 8× detected cadence |
+| Trough min distance | fixed 145d | 40% of autocorrelation cycle estimate |
+| MIN_AMPLITUDE | fixed 0.02 | 5% of data P5–P95 range |
+| Feature priority | hard list per event | pure Pearson/Spearman ranking from data |
+| Feature window | fixed 15d | user-adjustable sidebar slider |
+| Prediction defaults | zero | training data means |
+| Data characterization | absent | auto-generated from uploads |
+| Model coefficient export | not available | CSV download |
+
+---
+
+## Bug Fixes (v5)
+
+- **Fix 1:** Season year = trough start year (not POS year) — eliminates duplicate-year collision
+- **Fix 2:** POS = raw NDVI peak (not smoothed) — exact match with observed maximum
+- **Fix 3 (v4):** Gap-tolerant cycle extraction (50% tolerance for high-amplitude seasons)
+- **Fix 4 (v3):** SG window capped at 31 steps — prevents over-smoothing across seasons
+- **Fix 5 (v2):** Plateau trough filter 85% ceiling — fixes missing seasons in evergreen forests
 
 ---
 
 ## Features
 
-### 📊 Data Overview Tab
-- Auto-detected observation cadence, dominant cycle period, global NDVI amplitude
-- Every extraction parameter shown with its derivation formula
-- Detected meteorological parameters (raw + derived features)
-- Growing window summary
+### 📊 Data Overview Tab *(new in v5)*
+- Auto-characterizes uploaded NDVI: cadence, dynamic range, evergreen index
+- Lists all detected met parameters with their statistics from your file
+- Summary plot — all values derived from your uploaded data
 
-### 🔬 Training & Models Tab
-- Automatic NDVI 5-day interpolation + per-segment Savitzky-Golay smoothing
-- Valley-anchored amplitude threshold phenology extraction (all 7 bug fixes v2–v7 applied)
-- Model performance cards (LOO R², MAE, number of seasons)
-- Fitted equations in tabbed layout (SOS / POS / EOS)
-- Feature role table — colour-coded: ✅ IN MODEL · ➖ Correlated not selected · ⬜ Below threshold
+### 🔬 Training Tab
+- Fully data-adaptive phenology extraction (cadence, amplitude, cycle length from data)
+- Model performance cards: LOO R², MAE, selected features
+- Fitted equations with all coefficients shown
+- Feature role table — IN MODEL · Not selected · Below threshold
 - Observed vs Predicted scatter plots
-- Download phenology table as CSV + model coefficients as CSV
+- **Download phenology table (CSV)**
+- **Download model coefficients (CSV)**
 
-### 📈 Correlations & Met Tab
-- Pearson r + Spearman ρ heatmaps across SOS / POS / EOS
-- Significance stars (** p < 0.05, * p < 0.10)
-- Year-by-year meteorological + NDVI panels per growing season
-- Detailed per-event correlation tables (consistent with heatmap — same `corr_tables` object)
+### 📈 Correlations Tab
+- Feature correlation bar chart + heatmap (data-ranked, no preset priority)
+- Year-by-year NDVI + Meteorology plots
 
 ### 🔮 Predict Tab
-- Event-scoped input fields pre-filled from training data means
-- Ecological order enforcement (SOS < POS < EOS with automatic correction)
-- LOS, green-up lag, and senescence lag computed from predictions
+- Inputs pre-filled with training data means (data-derived defaults)
+- Value range hints from training data shown in tooltips
+- LOO-validated predictions with ecological order enforcement (SOS < POS < EOS)
 - Download predictions as CSV
 
-### 📖 Technical Guide Tab
+### 📖 Technical Guide
 - Full methodology documentation
-- Bug-fix log (v2–v7) with before/after comparison
-- Threshold sensitivity guide and R² interpretation table
-- Citation
-
----
-
-## v5 Core Design — 100% Data-Governed
-
-**No forest-type dropdown. No lookup tables. No hardcoded numbers.**
-You provide only the growing-window start and end month — everything else is computed from your data.
-
-| Parameter | Old (hardcoded) | v5 (data-driven) |
-|-----------|----------------|------------------|
-| NDVI cadence | 16 days assumed | `median(observed date diffs)` |
-| Max interpolation gap | 60 days fixed | `8 × detected cadence` |
-| Trough min separation | 145 days fixed | `40% of autocorrelation cycle period` |
-| SG smoother window | 31 steps fixed | `42% of detected cycle period` |
-| Minimum amplitude | 0.02 fixed | `5% of P5–P95 NDVI range` |
-| Amplitude-gap threshold | 0.10 fixed | `10% of global amplitude` |
-| Feature priority | hardcoded list per event | pure Pearson + Spearman from data |
-| Correlation gate | 0.40 fixed | sidebar slider (0.20–0.70) |
-| Min season length | 150 days fixed | `35% of detected cycle` (or user override) |
-
----
-
-## Bug Fixes (v2 → v7)
-
-| Fix | Description |
-|-----|------------|
-| **v2** | Plateau trough filter: 85% adaptive ceiling; disabled for low-amplitude evergreen forests |
-| **v3** | SG window data-derived (≤ 42% of cycle); `MIN_AMPLITUDE` = 5% of P5–P95 NDVI range |
-| **v4** | Gap tolerance scales with amplitude — 50% tolerant for strong signals, 20% strict for weak |
-| **v5** | Head/tail segment extraction with amplitude-aware gap checks |
-| **v6** | `season_start` derived from POS date — eliminates blank windows in cross-year configs |
-| **v6b** | `POS_Date` = raw NDVI maximum (not smoothed peak) |
-| **v7** | Deduplicate by `Season_Start` (not calendar `Year`) — no window ever left blank |
+- Data-driven vs hardcoded parameter comparison table
+- R² interpretation guide for research use
 
 ---
 
@@ -109,20 +92,18 @@ You provide only the growing-window start and end month — everything else is c
 
 ### NDVI CSV
 ```
-Date,NDVI
-2016-01-01,0.42
-2016-01-17,0.45
-2016-02-02,0.51
+date,NDVI
+2017-01-09,0.48
+2017-02-08,0.39
 ```
-Column names are auto-detected (case-insensitive). Supports MODIS 16-day, Sentinel-2 monthly,
-or any irregular composite. Multi-site: add a `site_key` column — app shows a site selector.
+Column names are auto-detected. Supports MODIS 8-day, Sentinel-2 10-day, or irregularly spaced composites. Multi-site CSVs supported with a `site_key` column.
 
 ### NASA POWER Meteorological CSV
-Download from [NASA POWER Data Access](https://power.larc.nasa.gov/data-access-viewer/).
-Select **Daily** temporal resolution and **Point** geometry. Recommended parameters:
+Download from [NASA POWER Data Access](https://power.larc.nasa.gov/data-access-viewer/).  
+Select **Daily** temporal resolution and **point** geometry. Recommended parameters:
 
 | Parameter | Variable | Role |
-|-----------|----------|------|
+|---|---|---|
 | Mean temperature 2m | `T2M` | GDD, VPD |
 | Min temperature 2m | `T2M_MIN` | SOS trigger |
 | Max temperature 2m | `T2M_MAX` | Heat stress |
@@ -133,35 +114,11 @@ Select **Daily** temporal resolution and **Point** geometry. Recommended paramet
 | Wind speed 2m | `WS2M` | Senescence (EOS) |
 | Incoming solar radiation | `ALLSKY_SFC_SW_DWN` | POS timing |
 
-The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR`, `VPD`, `SPEI_proxy`,
-`log_precip`, `MSI`, `T2M_RANGE`.
+The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR`, `VPD`, `SPEI_proxy`, `log_precip`, `MSI`, `T2M_RANGE`
 
 ---
 
-## Sample Data Included
-
-20+ Indian forest sites ready to use:
-
-| Site | Location | Forest Type |
-|------|----------|-------------|
-| IIT Tirupati | Andhra Pradesh | Tropical Dry Deciduous |
-| Mukurthi | Nilgiris, Tamil Nadu | Shola / Southern Montane |
-| Agumbe | Western Ghats, Karnataka | Tropical Wet Evergreen |
-| Silent Valley | Kerala | Tropical Wet Evergreen |
-| Sundarbans | West Bengal | Mangrove |
-| Bhitarkanika | Odisha | Mangrove |
-| Kaziranga | Assam | NE Moist Evergreen |
-| Cherrapunji | Meghalaya | NE Moist Evergreen |
-| Bastar | Chhattisgarh | Tropical Moist Deciduous |
-| Mudumalai | Tamil Nadu | Tropical Dry Deciduous |
-| Valley of Flowers | Uttarakhand | Alpine Meadow |
-| Great Himalaya | Himachal Pradesh | Montane Temperate |
-| Jaisalmer | Rajasthan | Tropical Thorn Scrub |
-| Warangal | Telangana | Khair-Hardwickia Forest |
-
----
-
-## Installation
+## Local Installation
 
 ```bash
 git clone https://github.com/shreejisharma/Indian-forest-phenology.git
@@ -170,6 +127,11 @@ pip install -r requirements.txt
 streamlit run app/universal_Indian_forest_phenology_v5.py
 ```
 
+**One-click launchers (no terminal needed):**
+- 🪟 Windows — double-click `run_app.bat`
+- 🍎 macOS — double-click `Run Phenology App.command`
+- 🐧 Linux — double-click `run_app.sh`
+
 ---
 
 ## Repository Structure
@@ -177,14 +139,16 @@ streamlit run app/universal_Indian_forest_phenology_v5.py
 ```
 Indian-forest-phenology/
 ├── app/
-│   └── universal_Indian_forest_phenology_v5.py   ← main app (single file)
+│   └── universal_Indian_forest_phenology_v5.py   ← main app (v5, data-driven)
 ├── data/
-│   └── ndvi/                                      ← 20+ sample NDVI CSVs
+│   └── ndvi/                                      ← 30+ sample NDVI files
 ├── docs/
-│   └── user_guide.md                              ← detailed methodology
+│   └── user_guide.md
 ├── scripts/
-│   ├── gee_extract_modis_ndvi.js                  ← GEE: MODIS NDVI extraction
-│   └── gee_extract_sentinel2_ndvi.js              ← GEE: Sentinel-2 NDVI extraction
+│   ├── gee_extract_modis_ndvi.js
+│   └── gee_extract_sentinel2_ndvi.js
+├── run_app.bat                                    ← Windows one-click launcher
+├── run_app.sh                                     ← macOS/Linux one-click launcher
 ├── requirements.txt
 └── README.md
 ```
@@ -193,46 +157,31 @@ Indian-forest-phenology/
 
 ## Methodology
 
-### Phenology Extraction — Valley-Anchored Amplitude Method
-1. Gaps > `8 × cadence` preserved as NaN (not interpolated across large gaps)
-2. NDVI resampled to 5-day grid by linear interpolation within valid segments
-3. Per-segment Savitzky-Golay smoothing (window ≤ 42% of dominant cycle period)
-4. Valley (trough) detection — minimum separation = 40% of autocorrelation cycle period
-5. Amplitude `A = NDVI_max − NDVI_min` computed from raw 5-day values per cycle
-6. Threshold = `NDVI_min + threshold% × A`
-7. SOS = first crossing on ascending limb
-8. EOS = last crossing on descending limb
-9. POS = **raw NDVI maximum** between SOS and EOS (not smoothed peak)
+### Phenology Extraction (v5 — Data-Driven)
+1. **Cadence detection** — median of observed date differences
+2. **Gap identification** — gaps > 8× cadence preserved as NaN
+3. **Interpolation** — adaptive-frequency grid, within-segment only
+4. **SG smoothing** — per-segment, window ≤ 31 steps (≈155 days)
+5. **Cycle length** — autocorrelation of smoothed series
+6. **Trough detection** — min distance = 40% of cycle length
+7. **MIN_AMPLITUDE** — 5% of data P5–P95 range
+8. **SOS / EOS** — first/last crossing of user% × per-cycle amplitude
+9. **POS** — raw NDVI maximum between SOS and EOS
+10. **Season year** — trough start year (not POS year)
 
 ### Regression Model
-1. 15-day pre-event meteorological windows computed per season per event
-2. Features ranked by composite score = `max(|Pearson r|, |Spearman ρ|)` — no preset list
-3. Correlation gate: composite ≥ threshold (default 0.40, adjustable via sidebar slider)
-4. Collinearity filter: `|r| > 0.85` between candidates → weaker feature dropped
-5. Incremental LOO R² check: feature added only if it improves LOO R² by ≥ 0.03
-6. Ridge Regression / LOESS / Polynomial / Gaussian Process — user-selectable
-
-### Consistency Guarantee
-Pearson r and significance shown in the **Training tab** and the **Correlations tab heatmap** are
-computed from the **same `corr_tables` object** — they are always identical.
-
----
-
-## Model Performance (R² LOO)
-
-| R² | Interpretation |
-|----|---------------|
-| > 0.80 | Strong predictability |
-| 0.50–0.80 | Good |
-| 0.30–0.50 | Moderate — acceptable for short records |
-| < 0.30 | Weak — collect more years of data |
+1. Met features computed in user-specified window before each event
+2. Pearson r + Spearman ρ composite ≥ 0.40 filter
+3. Collinearity filter: |r| > 0.85 → drop weaker feature
+4. Forward selection: add if LOO R² improves ≥ 0.03
+5. Ridge / LOESS / Polynomial / GPR with Leave-One-Out CV
 
 ---
 
 ## Citation
 
 ```
-Sharma, S. (2025). Universal Forest Phenology Assessment v5 [Software].
+Sharma, S. (2025). Universal Indian Forest Phenology Predictor v5 [Software].
 GitHub. https://github.com/shreejisharma/Indian-forest-phenology
 ```
 
