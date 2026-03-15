@@ -351,6 +351,32 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
             + ". Seasons whose event windows fall inside these gaps will be excluded from model training."
         )
 
+    # ── Per-year DOY coverage check (NEW) ────────────────────
+    # Detects years where met data only covers part of the year
+    # (e.g. winter-only years that miss the EOS window entirely)
+    if 'Date' in met_df.columns:
+        met_df_dt = met_df.copy()
+        met_df_dt['_year'] = pd.to_datetime(met_df_dt['Date']).dt.year
+        met_df_dt['_doy']  = pd.to_datetime(met_df_dt['Date']).dt.dayofyear
+        year_doy = met_df_dt.groupby('_year')['_doy'].agg(['min', 'max', 'count'])
+        partial_years = []
+        for yr, row_y in year_doy.iterrows():
+            # Flag years that don't reach at least DOY 240 (late Aug)
+            # — they cannot contribute to EOS/late-season windows
+            if row_y['max'] < 240:
+                partial_years.append(
+                    f"{yr} (DOY {int(row_y['min'])}–{int(row_y['max'])}, "
+                    f"{int(row_y['count'])} obs)"
+                )
+        if partial_years:
+            result['warnings'].append(
+                f"⚠️ <b>Partial-year meteorological data detected</b> — the following years only cover "
+                f"the first part of the calendar year and have NO data in the growing-season "
+                f"(Jul–Nov) window: <b>{', '.join(partial_years)}</b>. "
+                f"These years will be <b>excluded from model training</b>, reducing your effective "
+                f"sample size. Upload a complete full-year meteorological file for all years to fix this."
+            )
+
     if pheno_df is not None and len(pheno_df) > 0:
         n_total = len(pheno_df)
         for ev in ['SOS', 'POS', 'EOS']:
@@ -358,6 +384,7 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
             if date_col not in pheno_df.columns:
                 continue
             n_with_data = 0
+            n_rows_list = []   # track actual row counts for min-rows warning
             seasons_missing = []
             for _, row in pheno_df.iterrows():
                 evt_dt = row[date_col]
@@ -366,8 +393,10 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
                     continue
                 mask = ((met_df['Date'] >= pd.Timestamp(evt_dt) - timedelta(days=window)) &
                         (met_df['Date'] <= pd.Timestamp(evt_dt)))
-                if len(met_df[mask]) >= 1:
+                n_rows = len(met_df[mask])
+                if n_rows >= 1:
                     n_with_data += 1
+                    n_rows_list.append(n_rows)
                 else:
                     seasons_missing.append(int(row['Year']))
             result['per_event_coverage'][ev] = {
@@ -375,6 +404,7 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
                 'n_seasons_total':     n_total,
                 'seasons_missing':     seasons_missing,
                 'coverage_pct':        round(100 * n_with_data / n_total, 0) if n_total > 0 else 0,
+                'avg_rows_per_window': round(float(np.mean(n_rows_list)), 1) if n_rows_list else 0,
             }
             if n_with_data < n_total:
                 missing_yrs = ", ".join(str(y) for y in seasons_missing)
@@ -382,6 +412,16 @@ def audit_met_coverage(met_df, ndvi_df, pheno_df, window=15):
                     f"⚠️ {ev} model: {n_total - n_with_data} season(s) have NO meteorological data "
                     f"in the {window}-day pre-event window (year(s): {missing_yrs}). "
                     f"Only {n_with_data} of {n_total} seasons can be used for training."
+                )
+            # Warn if average row count per window is very low
+            if n_rows_list and np.mean(n_rows_list) < 4:
+                result['warnings'].append(
+                    f"⚠️ {ev} model: average rows per climate window = "
+                    f"{np.mean(n_rows_list):.1f} (window={window} days, "
+                    f"met cadence≈{result.get('met_cadence_days', '?'):.0f} days). "
+                    f"Feature averages based on fewer than 4 observations are unreliable. "
+                    f"Increase the <b>Climate Window</b> slider to at least "
+                    f"{int(result.get('met_cadence_days', 5) * 6)} days, or upload daily met data."
                 )
     return result
 
@@ -619,7 +659,7 @@ def make_training_features(pheno_df, met_df, params, window=15):
             mask = ((met_df['Date'] >= evt_dt - timedelta(days=window)) &
                     (met_df['Date'] <= evt_dt))
             wdf = met_df[mask]
-            if len(wdf) < max(1, window * 0.15): continue
+            if len(wdf) < max(3, window * 0.15): continue   # need ≥3 rows for a meaningful average
             for p in params:
                 if p not in met_df.columns: continue
                 p_upper = p.upper()
@@ -2755,11 +2795,16 @@ Daily climate data. Download free from
                                if c['seasons_missing'] else "None")
                 reliable = ("✅ OK" if c['n_seasons_with_data'] >= 5 else
                             "⚠️ Low" if c['n_seasons_with_data'] >= 3 else "❌ Very low")
+                avg_rows = c.get('avg_rows_per_window', 0)
+                rows_qual = ("✅ Good" if avg_rows >= 6 else
+                             "⚠️ Sparse" if avg_rows >= 3 else "❌ Too few")
                 cov_rows.append({
                     'Event': ev,
                     'Seasons with climate data': c['n_seasons_with_data'],
                     'Total seasons': c['n_seasons_total'],
                     'Coverage': f"{c['coverage_pct']:.0f}%",
+                    'Avg rows/window': f"{avg_rows:.1f}",
+                    'Window data quality': rows_qual,
                     'Missing years': missing_str,
                     'Model reliability': reliable,
                 })
@@ -2770,9 +2815,14 @@ Daily climate data. Download free from
         if met_audit['met_cadence_days'] and met_audit['met_cadence_days'] > 3:
             cadence_d = met_audit['met_cadence_days']
             if cadence_d >= 4:
+                recommended_window = int(cadence_d * 6)   # 6 obs minimum
                 st.markdown(
                     f'<div class="banner-warn">⚠️ <b>Met data cadence: ~{cadence_d:.0f} days.</b> '
-                    f'Upload a continuous daily meteorological file for best results.</div>',
+                    f'A {feat_window}-day climate window only contains ~{max(1,int(feat_window/cadence_d))} '
+                    f'observations per season — too few for reliable feature averaging. '
+                    f'<b>Recommended: set the Climate Window slider to at least {recommended_window} days</b> '
+                    f'(6× cadence) to get ≥6 rows per window. '
+                    f'Or upload a continuous <b>daily</b> meteorological file for best results.</div>',
                     unsafe_allow_html=True)
 
         st.session_state.update({
@@ -2834,8 +2884,24 @@ Daily climate data. Download free from
             n_ev = predictor.n_seasons.get(ev, 0)
             if 0 < n_ev <= 3:
                 st.markdown(
-                    f'<div class="banner-error">🔴 <b>{ev} model uses only {n_ev} season(s).</b> '
-                    f'Correlations and R² values are not statistically meaningful at n≤3.</div>',
+                    f'<div class="banner-error">🔴 <b>{ev} model uses only {n_ev} season(s) — '
+                    f'results are NOT reliable. Here is why:</b><br><br>'
+                    f'<b>1. Partial-year met data:</b> Your meteorological file only has data for '
+                    f'certain months in some years (e.g. Jan–Apr only). Those years have no data '
+                    f'in the growing-season window, so they cannot contribute to model training.<br><br>'
+                    f'<b>2. Spearman ρ = ±1.000 is a mathematical artefact:</b> With only 3 data '
+                    f'points, <i>any</i> set of values that are monotonically ordered (increasing or '
+                    f'decreasing) will produce a Pearson r and Spearman ρ of exactly ±1.0 — '
+                    f'regardless of whether a real biological relationship exists. '
+                    f'Every climate variable in your data will appear perfectly correlated. '
+                    f'<b>This is not real signal.</b><br><br>'
+                    f'<b>3. R²=0.6 on n=3 is overfit:</b> With LOO on 3 points, the model trains '
+                    f'on 2 points and predicts 1. A single outlier year completely determines the '
+                    f'result. The R² cannot be trusted.<br><br>'
+                    f'<b>✅ Fix:</b> Upload a <b>complete full-year meteorological file</b> '
+                    f'covering all years (Jan–Dec for every year in your NDVI series). '
+                    f'Also increase the <b>Climate Window</b> slider to ≥30 days so each '
+                    f'training window contains enough rows for a meaningful average.</div>',
                     unsafe_allow_html=True)
 
         # Fitted equations
