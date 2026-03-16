@@ -1,6 +1,6 @@
 """
-Forest Phenology Analyser v3
-=========================
+Universal Indian Forest Phenology Assessment
+============================================
 Upload NDVI and meteorological data to extract seasonal phenology events (SOS, POS, EOS, LOS),
 identify climate drivers, train predictive models, and forecast future phenology dates.
 
@@ -10,7 +10,7 @@ Requirements:
     pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
 
 Run:
-    streamlit run forest_phenology_analyser_v2.py
+    streamlit run Universal_Indian_Forest_Phenology_Assessment.py
 
 PREDICTION ENGINE: Ported from Universal Indian Forest Phenology Predictor v5.3
   - Fits ALL models simultaneously: Ridge, LOESS, Poly-2, Poly-3, GPR
@@ -77,8 +77,8 @@ def _loess_predict_fallback(x_train, y_train, x_new, frac=0.75):
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="🌿 Forest Phenology Analyser",
-    page_icon="🌿",
+    page_title="🌲 Universal Indian Forest Phenology Assessment",
+    page_icon="🌲",
     layout="wide"
 )
 
@@ -1533,6 +1533,11 @@ class UniversalPredictor:
 
     # ── train() ───────────────────────────────────────────────
     def train(self, train_df, all_params, model_key="ridge", user_max_features=None):
+        # Guard: make_training_features returns empty DataFrame when every
+        # climate window has fewer than 3 rows (e.g. 5-day met + 15-day window).
+        # Without this guard, train_df['Event'] raises a KeyError.
+        if train_df is None or train_df.empty or 'Event' not in train_df.columns:
+            return  # no usable climate windows — predictor stays empty
         meta      = {'Year', 'Event', 'Target_DOY', 'LOS_Days', 'Peak_NDVI', 'Season_Start'}
         feat_cols = [c for c in train_df.columns
                      if c not in meta
@@ -2494,7 +2499,7 @@ def _build_eq_box_html(eq_raw: str, ev: str, best_name: str) -> str:
 def main():
     st.markdown("""
     <div class="app-header">
-        <h1>🌿 Forest Phenology Analyser</h1>
+        <h1>🌲 Universal Indian Forest Phenology Assessment</h1>
         <p>Upload your NDVI and meteorological data to automatically extract seasonal events,
         train predictive models, and forecast future phenology for any Indian forest type.<br>
         <b>Prediction engine: auto-selects best model (Ridge / LOESS / Poly / GPR) by LOO R²</b></p>
@@ -2503,6 +2508,11 @@ def main():
         <span class="badge">🍂 EOS — End of Season</span>
         <span class="badge">📏 LOS — Length of Season</span>
         <span class="badge">🤖 Auto-best model selection</span>
+        <span style="font-size:0.78rem;color:#C8E6C9;margin-top:8px;display:block">
+        📦 <a href="https://github.com/shreejisharma/Indian-forest-phenology/blob/main/app/Universal_Indian_Forest_Phenology_Assessment.py" style="color:#A5D6A7">GitHub</a>
+        &nbsp;·&nbsp;
+        🌐 <a href="https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/" style="color:#A5D6A7">Live App</a>
+        </span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2778,8 +2788,21 @@ Daily climate data. Download free from
         with st.spinner(f"Fitting all models and selecting best by LOO R²…"):
             train_df  = make_training_features(pheno_df, met_df, all_params, window=feat_window)
             predictor = UniversalPredictor()
-            predictor.train(train_df, all_params, model_key=model_key,
-                            user_max_features=max_features_override)
+            if train_df.empty or 'Event' not in train_df.columns:
+                st.markdown(
+                    f'<div class="banner-error">🔴 <b>No usable climate windows found.</b><br><br>'
+                    f'Every season\'s pre-event window contains fewer than 3 meteorological rows. '
+                    f'This happens when your met file has a <b>coarse cadence</b> (~{feat_window // max(1, feat_window) * 5:.0f}-day) '
+                    f'and the <b>Climate Window</b> is too narrow.<br><br>'
+                    f'<b>Fix — try one of:</b><br>'
+                    f'1. Increase the <b>Climate Window</b> slider to at least <b>30 days</b> '
+                    f'(or 6× your met cadence).<br>'
+                    f'2. Upload a <b>continuous daily</b> meteorological file instead of a '
+                    f'{feat_window}-day sampled one.</div>',
+                    unsafe_allow_html=True)
+            else:
+                predictor.train(train_df, all_params, model_key=model_key,
+                                user_max_features=max_features_override)
 
         met_audit = audit_met_coverage(met_df, ndvi_df, pheno_df, window=feat_window)
         for w in met_audit['warnings']:
@@ -3350,6 +3373,13 @@ Your preferred model (sidebar) is used when it's within **0.02 R²** of the auto
 [NASA POWER](https://power.larc.nasa.gov/data-access-viewer/) (Daily → Point → your site → CSV).
 ⚠️ Do NOT use a file sampled at NDVI cadence (5/16-day) — the app needs dense daily records
 to compute meaningful climate averages in each pre-event window.
+
+---
+
+### 🔗 Links
+- **GitHub:** [Universal_Indian_Forest_Phenology_Assessment.py](https://github.com/shreejisharma/Indian-forest-phenology/blob/main/app/Universal_Indian_Forest_Phenology_Assessment.py)
+- **Live App:** [streamlit.app](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)
+- **Run locally:** `streamlit run Universal_Indian_Forest_Phenology_Assessment.py`
         """)
 
 
