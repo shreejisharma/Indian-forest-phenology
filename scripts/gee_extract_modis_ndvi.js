@@ -3,32 +3,15 @@
  * Google Earth Engine Script — MODIS MOD13Q1 NDVI Extraction
  * Indian Forest Phenology Predictor
  * ═══════════════════════════════════════════════════════════════
- *
- * USAGE:
- *   1. Open https://code.earthengine.google.com
- *   2. Paste this script
- *   3. Edit the CONFIGURATION section below
- *   4. Click Run → Tasks → Run export
- *   5. Download CSV from Google Drive
- *
- * OUTPUT: CSV with columns: date, NDVI
- * SENSOR: MODIS MOD13Q1 (16-day composite, 250m)
- * QUALITY: pixel_reliability ≤ 1 (good + marginal pixels only)
- *
- * RECOMMENDED FOR:
- *   All monsoon forest types (Tropical Dry/Moist Deciduous,
- *   Wet Evergreen, NE India, Shola, Mangrove, Thorn Scrub)
- *   where monsoon cloud cover prevents Sentinel-2 usage.
- * ═══════════════════════════════════════════════════════════════
  */
 
 // ── CONFIGURATION — edit these values ─────────────────────────
-var SITE_NAME  = 'Tirupati';        // used in output filename
-var LATITUDE   = 13.63;             // decimal degrees North
-var LONGITUDE  = 79.42;             // decimal degrees East
-var BUFFER_M   = 500;               // buffer radius in metres
-var START_DATE = '2016-01-01';      // inclusive start
-var END_DATE   = '2025-12-31';      // inclusive end
+var SITE_NAME  = 'Tirupati';
+var LATITUDE   = 13.63;
+var LONGITUDE  = 79.42;
+var BUFFER_M   = 500;
+var START_DATE = '2016-01-01';
+var END_DATE   = '2025-12-31';
 // ───────────────────────────────────────────────────────────────
 
 var point = ee.Geometry.Point([LONGITUDE, LATITUDE]);
@@ -37,11 +20,11 @@ var roi   = point.buffer(BUFFER_M);
 var modis = ee.ImageCollection('MODIS/061/MOD13Q1')
   .filterDate(START_DATE, END_DATE)
   .filterBounds(roi)
-  .select(['NDVI', 'pixel_reliability']);
+  .select(['NDVI', 'SummaryQA']);  // ← FIXED: was 'pixel_reliability'
 
 // Quality filter: keep only good (0) and marginal (1) pixels
 var filtered = modis.map(function(img) {
-  var qa = img.select('pixel_reliability');
+  var qa = img.select('SummaryQA');  // ← FIXED
   return img.updateMask(qa.lte(1));
 });
 
