@@ -108,7 +108,10 @@ print('Total monthly composites:', clean.size());
 //    Set SOS threshold to 10-12% in the app
 // ──────────────────────────────────────────────────────────────
 
-//Sentinel-2 SR NDVI Extraction (Recommended for spatial mapping)//
+//* ═══════════════════════════════════════════════════════════════
+// * Google Earth Engine Script — Sentinel-2(Recommended for spatial mapping)//
+// * Indian Forest Phenology Predictor
+// * ═══════════════════════════════════════════════════════════════
 
 // ── ROI: Tirupati Forest (~7 km × 4 km) ────────────────────────────────
 var region = ee.Geometry.Polygon([[
