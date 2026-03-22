@@ -1,3 +1,4 @@
+.streamlit/secrets.toml
 # Python
 __pycache__/
 *.py[cod]
@@ -8,6 +9,7 @@ __pycache__/
 dist/
 build/
 .eggs/
+
 
 # Virtual environments
 venv/
