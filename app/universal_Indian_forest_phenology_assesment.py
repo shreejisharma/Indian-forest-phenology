@@ -12,16 +12,11 @@ Changes from v2.0:
      grid regardless of the raw NDVI cadence (MODIS 16-day, Sentinel 10-day,
      etc.) so that the Savitzky-Golay smoother receives evenly-spaced input.
 
-AI ASSISTANT ADDED (v2.1 + AI):
-  - New "🤖 AI Assistant" tab powered by Google Gemini (free tier)
-  - Place ai_assistant_gemini_free.py next to this file
-  - Add GEMINI_API_KEY to .streamlit/secrets.toml
-
 Requirements:
-    pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels google-generativeai
+    pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels
 
 Run:
-    streamlit run Universal_Indian_Forest_Phenology_Assessment_v2_1_with_AI.py
+    streamlit run Universal_Indian_Forest_Phenology_Assessment_v2.py
 """
 
 import streamlit as st
@@ -231,6 +226,7 @@ def detect_ndvi_cadence(ndvi_df):
         return 16, 64, INTERP_STEP_DAYS
     median_cad = float(diffs.median())
     max_gap    = max(60, int(median_cad * 8))
+    # Always return INTERP_STEP_DAYS as the interpolation frequency
     return median_cad, max_gap, INTERP_STEP_DAYS
 
 
@@ -738,8 +734,10 @@ def _is_peak_in_window(pos_date, sm, em):
     """
     m = pos_date.month
     if sm <= em:
+        # Within-year: e.g. Jan–Dec
         return sm <= m <= em
     else:
+        # Cross-year: e.g. Jun–May means Jun,Jul,...,Dec,Jan,...,May
         return m >= sm or m <= em
 
 
@@ -778,6 +776,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                                     freq=f"{interp_freq}D")
         ndvi_5d = ndvi_raw.reindex(ndvi_raw.index.union(full_range))
         ndvi_5d = ndvi_5d.interpolate(method="time", limit_area="inside")
+        # Zero out values in large data gaps
         for gap_start in gap_starts:
             before = orig_dates[orig_dates < gap_start]
             if len(before) == 0: continue
@@ -803,7 +802,6 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
             else:
                 in_seg = False
 
-        # SG smooth segments
         for sid in range(1, seg_id + 1):
             idx_seg = np.where(seg_labels == sid)[0]
             seg_n   = len(idx_seg)
@@ -828,7 +826,6 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
             cycle_steps = int(365 / interp_freq)
         min_dist = max(10, int(cycle_steps * 0.4))
 
-
         trough_raw = _find_troughs_boundary(sm_for_troughs, min_dist)
         trough_indices = []
         for ti in trough_raw:
@@ -838,7 +835,6 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
 
         if len(trough_indices) >= 2:
             valid_sm   = sm_for_troughs[~np.isnan(sm_vals)]
-
             global_min = float(np.percentile(valid_sm, 5))
             global_max = float(np.percentile(valid_sm, 95))
             global_amp = global_max - global_min
@@ -875,7 +871,8 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
         _head_start_looks_like_trough = (float(sm_for_troughs[0]) <= _head_trough_ceiling)
 
         # ── helper to extract one season cycle ────────────────
-        def _extract_cycle(cycle_raw, cycle_t, ndvi_min, pos_idx_hint=None, eos_upper=None):
+        def _extract_cycle(cycle_raw, cycle_t, ndvi_min, pos_idx_hint=None,
+                           eos_upper=None):
             """
             Given a 1-D array of NDVI values and corresponding timestamps,
             return (sos_date, pos_date, eos_date) or None.
@@ -907,14 +904,17 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
             if len(ec_below):
                 ei = pi + max(0, int(ec_below[0]) - 1)
             else:
+                # Never fell below threshold — use the local minimum after peak
                 ei = pi + int(np.nanargmin(desc))
 
+            # Clamp ei to array bounds
             ei = min(ei, len(cycle_t) - 1)
             eos_d = cycle_t[ei]
 
             # ── FIX: Allow EOS to cross calendar year ──────────
             # Only clamp to eos_upper (next trough), not to Dec 31
             if eos_upper is not None and eos_d > eos_upper:
+                # Try to find the last valid crossing before the upper bound
                 upper_idx = np.searchsorted(
                     [t.value for t in cycle_t], eos_upper.value, side='right') - 1
                 upper_idx = max(pi, min(upper_idx, len(cycle_t) - 1))
@@ -948,6 +948,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                     pi  = int(np.nanargmax(work_arr))
                     pos = seg_t[pi]
                     if _is_peak_in_window(pos, sm, em):
+                        # EOS upper = the first trough itself
                         eos_ub = t_all[ti_first] + pd.Timedelta(days=interp_freq * 2)
                         res = _extract_cycle(work_arr, seg_t, ndvi_min_h, eos_upper=eos_ub)
                         if res:
@@ -1023,6 +1024,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
                 if not _is_peak_in_window(pos, sm, em):
                     continue
 
+                # For tail: no next trough, allow to data end
                 data_end_dt = t_all[-1]
                 res = _extract_cycle(seg_raw, seg_t, ndvi_min, eos_upper=None)
                 if res is None:
@@ -1765,6 +1767,7 @@ def _build_ndvi_interpolated(ndvi_raw, interp_freq=INTERP_STEP_DAYS):
         ndvi_5d.loc[mask] = np.nan
     ndvi_5d_grid = ndvi_5d.reindex(full_range)
 
+    # SG smooth
     n = len(ndvi_5d_grid); vals = ndvi_5d_grid.values.copy()
     valid_mask = ~np.isnan(vals)
     sm_arr = np.full(n, np.nan)
@@ -1775,7 +1778,6 @@ def _build_ndvi_interpolated(ndvi_raw, interp_freq=INTERP_STEP_DAYS):
             seg_labels[i] = seg_id
         else:
             in_seg = False
-    # SG smooth
     for sid in range(1, seg_id + 1):
         idx_seg = np.where(seg_labels == sid)[0]; seg_n = len(idx_seg)
         if seg_n < 5: sm_arr[idx_seg] = vals[idx_seg]; continue
@@ -1797,6 +1799,7 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
     """
     Draw all NDVI phenology content onto ax, clipped to [date_start, date_end].
     """
+    # Raw scatter
     raw_mask = (pd.to_datetime(ndvi_raw['Date']) >= date_start) & \
                (pd.to_datetime(ndvi_raw['Date']) <= date_end)
     dates_raw = pd.to_datetime(ndvi_raw['Date'])[raw_mask]
@@ -1804,10 +1807,12 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
     ax.scatter(dates_raw, ndvi_raw_vals, color='#A5D6A7', s=18, alpha=0.55,
                label='NDVI (raw obs)', zorder=3)
 
+    # Smoothed line — clip to window
     sm_clip = sm_series[(full_range >= date_start) & (full_range <= date_end)]
     ax.plot(sm_clip.index, sm_clip.values, color='#1B5E20', lw=2.2,
             label='Smoothed (SG, 5-day grid)', zorder=5)
 
+    # Data-gap shading
     sm_vals_clip = sm_clip.values
     idx_clip = sm_clip.index
     in_gap = False; gap_s = None
@@ -1819,6 +1824,7 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
             in_gap = False
     if in_gap: ax.axvspan(gap_s, idx_clip[-1], color='#BDBDBD', alpha=0.30)
 
+    # Season window shading
     if season_window:
         ws_m, we_m = season_window
         y_min_yr = date_start.year; y_max_yr = date_end.year + 1
@@ -1836,6 +1842,7 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
             except Exception:
                 pass
 
+    # Threshold lines and amplitude arrows
     thr_sos_p = thr_eos_p = base_p = False
     for _, row in pheno_df.iterrows():
         td = row.get('Trough_Date'); ed = row.get('EOS_Date')
@@ -1844,6 +1851,7 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
         amp = row.get('Amplitude'); sd = row.get('SOS_Date'); pd_ = row.get('POS_Date')
         if pd.isna(td) or pd.isna(ed): continue
         seg_st = pd.Timestamp(td); seg_en = pd.Timestamp(ed) + pd.Timedelta(days=20)
+        # Only draw if within this panel's window
         if seg_en < date_start or seg_st > date_end: continue
         seg_st = max(seg_st, date_start); seg_en = min(seg_en, date_end)
         if pd.notna(base):
@@ -1866,6 +1874,7 @@ def _draw_ndvi_axes(ax, ndvi_raw, ndvi_5d_grid, sm_series, full_range,
                 ax.text(px, base + amp * 0.5, f'  A={amp:.3f}', fontsize=7, color='#7B1FA2',
                         va='center', ha='left')
 
+    # Event vlines
     ev_colors = {'SOS': '#43A047', 'POS': '#1565C0', 'EOS': '#E65100'}
     plotted_ev = set()
     for _, row in pheno_df.iterrows():
@@ -1899,6 +1908,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None,
     year_max   = dates_all.dt.year.max()
     n_years    = year_max - year_min + 1
 
+    # Decide how many panels
     if n_years <= split_threshold_years:
         chunks = [(year_min, year_max)]
     else:
@@ -1917,6 +1927,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None,
 
     for (y_start, y_end) in chunks:
         date_start = pd.Timestamp(f"{y_start}-01-01")
+        # Allow EOS to bleed into next year by up to 6 months
         date_end   = pd.Timestamp(f"{y_end}-12-31") + pd.DateOffset(months=6)
         date_end   = min(date_end, pd.Timestamp(f"{year_max+1}-06-30"))
 
@@ -1933,7 +1944,7 @@ def plot_ndvi_phenology(ndvi_raw, pheno_df, season_window=None,
         fig.tight_layout()
         figs.append((lbl_range, fig))
 
-    return figs
+    return figs  # list of (label, fig)
 
 
 def plot_pheno_trends(pheno_df):
@@ -2447,7 +2458,6 @@ def main():
         <span class="badge">🤖 Auto-best model selection</span>
         <span class="badge">📅 5-day interp grid</span>
         <span class="badge">📆 Cross-year EOS fixed</span>
-        <span class="badge">🤖 AI Assistant (Gemini)</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2532,6 +2542,7 @@ def main():
             'Reduce to 1–2 if R² looks suspiciously high.</div>',
             unsafe_allow_html=True)
 
+    # Split plot threshold control
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 📊 Plot Settings")
     split_yrs = st.sidebar.slider(
@@ -2568,12 +2579,11 @@ Daily climate data. Download free from
 <br><i>⚠️ Use continuous <b>daily</b> records — not NDVI-cadence sampled files.</i>
 </div>
 <div style="margin-top:14px">
-<b>v2.1 + AI improvements:</b><br>
+<b>v2.1 improvements:</b><br>
 <span class="feature-item">🕐 5-day interpolation grid (always)</span>
 <span class="feature-item">📆 Cross-year EOS correctly handled</span>
 <span class="feature-item">📊 Auto-split plot for long datasets</span>
 <span class="feature-item">🤖 Ridge · LOESS · Poly-2 · Poly-3 · GPR</span>
-<span class="feature-item">💬 AI Assistant tab (Gemini free)</span>
 </div>
 </div>
         """, unsafe_allow_html=True)
@@ -2619,11 +2629,10 @@ Daily climate data. Download free from
         st.sidebar.info(f"+ {len(derived)} derived features computed automatically")
 
     # ── TABS ──────────────────────────────────────────────────
-    # ✅ CHANGE 1: Added tab7 for AI Assistant
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Data Summary", "🔬 Season Extraction & Models",
         "📈 Climate Correlations", "🎯 Driver Sensitivity",
-        "🔮 Predict", "📖 User Guide", "🤖 AI Assistant"])
+        "🔮 Predict", "📖 User Guide"])
 
     icons = {'SOS': '🌱', 'POS': '🌿', 'EOS': '🍂'}
 
@@ -2694,13 +2703,13 @@ Daily climate data. Download free from
         else:
             st.success(f"✅ **{n_seasons} growing seasons** extracted.")
 
+        # ── SPLIT NDVI PLOTS ──────────────────────────────────
         st.markdown(
             '<div class="banner-info">ℹ️ <b>5-day interpolation grid</b> is used throughout. '
             'Long datasets (>8 years) are split into readable panels. '
             '<b>EOS can now extend across the calendar year end</b> (e.g. Nov → Feb).</div>',
             unsafe_allow_html=True)
 
-        # ── SPLIT NDVI PLOTS ──────────────────────────────────────
         ndvi_figs = plot_ndvi_phenology(
             ndvi_df, pheno_df,
             season_window=(start_m, end_m),
@@ -2717,7 +2726,7 @@ Daily climate data. Download free from
                 st.pyplot(fig_p, use_container_width=True)
                 plt.close(fig_p)
 
-        # ── SEASON TABLE ──────────────────────────────────────────
+        # ── SEASON TABLE ──────────────────────────────────────
         st.markdown("**Extracted season dates**")
         disp = []
         for _, row in pheno_df.iterrows():
@@ -2736,7 +2745,7 @@ Daily climate data. Download free from
 
         st.pyplot(plot_pheno_trends(pheno_df))
 
-        # ── MODEL TRAINING ────────────────────────────────────────
+        # ── MODEL TRAINING ────────────────────────────────────
         st.markdown('<p class="section-title">Predictive Model Training</p>', unsafe_allow_html=True)
         st.markdown(
             '<div class="banner-info">ℹ️ <b>All models are fitted simultaneously</b> '
@@ -3214,39 +3223,20 @@ Daily climate data. Download free from
     # TAB 6 — USER GUIDE
     # ══════════════════════════════════════════════════════════
     with tab6:
-        st.markdown('<p class="section-title">User Guide — v2.1 + AI</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-title">User Guide — v2.1</p>', unsafe_allow_html=True)
         st.markdown(f"""
 This tool analyses forest vegetation phenology from NDVI + climate data.
 No forest-type configuration required — fully data-driven.
 
 ---
 
-### 🆕 What's new in v2.1 + AI
+### 🆕 What's new in v2.1
 
-| Feature | Detail |
+| Fix | Detail |
 |---|---|
-| **5-day grid** | Interpolation always uses a {INTERP_STEP_DAYS}-day grid |
-| **Cross-year EOS** | End-of-season dates can extend into the next calendar year |
-| **Split NDVI plot** | Datasets spanning >8 years split into ≤8-year panels |
-| **AI Assistant tab** | Ask any question about your results — powered by Google Gemini (free) |
-
----
-
-### 🤖 AI Assistant Setup
-
-1. Go to **aistudio.google.com** and sign in with Google
-2. Click **Get API Key** → Create API key → copy it
-3. Add to `.streamlit/secrets.toml`:  `GEMINI_API_KEY = "your_key_here"`
-4. Run `pip install google-generativeai`
-
----
-
-### 📘 Key Terms
-
-**SOS / POS / EOS / LOS** — Start, Peak, End, Length of Season.
-**DOY** — Day of Year (1=Jan 1, 365=Dec 31).
-**LOO R²** — Leave-One-Out R²: honest out-of-sample accuracy.
-**Amplitude** — Peak NDVI minus baseline NDVI per season.
+| **5-day grid** | Interpolation always uses a {INTERP_STEP_DAYS}-day grid regardless of NDVI cadence (MODIS 16-day, Sentinel 10-day, etc.) so the SG smoother gets evenly-spaced input |
+| **Cross-year EOS** | End-of-season dates are now allowed to extend into the next calendar year (e.g. Nov → Feb/Mar) — the old code was cutting EOS off at the trough boundary or data end |
+| **Split NDVI plot** | Datasets spanning >8 years are split into ≤8-year panels for readability; controlled by the sidebar slider |
 
 ---
 
@@ -3285,19 +3275,6 @@ All models fitted simultaneously per event:
 - **GitHub:** [Universal_Indian_Forest_Phenology_Assessment.py](https://github.com/shreejisharma/Indian-forest-phenology)
 - **Run locally:** `streamlit run Universal_Indian_Forest_Phenology_Assessment_v2.py`
         """)
-
-    # ══════════════════════════════════════════════════════════
-    # TAB 7 — AI ASSISTANT  ✅ CHANGE 2: New tab added here
-    # ══════════════════════════════════════════════════════════
-    with tab7:
-        from ai_assistant_gemini_free import render_chat_tab
-        render_chat_tab(
-            api_key   = st.secrets.get("GEMINI_API_KEY", ""),
-            pheno_df  = st.session_state.get("pheno_df"),
-            predictor = st.session_state.get("predictor"),
-            ndvi_info = st.session_state.get("ndvi_info"),
-            met_info  = st.session_state.get("met_info"),
-        )
 
 
 if __name__ == "__main__":
