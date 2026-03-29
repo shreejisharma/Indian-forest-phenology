@@ -1,24 +1,28 @@
-# 🌲 Universal Indian Forest Phenology Assessment
+# 🌲 Universal Indian Forest Phenology Assessment — v2.3
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/Streamlit-1.32%2B-FF4B4B?logo=streamlit&logoColor=white" />
   <img src="https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?logo=scikit-learn&logoColor=white" />
+  <img src="https://img.shields.io/badge/AI-Gemini%20Free-8E44AD?logo=google&logoColor=white" />
   <img src="https://img.shields.io/badge/statsmodels-optional-9cf" />
   <img src="https://img.shields.io/badge/Design-100%25_Data--Driven-brightgreen" />
   <img src="https://img.shields.io/badge/Forest%20Types-Universal-blue" />
   <img src="https://img.shields.io/badge/License-MIT-lightgrey" />
 </p>
 
+<p align="center">
+  <a href="https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/" target="_blank">
+    <img src="https://img.shields.io/badge/▶%20Open%20Live%20App-Click%20Here-2E7D32?style=for-the-badge&logo=streamlit&logoColor=white" />
+  </a>
+</p>
+
 A **fully data-driven Streamlit application** for extracting and predicting phenological events —
 **Start of Season (SOS)**, **Peak of Season (POS)**, and **End of Season (EOS)** — across all Indian
 forest types. Upload your NDVI time series and meteorological data; every threshold, feature, and
 model coefficient is derived entirely from your data — no hardcoded presets, no forest-type
-selection required.
-
-**[▶ Open Live App](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)**
-&nbsp;·&nbsp;
-**[📦 View Source](https://github.com/shreejisharma/Indian-forest-phenology/blob/main/app/Universal_Indian_Forest_Phenology_Assessment.py)**
+selection required. Now includes a built-in **🤖 AI Assistant** powered by Google Gemini (free tier)
+and a **🛰️ Multi-Sensor Comparison** tab for Landsat, Sentinel-2, and MODIS.
 
 ---
 
@@ -30,131 +34,85 @@ selection required.
 | **Phenological events** | SOS · POS · EOS · LOS (Length of Season) |
 | **NDVI input** | Any CSV with `Date` + `NDVI` columns (MODIS MOD13Q1, Sentinel-2, Landsat, or custom) |
 | **Meteorological input** | NASA POWER daily export or custom CSV (headers auto-detected) |
-| **Prediction engine** | Ridge · LOESS · Polynomial (deg 2/3) · Gaussian Process — **all fitted simultaneously**, best auto-selected per event by LOO R² |
-| **Feature selection** | Pearson \|r\| ≥ 0.40 filter → collinearity removal (threshold scaled to dataset size) → forward LOO R² selection |
+| **Prediction engine** | Ridge · LOESS · Polynomial (deg 2/3) · Gaussian Process — **all fitted simultaneously**, best auto-selected per event by LOO R²  |
+| **Feature selection** | Pearson \|r\| ≥ 0.40 filter → collinearity removal → forward LOO R² selection |
 | **Minimum data** | 3 complete growing seasons (≥ 5 recommended for reliable statistics) |
+| **AI Assistant** | Google Gemini (free tier) — ask questions about your results in plain language |
+| **Multi-sensor** | Compare SOS/POS/EOS across Landsat, Sentinel-2, and MODIS with inter-sensor agreement stats |
 
 ---
 
-## What's New in v3
+## What's New in v2.3
 
-### Prediction Engine — Auto-Best Model Selection (ported from v5.3)
-
-| Capability | Previous | v3 |
-|---|---|---|
-| Models fitted per run | One (user-selected) | **All 5 models simultaneously** |
-| Model selection | User radio button | **Auto-selects best by LOO R²** per event |
-| User preference | Hard override | Honoured when within **0.02 R²** of automatic best |
-| LOO cross-validation | Separate per model | **Unified `loo_cv()` helper** — Ridge, LOESS (statsmodels), Poly, GPR |
-| LOESS implementation | Pure-numpy fallback only | **statsmodels lowess** with PCA projection for multi-feature input; numpy fallback if statsmodels absent |
-| GPR kernel | `RBF + WhiteKernel` | **`ConstantKernel × RBF + WhiteKernel`** (more stable, matches v5.3) |
-| Ridge alpha search | Fixed ALPHAS list | **`RidgeCV` with `np.logspace(−3, 4, 30)`** |
-
-### UI & Display Improvements
-
-| Element | Previous | v3 |
-|---|---|---|
-| Equation display | Plain monospace box | **Rich styled box** — `eq-label` · `eq-main` · `eq-meta` · `eq-models` sub-sections |
-| Model identification | Text only | **Colour-coded inline badges** — Ridge (green) · LOESS (blue) · Poly-2 (orange) · Poly-3 (red-orange) · GPR (purple) |
-| Prediction event headers | Plain text | **Per-event coloured bordered panel** with model badge + R² |
-| Welcome screen | Plain text list | **Styled upload cards** with feature-item pill badges |
-| All-model comparison | Not shown | **Table under each event tab** showing every model's LOO R² |
-
-### Data Quality Diagnostics (New in v3)
-
-| Check | What it detects |
+| Feature | Detail |
 |---|---|
-| **Partial-year met coverage** | Years where met data only covers Jan–Apr (DOY < 240) — these years silently drop out of model training |
-| **Avg rows per window** | Warns when a climate window contains fewer than 4 rows (unreliable feature averages) |
-| **Recommended window size** | Calculates and displays `6 × cadence` as the minimum recommended climate window |
-| **n ≤ 3 full diagnosis** | Explains the three root causes — partial met data, Spearman ρ artefact, overfitting — with fix instructions |
-
-### Feature Selection Improvements
-
-| Parameter | Previous | v3 |
-|---|---|---|
-| Collinearity threshold | Fixed `0.85` | **Scaled to dataset size**: `0.97` (n ≤ 10) · `0.90` (n ≤ 20) · `0.85` (n > 20) |
-| Max features default | `1` (always single-feature) | **`3`** — allows multi-variable equations when data supports it |
-| Min rows per climate window | `max(1, window × 0.15)` | **`max(3, window × 0.15)`** — prevents features based on 1–2 observations |
+| **5-day interpolation grid** | Interpolation always uses a 5-day grid regardless of input cadence (MODIS 16-day, Sentinel 10-day, etc.) so that the Savitzky-Golay smoother receives evenly-spaced input |
+| **Cross-year EOS fix** | Season-boundary logic now properly handles windows that wrap around the calendar year (e.g. Jun → May). EOS is no longer truncated at Dec 31 — it can extend into the following year up to the next season's trough |
+| **Auto-split NDVI plot** | If NDVI data spans more than 8 years, the time-series plot is automatically split into ≤ 8-year panels for readability (split threshold configurable in sidebar) |
+| **🤖 AI Assistant tab** | New tab powered by Google Gemini free tier — context-aware answers about your phenology results, model performance, and data quality |
+| **🛰️ Sensor Compare tab** | Upload 1–3 per-sensor NDVI CSVs to compare phenology across Landsat, Sentinel-2, and MODIS with Bias, RMSE, and Pearson r agreement stats |
+| **8 tabs total** | Data Quality → Season Extraction → Model Results → Climate Drivers → Predict → User Guide → AI Assistant → Sensor Compare |
 
 ---
 
-## What Was Already in v5 (Carried Forward Unchanged)
+## Application Tabs
 
-| Parameter | Hardcoded (old) | Data-driven (v5 / v3) |
-|---|---|---|
-| NDVI cadence | assumed 16d | median of observed date differences |
-| Max gap threshold | fixed 60d | 8× detected cadence |
-| Trough min distance | fixed 145d | 40% of autocorrelation cycle estimate |
-| MIN_AMPLITUDE | fixed 0.02 | 5% of data P5–P95 range |
-| Feature priority | hard list per event | pure Pearson/Spearman ranking from data |
-| Season year assignment | POS year | trough start year (fixes duplicate-year collision) |
-| POS date | smoothed peak | raw NDVI maximum between SOS and EOS |
-| SG smoothing window | fixed | per-segment, capped at 31 steps |
-| Trough ceiling | none | 85% of global amplitude (fixes evergreen false troughs) |
-
----
-
-## Bug Fixes in v3
-
-| Fix | Description |
-|---|---|
-| **Partial-year met detection** | New per-year DOY coverage audit — detects years with seasonal data gaps (e.g. Jan–Apr only) that silently reduce training sample size |
-| **Min rows per window** | Raised from `max(1, …)` to `max(3, …)` — prevents training features built from 1–2 data points |
-| **Collinearity threshold scaling** | Was fixed at 0.85 — with n ≤ 6, nearly all feature pairs have \|r\| > 0.85 by chance, forcing single-feature models even when multi-feature would be appropriate |
-| **Max features default** | Was `1` — meant multi-feature equations were never selected regardless of data quality |
-| **n ≤ 3 error detail** | Old message was generic; new message explains all three root causes (partial met data · Spearman artefact · LOO overfitting) with a concrete fix |
-| **LOESS with multi-feature** | Old fallback LOESS was univariate only; v3 uses PCA projection so LOESS competes fairly against Ridge/Poly when multiple features are selected |
-| **GPR kernel stability** | `ConstantKernel × RBF + WhiteKernel` replaces plain `RBF + WhiteKernel` — reduces kernel optimisation failures on small datasets |
-
----
-
-## Features
-
-### 📊 Data Summary Tab
-- Auto-characterises uploaded NDVI: cadence, dynamic range, P5/P95, evergreen index
-- Lists all detected meteorological parameters with mean, std, min, max from your file
+### 📊 Tab 1 — Data Quality
+- KPI cards: year range, mean NDVI, sensor cadence, evergreen index
+- Auto-characterises uploaded NDVI: cadence, dynamic range, P5/P95
+- Lists all detected meteorological parameters with mean, std, min, max
 - Summary plot — NDVI distribution + met parameter bar chart + data stats panel
+- Derived variable banner showing auto-computed features (GDD, log-rainfall, VPD, etc.)
+- Climate data coverage warnings — large gaps, partial-year detection, paired-with-NDVI warning
 
-### 🔬 Season Extraction & Models Tab
+### 🌿 Tab 2 — Season Extraction & Models
 - Fully data-adaptive phenology extraction (cadence, amplitude, cycle length all from data)
-- **All 5 models fitted simultaneously** — Ridge · LOESS · Poly-2 · Poly-3 · GPR
-- **Best model auto-selected per event** by LOO R²; user preference honoured within 0.02 R²
+- All 5 models fitted simultaneously — Ridge · LOESS · Poly-2 · Poly-3 · GPR
+- Best model auto-selected per event by LOO R²; user preference honoured within 0.02 R²
 - Model performance cards with colour-coded badge, LOO R², MAE, features, all-model comparison
-- **Rich equation boxes** — styled label · equation · stats · all-models line in one block
-- All-model comparison table under each event tab (LOO R² for every model)
 - Feature role table — IN MODEL · Redundant · Below threshold · Did not improve accuracy
 - Observed vs Predicted scatter (best model, per event)
-- **Climate window coverage audit** — per-event table with seasons covered, avg rows/window, data quality rating
-- **Partial-year met detection** — flags years missing growing-season data
-- **Download phenology table (CSV)**
-- **Download model coefficients (CSV)**
+- Climate window coverage audit — per-event table with seasons covered, avg rows/window, data quality rating
+- Partial-year met detection — flags years missing growing-season data
+- Download phenology table (CSV) and model coefficients (CSV)
 
-### 📈 Climate Correlations Tab
-- Feature correlation bar chart + Pearson r heatmap (data-ranked, p-value annotated)
-- Full correlation table per event — Pearson r, Spearman ρ, composite score
-- Year-by-year NDVI + Meteorology overlay plots (auto-detected air and soil parameters)
+### 🏆 Tab 3 — Model Results
+- Rich equation boxes showing the fitted formula per event
+- All-model comparison table (LOO R² for every model per event)
+- Colour-coded model badges — Ridge (green) · LOESS (blue) · Poly-2 (orange) · Poly-3 (red-orange) · GPR (purple)
+- Confidence level per event: HIGH (R² > 0.6) · MEDIUM · LOW
 
-### 🎯 Driver Sensitivity Tab
-- Dominant driver card per event with coloured border and direction annotation
-- Sensitivity heatmap — days shifted per 1σ increase in each variable
-- Driver dominance bar chart — ranked features per event
-- Radar chart of factor influence magnitude across events
-- Cross-event dominance summary panel
-- Download full sensitivity table as CSV
+### 🎯 Tab 4 — Climate Drivers
+- Feature correlation bar chart + Pearson r heatmap (data-ranked, p-value annotated with * / **)
+- Full correlation table per event — Pearson r, Spearman ρ, Composite score
+- Year-by-year NDVI + Meteorology overlay plots
+- Climate Driver Sensitivity Analysis — days shifted per 1σ change in each variable
+- Driver dominance bar chart and radar chart of factor influence across events
 
-### 🔮 Predict Tab
-- Per-event coloured header showing **which model was auto-selected** and its R²
-- Input fields pre-filled with training data means; tooltips show observed range
+### 🔮 Tab 5 — Predict
+- Per-event coloured header showing which model was auto-selected and its R²
+- Input fields pre-filled with training data means; tooltips show observed ranges
 - Ecological order enforcement — SOS < POS < EOS (auto-corrected if violated)
-- Season length, green-up phase, and senescence phase calculated
+- Season length, green-up phase (SOS → POS), and senescence phase (POS → EOS) displayed
 - Download predictions as CSV
 
-### 📖 User Guide Tab
+### 📖 Tab 6 — User Guide
 - Full methodology documentation
 - Auto-model selection table (when each model wins)
 - R² interpretation guide
 - Data format requirements and NASA POWER download instructions
+
+### 🤖 Tab 7 — AI Assistant
+- Powered by **Google Gemini (free tier)**
+- Context-aware: automatically receives your phenology results, model performance, NDVI info, and met info
+- Ask questions in plain language: *"Why is my EOS R² low?"*, *"What does GDD_cum mean?"*, *"Which climate driver matters most?"*
+- Requires `GEMINI_API_KEY` in `.streamlit/secrets.toml` (see setup below)
+
+### 🛰️ Tab 8 — Sensor Compare
+- Upload 1–3 separate NDVI CSVs (one per sensor: Landsat, Sentinel-2, MODIS)
+- Single file: shows that sensor's extracted phenological events
+- Two or three files: unlocks side-by-side comparison charts and inter-sensor agreement stats (Bias, RMSE, Pearson r)
+- Uses the same sidebar season window and threshold settings as the main analysis
 
 ---
 
@@ -162,7 +120,7 @@ selection required.
 
 ### NDVI CSV
 ```
-date,NDVI
+Date,NDVI
 2017-01-09,0.48
 2017-02-08,0.39
 ```
@@ -190,10 +148,8 @@ Recommended parameters:
 The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR` (diurnal temp range), `VPD`, `SPEI_proxy`, `log_precip`, `MSI` (moisture stress index)
 
 > ⚠️ **Critical:** Upload a **continuous full-year daily** meteorological file — one row per day for every day of the year, for every year in your NDVI series.
->
-> A file that only covers part of the year (e.g. Jan–Apr for alternate years) will silently drop those years from model training, reducing your effective sample size. The app now detects and warns about this pattern — look for the **"Partial-year meteorological data detected"** banner in the Season Extraction tab.
->
-> Do **not** use a file sampled at NDVI cadence (every 5 or 16 days) — the app needs dense daily data to compute meaningful climate averages in each pre-event window.
+> Do **not** use a file sampled at NDVI cadence — the app needs dense daily data to compute meaningful climate averages in each pre-event window.
+> Years with data only for part of the year (e.g. Jan–Apr) will be silently dropped from model training. The app detects and warns about this — look for the **"Partial-year meteorological data detected"** banner.
 
 ---
 
@@ -206,51 +162,9 @@ The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR` (diurnal 
 | **SOS threshold** | 10% | NDVI must rise to this % of amplitude to trigger SOS |
 | **EOS threshold** | 10% | NDVI must fall below this % of amplitude to trigger EOS |
 | **Preferred model** | Ridge | Your model preference (honoured within 0.02 R² of best) |
-| **Climate window** | 15 days | Days before each event to average met variables. With 5-day met cadence, increase to ≥ 30 days |
-| **Max climate variables** | 3 | Maximum features per model. Reduce to 1–2 if R² looks suspiciously high with < 6 seasons |
-
----
-
-## Local Installation
-
-```bash
-git clone https://github.com/shreejisharma/Indian-forest-phenology.git
-cd Indian-forest-phenology
-pip install -r requirements.txt
-streamlit run app/Universal_Indian_Forest_Phenology_Assessment.py
-```
-
-For LOESS with full multi-feature support (recommended):
-
-```bash
-pip install statsmodels
-```
-
-**One-click launchers (no terminal needed):**
-- 🪟 Windows — double-click `run_app.bat`
-- 🍎 macOS — double-click `Run Phenology App.command`
-- 🐧 Linux — double-click `run_app.sh`
-
----
-
-## Repository Structure
-
-```
-Indian-forest-phenology/
-├── app/
-│   └── Universal_Indian_Forest_Phenology_Assessment.py   ← main application
-├── data/
-│   └── ndvi/                           ← sample NDVI files
-├── docs/
-│   └── user_guide.md
-├── scripts/
-│   ├── gee_extract_modis_ndvi.js
-│   └── gee_extract_sentinel2_ndvi.js
-├── run_app.bat                         ← Windows one-click launcher
-├── run_app.sh                          ← macOS/Linux one-click launcher
-├── requirements.txt
-└── README.md
-```
+| **Climate window** | 15 days | Days before each event to average met variables |
+| **Max climate variables** | 3 | Maximum features per model |
+| **Split NDVI plot every N years** | 8 | Long datasets split into panels of this many years |
 
 ---
 
@@ -260,27 +174,27 @@ Indian-forest-phenology/
 
 1. **Cadence detection** — median of observed date differences
 2. **Gap identification** — gaps > 8× cadence preserved as NaN
-3. **Adaptive interpolation** — grid frequency = observed cadence, within-segment only
+3. **5-day interpolation grid** — always interpolated to a 5-day grid regardless of input cadence
 4. **SG smoothing** — per-segment Savitzky-Golay, window ≤ 31 steps (≈ 155 days at 5-day grid)
 5. **Cycle length** — autocorrelation peak of smoothed series
 6. **Trough detection** — min distance = 40% of detected cycle length; boundary-aware 3-pass search
 7. **MIN_AMPLITUDE** — 5% of data P5–P95 range (data-derived floor)
-8. **SOS / EOS threshold** — user% × per-cycle amplitude (local vmin/vmax per season)
+8. **SOS / EOS threshold** — user % × per-cycle amplitude (local vmin/vmax per season)
 9. **POS** — raw NDVI maximum between SOS and EOS dates
-10. **Season year** — trough start year (not POS year)
+10. **Cross-year EOS** — EOS allowed to extend into the following year up to the next trough
 
-### Regression Model Pipeline (v3 — Auto-Best Selection)
+### Regression Model Pipeline
 
-1. Met features computed over user-specified window before each event date (accumulation vs mean detected from column name)
-2. Pearson r + Spearman ρ composite ≥ 0.40 filter (threshold relaxed for n ≤ 4)
-3. Collinearity filter: threshold scales with n — `0.97` (n ≤ 10) · `0.90` (n ≤ 20) · `0.85` (n > 20)
+1. Met features computed over user-specified window before each event date
+2. Pearson r + Spearman ρ composite ≥ 0.40 filter
+3. Collinearity filter (threshold scaled to dataset size)
 4. Forward LOO R² selection: add feature if improvement ≥ 0.03 (≥ 0.08 for n ≤ 5)
 5. **All 5 models fitted simultaneously**:
    - **Ridge** — `RidgeCV` with 30 log-spaced alphas from 10⁻³ to 10⁴
    - **LOESS** — statsmodels lowess + PCA projection for multi-feature; numpy fallback
    - **Poly-2 / Poly-3** — `PolynomialFeatures` + `StandardScaler` + `RidgeCV`
    - **GPR** — `ConstantKernel × RBF + WhiteKernel`, 5 restarts
-6. **Best model selected** per event by LOO R² (`loo_cv()` — unified helper)
+6. **Best model selected** per event by LOO R²
 7. User preferred model honoured when within **0.02 R²** of automatic best
 
 | Model | When it typically wins |
@@ -291,18 +205,38 @@ Indian-forest-phenology/
 | **Polynomial deg-3** | Higher-order curvature; needs n > 5 |
 | **GPR** | Complex nonlinear patterns; needs n ≥ 5 |
 
-### Data Quality Checks (v3)
+---
 
-The app runs the following checks automatically after loading your met file:
+## Local Installation
 
-| Check | Flag condition | Fix |
-|---|---|---|
-| Met paired with NDVI | ≥ 90% of met dates match NDVI dates | Upload continuous daily met file |
-| Large met gaps | Any gap > 60 days | Fill gaps or reduce climate window |
-| **Partial-year coverage** | Any year with max DOY < 240 | Upload full Jan–Dec met for every year |
-| Seasons missing climate data | Event window has 0 rows | Widen climate window or fix met file |
-| **Avg rows per window** | Mean < 4 rows | Increase climate window (≥ 6× cadence) |
-| n ≤ 3 effective seasons | After dropping years with no window data | Collect more complete years |
+```bash
+git clone https://github.com/YOUR_USERNAME/file_ai_agent.git
+cd file_ai_agent
+pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels google-generativeai
+streamlit run Universal_Indian_Forest_Phenology_Assessment.py
+```
+
+For LOESS with full multi-feature support (recommended):
+```bash
+pip install statsmodels
+```
+
+---
+
+## AI Assistant Setup
+
+The 🤖 AI Assistant tab requires a free Google Gemini API key.
+
+1. Go to [aistudio.google.com](https://aistudio.google.com) and sign in with Google
+2. Click **Get API Key** → **Create API key** → copy it
+3. Create `.streamlit/secrets.toml` in the project folder:
+   ```toml
+   GEMINI_API_KEY = "your_gemini_api_key_here"
+   ```
+4. Place `ai_assistant_gemini_free.py` in the same folder as the main app
+
+> ⚠️ Never push `secrets.toml` to GitHub. It is excluded by `.gitignore` in this repo.
+> A safe placeholder template is provided as `.streamlit/secrets.toml.example`.
 
 ---
 
@@ -315,25 +249,11 @@ The app runs the following checks automatically after loading your met file:
 | 0.30 – 0.50 | Moderate — some predictive signal present |
 | < 0.30 | Weak — more seasons or better climate drivers needed |
 
-> **Important — small-n caution:** With n ≤ 3 seasons, Pearson r and Spearman ρ are mathematically constrained — any monotonically ordered set of 3 values gives \|r\| = 1.0 regardless of the true relationship. The app detects this condition and displays a detailed diagnostic banner explaining the cause and how to fix it.
+> **Small-n caution:** With n ≤ 3 seasons, Pearson r and Spearman ρ are mathematically constrained — any 3 monotonically ordered values give \|r\| = 1.0 regardless of the true relationship. The app detects this and displays a diagnostic warning with fix instructions.
 
 ---
 
-## Frequently Asked Questions
-
-**Why do all features show Spearman ρ = ±1.000?**
-This is a mathematical artefact of having only 3 effective training seasons. With n = 3, any set of values that are monotonically ordered (all increasing or all decreasing) produces a Pearson r and Spearman ρ of exactly ±1.0. It does not mean every climate variable is a perfect predictor. You need more complete years of met data to get meaningful correlations.
-
-**Why does the EOS model only have 3 seasons when I uploaded 6 years of data?**
-Your meteorological file likely only has data for part of the year in some years (e.g. Jan–Apr for alternate years). Years without data in the EOS window (typically Sep–Nov) cannot contribute to training. Look for the "Partial-year meteorological data detected" warning and upload a complete full-year file.
-
-**Why does LOESS show R² = −1.0?**
-With n = 3, LOO for LOESS trains on 2 points and predicts the 3rd. Two points define a line, and if the 3rd point is far from that line the prediction is poor — R² goes negative. This is expected with very small samples. Ridge regression is more robust at n = 3.
-
-**What is the recommended Climate Window setting?**
-Set it to at least **6 × your met cadence**. For 5-day met data, use ≥ 30 days. For daily met data, 15–30 days is typically sufficient. The app calculates and displays the recommended minimum in the cadence warning banner.
-
-**How many years of data do I need?**
+## How Many Years of Data Do I Need?
 
 | Years available | What the tool can do |
 |---|---|
@@ -345,11 +265,42 @@ Set it to at least **6 × your met cadence**. For 5-day met data, use ≥ 30 day
 
 ---
 
+## Repository Structure
+
+```
+file_ai_agent/
+├── Universal_Indian_Forest_Phenology_Assessment.py   ← main application
+├── ai_assistant_gemini_free.py                       ← Gemini AI tab module
+├── .streamlit/
+│   ├── secrets.toml          ← your real API key (NOT pushed to GitHub)
+│   └── secrets.toml.example  ← safe placeholder for others
+├── .gitignore
+└── README.md
+```
+
+---
+
+## Frequently Asked Questions
+
+**Why do all features show Spearman ρ = ±1.000?**
+This is a mathematical artefact of having only 3 effective training seasons. With n = 3, any monotonically ordered values produce ρ = ±1.0 exactly. It does not mean every variable is a perfect predictor — you need more complete years of met data.
+
+**Why does my EOS model only have 3 seasons when I uploaded 6 years?**
+Your meteorological file likely only covers part of the year in some years (e.g. Jan–Apr only). Years without data in the EOS window (typically Sep–Nov) are excluded from training. Look for the "Partial-year meteorological data detected" warning.
+
+**What is the recommended Climate Window setting?**
+At least 6× your met cadence. For daily met data: 15–30 days. The app calculates and displays the recommended minimum in the cadence warning banner.
+
+**Why does LOESS show R² = −1.0?**
+With n = 3, LOO for LOESS trains on 2 points and predicts the 3rd. If the 3rd point is far from that line, R² goes negative. Ridge regression is more robust at very small n.
+
+---
+
 ## Citation
 
 ```
-Sharma, S. (2025). Universal Indian Forest Phenology Assessment [Software].
-GitHub. https://github.com/shreejisharma/Indian-forest-phenology
+Sharma, S. (2025). Universal Indian Forest Phenology Assessment v2.3 [Software].
+GitHub. https://github.com/YOUR_USERNAME/file_ai_agent
 ```
 
 ---
