@@ -2353,139 +2353,239 @@ def plot_pheno_trends(pheno_df):
     return fig
 
 
+def _get_loo_predictions(predictor, train_df, event):
+    """Re-run LOO predictions for any model type so scatter plot always works."""
+    if event not in predictor._fits:
+        return None, None, None
+    result   = predictor._fits[event]
+    best_fit = result['best_fit']
+    feats    = result['features']
+    sub      = train_df[train_df['Event'] == event].copy()
+    if len(sub) < 2:
+        return None, None, None
+    avail = [f for f in feats if f in sub.columns]
+    if not avail:
+        return None, None, None
+    obs  = sub['Target_DOY'].values.astype(float)
+    yrs  = sub['Year'].values if 'Year' in sub.columns else np.arange(len(obs))
+    Xf   = sub[avail].fillna(sub[avail].median()).values
+    mode = best_fit.get('mode', 'ridge')
+    n    = len(obs)
+    preds = np.full(n, np.nan)
+
+    for i in range(n):
+        idx_tr = [j for j in range(n) if j != i]
+        Xtr, ytr = Xf[idx_tr], obs[idx_tr]
+        Xte = Xf[[i]]
+        try:
+            if mode in ('ridge', 'poly2', 'poly3'):
+                pipe = best_fit.get('pipe')
+                if pipe is not None:
+                    from sklearn.base import clone
+                    m = clone(pipe); m.fit(Xtr, ytr)
+                    preds[i] = float(m.predict(Xte)[0])
+            elif mode == 'gpr':
+                from sklearn.gaussian_process import GaussianProcessRegressor
+                from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+                from sklearn.preprocessing import StandardScaler
+                sc_i = StandardScaler(); Xtr_sc = sc_i.fit_transform(Xtr); Xte_sc = sc_i.transform(Xte)
+                kernel = ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(0.1)
+                gpr_i  = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=3,
+                                                   normalize_y=True, random_state=42)
+                gpr_i.fit(Xtr_sc, ytr)
+                preds[i] = float(gpr_i.predict(Xte_sc)[0])
+            elif mode == 'loess':
+                x_train = best_fit.get('x_train'); y_train_l = best_fit.get('y_train')
+                if x_train is not None and y_train_l is not None:
+                    xt_i = x_train[idx_tr]; yt_i = y_train_l[idx_tr]
+                    xe_i = x_train[[i]]
+                    preds[i] = float(_loess_predict_fallback(xt_i, yt_i, xe_i, frac=0.75)[0])
+            else:
+                preds[i] = float(np.mean(ytr))
+        except Exception:
+            preds[i] = float(np.mean(obs[idx_tr]))
+
+    valid = ~np.isnan(preds)
+    if valid.sum() < 2:
+        return None, None, None
+    return obs, preds, yrs
+
+
+def _doy_to_date_str(doy, year=2000):
+    """Convert DOY to a short month-day string for axis labels."""
+    try:
+        dt = pd.Timestamp(year, 1, 1) + pd.Timedelta(days=int(doy) - 1)
+        return dt.strftime('%d %b')
+    except Exception:
+        return str(int(doy))
+
+
 def plot_obs_vs_pred(predictor, train_df):
-    """High-resolution LOO scatter plot with year labels, MAE band, and all model types."""
-    ev_cfg = {
-        'SOS': {'color': '#2E7D32', 'band': '#A5D6A7', 'title_color': '#1B5E20'},
-        'POS': {'color': '#1565C0', 'band': '#90CAF9', 'title_color': '#0D47A1'},
-        'EOS': {'color': '#C62828', 'band': '#EF9A9A', 'title_color': '#B71C1C'},
-    }
-    events = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in predictor._fits]
-    if not events:
+    """Observed vs Predicted scatter — ALL model types, calendar DOY axis, high resolution."""
+    import matplotlib.ticker as mticker
+
+    events_avail = [ev for ev in ['SOS', 'POS', 'EOS'] if ev in predictor._fits]
+    if not events_avail:
         return None
 
-    n = len(events)
-    fig, axes = plt.subplots(1, n, figsize=(7.5 * n, 7.0), squeeze=False,
-                             dpi=180, facecolor='#F7FBF8')
+    # ── colour + label maps ──────────────────────────────────
+    BG    = '#FAFFFE'
+    clrs  = {'SOS': '#1B5E20', 'POS': '#0D47A1', 'EOS': '#B71C1C'}
+    fills = {'SOS': '#A5D6A7', 'POS': '#90CAF9', 'EOS': '#EF9A9A'}
+    ev_icons    = {'SOS': 'SOS', 'POS': 'POS', 'EOS': 'EOS'}
+    mode_labels = {'ridge': 'Ridge', 'loess': 'LOESS', 'gpr': 'GPR',
+                   'poly2': 'Poly-2', 'poly3': 'Poly-3', 'mean': 'Mean'}
+    conf_bg   = {'HIGH': '#E8F5E9', 'MEDIUM': '#FFF3E0', 'LOW': '#FFEBEE'}
+    conf_edge = {'HIGH': '#2E7D32', 'MEDIUM': '#E65100', 'LOW': '#B71C1C'}
 
-    for ax, ev in zip(axes[0], events):
-        cfg      = ev_cfg[ev]
-        result   = predictor._fits[ev]
-        best_fit = result['best_fit']
-        feats    = result['features']
-        mode     = best_fit.get('mode', 'mean')
-        sub      = train_df[train_df['Event'] == ev].copy()
-        avail    = [f for f in feats if f in sub.columns]
+    # ── layout: 3 panels always (blank if no data) ───────────
+    fig, axes = plt.subplots(1, 3,
+                             figsize=(21, 7),       # wide + tall = crisp
+                             dpi=180,               # high resolution
+                             squeeze=False)
+    fig.patch.set_facecolor(BG)
+    fig.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.14)
 
-        obs  = sub['Target_DOY'].values
-        years = sub['Year'].values if 'Year' in sub.columns else np.arange(len(obs))
+    for col_idx, ev in enumerate(['SOS', 'POS', 'EOS']):
+        ax = axes[0][col_idx]
+        ax.set_facecolor(BG)
+        for sp in ['top', 'right']:
+            ax.spines[sp].set_visible(False)
+        ax.spines['bottom'].set_linewidth(1.2)
+        ax.spines['left'].set_linewidth(1.2)
+        ax.tick_params(labelsize=11, length=4)
 
-        # ── Generate predictions for all model types ──────────
-        pred = None
-        try:
-            if mode in ('ridge', 'poly2', 'poly3') and best_fit.get('pipe') is not None and avail:
-                Xf   = sub[avail].fillna(sub[avail].median())
-                pred = best_fit['pipe'].predict(Xf.values)
-            elif mode == 'gpr' and best_fit.get('pipe') is not None and avail:
-                Xf   = sub[avail].fillna(sub[avail].median())
-                pred = best_fit['pipe'].predict(Xf.values)
-            elif mode == 'loess':
-                pipe = best_fit.get('pipe')
-                if pipe is not None and hasattr(pipe, 'predict') and avail:
-                    Xf   = sub[avail].fillna(sub[avail].median())
-                    pred = pipe.predict(Xf.values)
-                else:
-                    x_tr = best_fit.get('x_train')
-                    y_tr = best_fit.get('y_train')
-                    feat1 = feats[0] if feats else None
-                    if x_tr is not None and y_tr is not None and feat1 and feat1 in sub.columns:
-                        x_new = sub[feat1].fillna(sub[feat1].median()).values.astype(float)
-                        pred  = _loess_predict_fallback(
-                            np.array(x_tr, dtype=float),
-                            np.array(y_tr, dtype=float),
-                            x_new)
-            elif mode == 'mean':
-                pred = np.full(len(obs), best_fit.get('mean_doy',
-                               best_fit.get('intercept', float(np.mean(obs)))))
-        except Exception:
-            pred = None
-
-        if pred is None or len(pred) != len(obs):
-            ax.text(0.5, 0.5, f'No predictions\navailable for {ev}',
-                    ha='center', va='center', transform=ax.transAxes,
-                    fontsize=11, color='#888')
-            ax.set_facecolor('#F7FBF8')
+        if ev not in predictor._fits:
+            ax.text(0.5, 0.5, f'{ev}\nNo model fitted',
+                    ha='center', va='center', fontsize=14, color='#BDBDBD',
+                    transform=ax.transAxes)
+            ax.set_title(ev, fontsize=15, fontweight='bold', color='#BDBDBD', pad=14)
+            ax.set_xlim(0, 1); ax.set_ylim(0, 1)
             continue
 
-        pred = np.array(pred, dtype=float)
-        r2   = predictor.r2.get(ev, 0.0)
-        mae  = predictor.mae.get(ev, 0.0)
-        conf = 'HIGH' if r2 > 0.6 else ('MEDIUM' if r2 > 0.3 else 'LOW')
+        # ── get LOO predictions ──────────────────────────────
+        obs_rel, preds_rel, yrs = _get_loo_predictions(predictor, train_df, ev)
+        if obs_rel is None or len(obs_rel) < 2:
+            ax.text(0.5, 0.5, f'{ev}\nInsufficient seasons\nfor LOO scatter',
+                    ha='center', va='center', fontsize=13, color='#BDBDBD',
+                    transform=ax.transAxes)
+            ax.set_title(ev, fontsize=15, fontweight='bold', color='#BDBDBD', pad=14)
+            continue
 
-        # ── Axis limits ────────────────────────────────────────
-        pad  = max(10, mae * 2)
-        lims = [min(obs.min(), pred.min()) - pad, max(obs.max(), pred.max()) + pad]
+        # ── convert relative DOY → calendar DOY ─────────────
+        # Target_DOY in train_df IS already calendar DOY; obs_rel comes from
+        # _get_loo_predictions which reads Target_DOY directly.
+        # But the function returns values relative to season start if train_df
+        # uses relative targets — so we use the raw train_df calendar DOY.
+        sub = train_df[train_df['Event'] == ev].copy()
+        obs_cal   = sub['Target_DOY'].values.astype(float)   # calendar DOY
+        yrs_cal   = sub['Year'].values if 'Year' in sub.columns else np.arange(len(obs_cal))
+        # Re-derive pred in calendar DOY: pred_rel offset = pred_rel - obs_rel + obs_cal
+        if len(obs_rel) == len(obs_cal):
+            offset    = obs_cal - obs_rel
+            preds_cal = preds_rel + offset
+        else:
+            preds_cal = preds_rel
+            obs_cal   = obs_rel
+            yrs_cal   = yrs
 
-        # ── MAE confidence band ────────────────────────────────
-        band_x = np.linspace(lims[0], lims[1], 300)
-        ax.fill_between(band_x, band_x - mae, band_x + mae,
-                        color=cfg['band'], alpha=0.28, zorder=1,
-                        label=f'±{mae:.1f}d MAE band')
+        # ── axis limits ──────────────────────────────────────
+        all_vals  = np.concatenate([obs_cal, preds_cal])
+        pad       = max(8, (all_vals.max() - all_vals.min()) * 0.07)
+        lo, hi    = all_vals.min() - pad, all_vals.max() + pad
 
-        # ── 1:1 line ───────────────────────────────────────────
-        ax.plot(lims, lims, 'k--', lw=1.4, alpha=0.6, zorder=2, label='1:1 line')
+        # ── 1:1 line ─────────────────────────────────────────
+        ax.plot([lo, hi], [lo, hi], color='#455A64', lw=1.6,
+                ls='--', alpha=0.65, zorder=1, label='Perfect prediction (1:1)')
 
-        # ── Scatter points ─────────────────────────────────────
-        ax.scatter(obs, pred, color=cfg['color'], s=100,
-                   edgecolors='white', lw=1.8, zorder=4, alpha=0.92)
+        # ── MAE band ─────────────────────────────────────────
+        r2_val  = predictor.r2.get(ev, 0)
+        mae_val = predictor.mae.get(ev, 0)
+        ax.fill_between([lo, hi],
+                        [lo - mae_val, hi - mae_val],
+                        [lo + mae_val, hi + mae_val],
+                        color=fills[ev], alpha=0.22, zorder=0,
+                        label=f'±{mae_val:.1f} d MAE band')
 
-        # ── Year labels on each point ──────────────────────────
-        for xi, yi, yr in zip(obs, pred, years):
-            ax.annotate(str(int(yr)), (xi, yi),
-                        xytext=(4, 4), textcoords='offset points',
-                        fontsize=7.5, color='#555555',
-                        fontweight='normal', zorder=5)
+        # ── scatter points ───────────────────────────────────
+        ax.scatter(obs_cal, preds_cal,
+                   color=clrs[ev], s=110, edgecolors='white',
+                   linewidths=1.8, zorder=4, alpha=0.92)
 
-        ax.set_xlim(lims); ax.set_ylim(lims)
-        ax.set_aspect('equal', adjustable='box')
+        # ── year labels (smart offset to avoid overlap) ──────
+        used_pos = []
+        for o_i, p_i, yr_i in zip(obs_cal, preds_cal, yrs_cal):
+            dx, dy = 6, 4
+            # Nudge if too close to another label
+            for (ux, uy) in used_pos:
+                if abs(o_i - ux) < 6 and abs(p_i - uy) < 6:
+                    dy += 10; dx = -14
+                    break
+            used_pos.append((o_i, p_i))
+            ax.annotate(str(int(yr_i)), (o_i, p_i),
+                        textcoords='offset points', xytext=(dx, dy),
+                        fontsize=8.5, color='#37474F',
+                        fontweight='bold', alpha=0.88,
+                        arrowprops=None)
 
-        # ── Stats box (top-left) ───────────────────────────────
-        box_color = {'HIGH': '#E8F5E9', 'MEDIUM': '#FFF8E1', 'LOW': '#FFEBEE'}[conf]
-        box_edge  = {'HIGH': '#2E7D32', 'MEDIUM': '#F9A825', 'LOW': '#E53935'}[conf]
-        stats_txt = (f'LOO R² = {r2:.3f}\n'
-                     f'MAE = ±{mae:.1f} d\n'
-                     f'{conf}')
-        ax.text(0.04, 0.96, stats_txt, transform=ax.transAxes,
-                fontsize=10, fontweight='bold', va='top', ha='left',
-                color=cfg['title_color'], zorder=6,
-                bbox=dict(boxstyle='round,pad=0.5', facecolor=box_color,
-                          edgecolor=box_edge, linewidth=1.8, alpha=0.95))
+        ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
 
-        # ── Axis labels & title ────────────────────────────────
-        model_label = result.get('best_name', mode.upper())
-        feat_str    = ' + '.join(avail) if avail else 'mean'
+        # ── DOY → Month labels on axes ───────────────────────
+        tick_vals = ax.get_xticks()
+        # Filter to range
+        tick_vals = [t for t in tick_vals if lo <= t <= hi]
+        month_lbls = [_doy_to_date_str(t) for t in tick_vals]
+        ax.set_xticks(tick_vals); ax.set_xticklabels(month_lbls, fontsize=10, rotation=30, ha='right')
+        ax.set_yticks(tick_vals); ax.set_yticklabels(month_lbls, fontsize=10)
+
+        # ── confidence box ───────────────────────────────────
+        conf_lbl = 'HIGH' if r2_val > 0.6 else 'MEDIUM' if r2_val > 0.3 else 'LOW'
+        result   = predictor._fits[ev]
+        feats    = result['features']
+        mode     = result['best_fit'].get('mode', 'ridge')
+        model_lbl = mode_labels.get(mode, mode.upper())
+
+        info_txt = (
+            f'LOO R\u00b2 = {r2_val:.3f}\n'
+            f'MAE = \u00b1{mae_val:.1f} days\n'
+            f'n = {len(obs_cal)} seasons\n'
+            f'Confidence: {conf_lbl}'
+        )
+        ax.text(0.04, 0.97, info_txt,
+                transform=ax.transAxes, va='top', ha='left',
+                fontsize=10.5, fontweight='bold',
+                color=conf_edge[conf_lbl], linespacing=1.6,
+                bbox=dict(boxstyle='round,pad=0.55',
+                          facecolor=conf_bg[conf_lbl],
+                          edgecolor=conf_edge[conf_lbl],
+                          alpha=0.96, lw=2.0))
+
+        # ── axis labels ──────────────────────────────────────
+        ax.set_xlabel('Observed Date (calendar DOY)',
+                      fontsize=12, fontweight='bold', labelpad=8)
+        ax.set_ylabel('Predicted Date — LOO held-out',
+                      fontsize=12, fontweight='bold', labelpad=8)
+
+        # ── feature string (wrap if long) ────────────────────
+        feat_str  = ' + '.join(feats) if feats else 'mean only'
+        if len(feat_str) > 32:
+            feat_str = '\n'.join(feat_str.split(' + '))
+
         ax.set_title(
-            f'□ {ev}  [{model_label}]\n{feat_str}',
-            fontsize=11, fontweight='bold', color=cfg['title_color'], pad=10)
-        ax.set_xlabel('Observed DOY (days from season start)',
-                      fontsize=10, labelpad=6)
-        ax.set_ylabel('Predicted DOY (LOO held-out)',
-                      fontsize=10, labelpad=6)
+            f'{ev}  [{model_lbl}]',
+            fontsize=15, fontweight='bold', color=clrs[ev], pad=14)
+        ax.text(0.5, 1.02, feat_str,
+                transform=ax.transAxes, ha='center', va='bottom',
+                fontsize=10, color='#555', style='italic')
 
-        # ── Legend ─────────────────────────────────────────────
-        ax.legend(fontsize=8.5, loc='lower right', framealpha=0.88,
-                  edgecolor=cfg['color'], handlelength=1.5)
-
-        ax.grid(True, alpha=0.20, color='#C8E6C9', linestyle='--')
-        ax.set_facecolor('#FAFFF8')
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.7)
-            spine.set_color('#CCCCCC')
+        ax.legend(fontsize=9.5, loc='lower right',
+                  framealpha=0.92, edgecolor='#BDBDBD',
+                  handlelength=1.6, borderpad=0.6)
+        ax.grid(True, alpha=0.18, color='#90A4AE', lw=0.8, linestyle=':')
 
     fig.suptitle(
-        'Observed vs Predicted — LOO Cross-Validation (All Model Types)',
-        fontsize=14, fontweight='bold', color='#0D2016', y=1.01)
-    fig.tight_layout(pad=2.0)
+        'Observed vs Predicted Phenological Dates  —  LOO Cross-Validation',
+        fontsize=16, fontweight='bold', color='#1B3A2B', y=0.98)
     return fig
 
 
@@ -4634,13 +4734,68 @@ Daily climate data. Download free from
                                 f'<span class="eq-meta">This example uses historical average climate values as inputs.</span>'
                                 f'</div>', unsafe_allow_html=True)
 
-            # ── Observed vs Predicted plot ────────────────────
+            # ── Observed vs Predicted scatter + Year-by-year LOO table ──────
+            st.markdown('<p class="section-title">📊 Observed vs Predicted — LOO Validation</p>',
+                        unsafe_allow_html=True)
+            st.markdown(
+                '<div style="background:#E8F5E9;border-left:4px solid #2E7D32;padding:10px 14px;'
+                'border-radius:0 8px 8px 0;margin-bottom:12px;font-size:0.86rem;color:#1B5E20;">'
+                '<b>How to read this chart:</b> Each dot = one season held out during LOO '
+                'cross-validation. The model was trained on <i>all other seasons</i> and used '
+                'to predict the held-out season. Points on the dashed 1:1 line = perfect '
+                'prediction. The shaded band shows the ±MAE uncertainty. '
+                'All model types (Ridge, LOESS, GPR, Polynomial) are now supported.</div>',
+                unsafe_allow_html=True)
             fig_s_t3 = plot_obs_vs_pred(predictor_t3, train_df_t3)
             if fig_s_t3:
-                st.markdown('<p class="section-title">Observed vs Predicted — LOO Validation</p>',
-                            unsafe_allow_html=True)
                 st.pyplot(fig_s_t3, use_container_width=True)
                 plt.close(fig_s_t3)
+            else:
+                st.info("⚠️ Scatter plot could not be generated — insufficient seasons for LOO.")
+
+            # ── Year-by-year LOO prediction table ────────────────
+            st.markdown('<p class="section-title">📋 Year-by-Year LOO Predictions</p>',
+                        unsafe_allow_html=True)
+            loo_rows = []
+            for ev_loo in ['SOS', 'POS', 'EOS']:
+                obs_loo, preds_loo, yrs_loo = _get_loo_predictions(predictor_t3, train_df_t3, ev_loo)
+                if obs_loo is None:
+                    continue
+                for yr_i, ob_i, pr_i in zip(yrs_loo, obs_loo, preds_loo):
+                    err_i = pr_i - ob_i
+                    # Convert DOY to calendar date
+                    try:
+                        act_date = (pd.Timestamp(int(yr_i), 1, 1) + pd.Timedelta(days=int(ob_i)-1)).strftime('%d %b')
+                    except Exception:
+                        act_date = f'DOY {int(ob_i)}'
+                    loo_rows.append({
+                        'Event': ev_loo,
+                        'Season Year': int(yr_i),
+                        'Observed DOY': int(ob_i),
+                        'Observed Date': act_date,
+                        'Predicted DOY': round(float(pr_i), 1),
+                        'Error (days)': round(float(err_i), 1),
+                        'Abs Error': round(abs(float(err_i)), 1),
+                    })
+            if loo_rows:
+                loo_df = pd.DataFrame(loo_rows)
+                # Colour-code by abs error
+                def _style_error(val):
+                    if isinstance(val, float):
+                        if val <= 5:   return 'color:#2E7D32;font-weight:bold'
+                        elif val <= 15: return 'color:#E65100;font-weight:bold'
+                        else:           return 'color:#B71C1C;font-weight:bold'
+                    return ''
+                styled = (loo_df.style
+                          .map(_style_error, subset=['Abs Error', 'Error (days)'])
+                          .format({'Predicted DOY': '{:.1f}', 'Error (days)': '{:+.1f}',
+                                   'Abs Error': '{:.1f}'})
+                          .set_properties(**{'font-size': '0.82rem'})
+                          .set_table_styles([{'selector':'th',
+                              'props':[('background','#1B3A2B'),('color','white'),
+                                       ('font-size','0.8rem'),('padding','6px 10px')]}]))
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+                st.caption("🟢 Error ≤5 days (excellent)  🟠 6–15 days (good)  🔴 >15 days (large)")
 
             # ── Download model coefficients ───────────────────
             coef_df_t3 = predictor_t3.export_coefficients(season_start_month=start_m)
