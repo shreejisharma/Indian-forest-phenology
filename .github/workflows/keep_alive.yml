@@ -1,0 +1,19 @@
+name: Keep Phenology App Alive
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'    # runs every 6 hours automatically
+  workflow_dispatch:           # lets you run it manually from GitHub Actions tab
+
+jobs:
+  ping-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit app to prevent sleep
+        run: |
+          echo "Pinging app at $(date)"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app)
+          echo "HTTP status: $STATUS"
+          echo "Done — app is awake!"
