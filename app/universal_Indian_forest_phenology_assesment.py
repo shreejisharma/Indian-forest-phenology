@@ -2722,11 +2722,18 @@ def plot_radar_chart(sensitivity, selected_event='SOS'):
 
 def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df,
                        interp_freq=INTERP_STEP_DAYS):
+    # ── Build smoothed NDVI using the same SG pipeline as extraction ──
+    # This ensures the green NDVI line in Tab 4 is as smooth as Tab 2.
+    _ndvi_5d_grid, _sm_series, _full_r = _build_ndvi_interpolated(ndvi_df, interp_freq)
+    # Use smoothed series for display; fall back to interpolated if all NaN
+    _use_smooth = _sm_series.notna().any()
+    ndvi_5d_smooth = _sm_series if _use_smooth else _ndvi_5d_grid
+    full_r = _full_r
+
+    # Legacy reference kept for backward compat with ndvi_seg indexing below
     ndvi_s = ndvi_df.set_index('Date')['NDVI'].sort_index()
     if ndvi_s.index.duplicated().any():
         ndvi_s = ndvi_s.groupby(ndvi_s.index).mean()
-    full_r  = pd.date_range(start=ndvi_s.index.min(), end=ndvi_s.index.max(), freq=f'{interp_freq}D')
-    ndvi_5d = ndvi_s.reindex(ndvi_s.index.union(full_r)).interpolate(method='time').reindex(full_r)
     if pheno_df is None or len(pheno_df) == 0: return []
     ALL_COLS = ['#E53935','#1E88E5','#43A047','#FB8C00','#8E24AA','#546E7A',
                 '#F9A825','#6A1B9A','#795548','#212121']
@@ -2750,8 +2757,8 @@ def plot_met_with_ndvi(met_df, ndvi_df, raw_params, pheno_df,
             e = pd.Timestamp(eos_d) + pd.Timedelta(days=30)
             df_met = met_df[(met_df['Date'] >= s) & (met_df['Date'] <= e)].copy()
             if len(df_met) < 10: continue
-            ndvi_seg = ndvi_5d.reindex(df_met['Date'].values, method='nearest',
-                                       tolerance=pd.Timedelta('8D')).ffill().bfill()
+            ndvi_seg = ndvi_5d_smooth.reindex(df_met['Date'].values, method='nearest',
+                                              tolerance=pd.Timedelta('8D')).ffill().bfill()
             yr      = int(row['Year'])
             sos_str = pd.Timestamp(sos_d).strftime('%d %b') if pd.notna(sos_d) else '?'
             eos_str = pd.Timestamp(eos_d).strftime('%d %b %Y') if pd.notna(eos_d) else '?'
@@ -2894,107 +2901,92 @@ def _extract_pheno_sensor(ndvi_df, start_month=6, end_month=5,
 
 
 def fit_sensor_models(pheno_df, met_df, params, event='SOS', window=15):
-    """Fit all models for one sensor+event. Returns dict of results."""
-    from datetime import timedelta
+    """
+    Fit all models for one sensor+event using the SAME pipeline as the main
+    phenology tab (fit_all_models + make_training_features).
+
+    This ensures that:
+    - Feature selection uses select_multi_features() + correlation thresholds
+    - All four models (Ridge, LOESS, Poly-2/3, GPR) use identical LOO-CV logic
+    - R² values in Tab 8 are directly comparable to those in Tab 3/5
+
+    Returns a dict keyed by model name matching the format expected by
+    plot_model_radar() and the HTML report generator.
+    """
     date_col = f'{event}_Date'; doy_col = f'{event}_DOY'
     if date_col not in pheno_df.columns: return {}
-    rows = pheno_df[[date_col, doy_col]].dropna()
-    if len(rows) < 2: return {}
 
-    # Build feature matrix
-    records = []
-    for _, row in rows.iterrows():
-        evt_dt = row[date_col]
-        rec = {'y': float(row[doy_col])}
-        for p in params:
-            if p not in met_df.columns: continue
-            mask = ((met_df['Date'] >= pd.Timestamp(evt_dt)-timedelta(days=window)) &
-                    (met_df['Date'] <= pd.Timestamp(evt_dt)))
-            wdf = met_df[mask]
-            if len(wdf) == 0: rec[p] = np.nan; continue
-            rec[p] = float(wdf[p].mean())
-        records.append(rec)
+    # ── Build a minimal pheno_df compatible with make_training_features ──
+    # make_training_features expects SOS_Date, POS_Date, EOS_Date columns.
+    # We only have the one event from this sensor; fill the others with NaT
+    # so the function can still produce rows for the requested event.
+    pheno_compat = pheno_df.copy()
+    for ev2 in ['SOS', 'POS', 'EOS']:
+        for sfx in ['_Date', '_DOY', '_Target']:
+            col = f'{ev2}{sfx}'
+            if col not in pheno_compat.columns:
+                pheno_compat[col] = np.nan if sfx == '_DOY' else pd.NaT
+    # Rename event DOY to Target_DOY format used by make_training_features
+    if f'{event}_Target' not in pheno_compat.columns:
+        pheno_compat[f'{event}_Target'] = pheno_compat[doy_col]
 
-    df = pd.DataFrame(records).dropna()
-    if len(df) < 2: return {}
-
-    y  = df['y'].values
-    Xc = [c for c in df.columns if c != 'y']
-    if not Xc: return {}
-    X  = df[Xc].values
-    sc = StandardScaler()
-    Xs = sc.fit_transform(X)
-
-    def loo_r2_mae(preds):
-        ss_res = np.sum((y-preds)**2)
-        ss_tot = np.sum((y-y.mean())**2)+1e-12
-        r2  = float(np.clip(1-ss_res/ss_tot,-1,1))
-        mae = float(np.mean(np.abs(y-preds)))
-        return r2, mae
-
-    results = {}
-
-    # Ridge
+    # ── Build feature matrix via the shared helper ─────────────────────
     try:
-        rcv = RidgeCV(alphas=np.logspace(-3,4,30))
-        rcv.fit(Xs, y); a = float(rcv.alpha_)
-        preds_r = []
-        for i in range(len(y)):
-            idx_t = [j for j in range(len(y)) if j!=i]
-            sc2 = StandardScaler(); Xtr = sc2.fit_transform(X[idx_t]); Xte = sc2.transform(X[[i]])
-            m = Ridge(alpha=a); m.fit(Xtr, y[idx_t])
-            preds_r.append(float(m.predict(Xte)[0]))
-        pipe = Pipeline([('sc',StandardScaler()),('r',Ridge(alpha=a))])
-        pipe.fit(X, y)
-        r2, mae = loo_r2_mae(np.array(preds_r))
-        results['Ridge'] = {'r2':r2,'mae':mae,'n':len(y),'features':Xc,
-                             'coef':list(pipe.named_steps['r'].coef_/pipe.named_steps['sc'].scale_),
-                             'intercept':float(pipe.named_steps['r'].intercept_-
-                                               np.dot(pipe.named_steps['r'].coef_/pipe.named_steps['sc'].scale_,
-                                                      pipe.named_steps['sc'].mean_)),
-                             'alpha':a,'pipe':pipe}
-    except Exception: pass
+        train_df = make_training_features(pheno_compat, met_df, params, window=window)
+        train_ev = train_df[train_df['Event'] == event].copy()
+    except Exception:
+        train_ev = pd.DataFrame()
 
-    # Poly-2
-    if len(y) >= 4:
-        try:
-            ppipe = Pipeline([('poly',PolynomialFeatures(2,include_bias=False)),
-                               ('sc',StandardScaler()),('r',RidgeCV(alphas=np.logspace(-3,4,20)))])
-            preds_p = []
-            for i in range(len(y)):
-                idx_t = [j for j in range(len(y)) if j!=i]
-                pp2 = Pipeline([('poly',PolynomialFeatures(2,include_bias=False)),
-                                 ('sc',StandardScaler()),('r',RidgeCV(alphas=np.logspace(-3,4,20)))])
-                pp2.fit(X[idx_t], y[idx_t])
-                preds_p.append(float(pp2.predict(X[[i]])[0]))
-            ppipe.fit(X, y)
-            r2, mae = loo_r2_mae(np.array(preds_p))
-            results['Poly-2'] = {'r2':r2,'mae':mae,'n':len(y),'features':Xc,'pipe':ppipe}
-        except Exception: pass
+    if len(train_ev) < 2:
+        return {}
 
-    # GPR
-    if len(y) >= 5:
-        try:
-            kernel = ConstantKernel(1.0)*RBF(1.0)+WhiteKernel(0.1)
-            gpr = GaussianProcessRegressor(kernel=kernel,normalize_y=True,random_state=42)
-            gpr.fit(Xs, y)
-            preds_g = []
-            for i in range(len(y)):
-                idx_t = [j for j in range(len(y)) if j!=i]
-                sc2 = StandardScaler(); Xtr = sc2.fit_transform(X[idx_t])
-                gp2 = GaussianProcessRegressor(kernel=ConstantKernel(1.0)*RBF(1.0)+WhiteKernel(0.1),
-                                               normalize_y=True,random_state=42)
-                gp2.fit(Xtr, y[idx_t])
-                preds_g.append(float(gp2.predict(sc2.transform(X[[i]]))[0]))
-            r2, mae = loo_r2_mae(np.array(preds_g))
-            results['GPR'] = {'r2':r2,'mae':mae,'n':len(y),'features':Xc,'gpr':gpr,'sc':sc}
-        except Exception: pass
+    meta_cols = {'Year', 'Event', 'Target_DOY', 'LOS_Days', 'Peak_NDVI', 'Season_Start'}
+    feat_cols = [c for c in train_ev.columns if c not in meta_cols
+                 and pd.api.types.is_numeric_dtype(train_ev[c])]
+    if not feat_cols:
+        return {}
 
-    # Mean baseline
-    md = float(y.mean())
-    results['Mean Baseline'] = {'r2':0.0,'mae':float(np.mean(np.abs(y-md))),'n':len(y),'features':[]}
+    X_all = train_ev[feat_cols]
+    y_ser = train_ev['Target_DOY'].astype(float)
 
-    return results
+    # ── Run the shared fit_all_models engine (same as main tab) ────────
+    try:
+        result = fit_all_models(X_all, y_ser, preferred_key='ridge')
+    except Exception:
+        return {}
+
+    # ── Convert to the flat dict format expected by plot_model_radar ───
+    # plot_model_radar looks for keys: 'Ridge', 'Poly-2', 'GPR', 'Mean Baseline'
+    flat = {}
+    all_mods = result.get('all_models', {})
+    name_map = {
+        'Ridge':  'Ridge',
+        'LOESS':  'LOESS',
+        'Poly-2': 'Poly-2',
+        'Poly-3': 'Poly-3',
+        'GPR':    'GPR',
+        'mean':   'Mean Baseline',
+    }
+    for raw_name, mfit in all_mods.items():
+        display_name = name_map.get(raw_name, raw_name)
+        flat[display_name] = {
+            'r2':      mfit.get('r2', np.nan),
+            'mae':     mfit.get('mae', np.nan),
+            'n':       mfit.get('n', len(y_ser)),
+            'features': result.get('features', []),
+        }
+
+    # Always include Mean Baseline if not already present
+    if 'Mean Baseline' not in flat:
+        md = float(y_ser.mean())
+        flat['Mean Baseline'] = {
+            'r2': 0.0,
+            'mae': float(np.mean(np.abs(y_ser.values - md))),
+            'n': len(y_ser),
+            'features': [],
+        }
+
+    return flat
 
 # ═══════════════════════════════════════════════════════════════
 # SENSOR AGREEMENT STATISTICS
