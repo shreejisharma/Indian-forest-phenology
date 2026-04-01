@@ -2846,24 +2846,32 @@ DS_SENSORS = {
 }
 
 def _parse_ndvi_sensor(uploaded_file):
-    """Parse a sensor NDVI CSV: Date + NDVI columns, dedup by mean."""
+    """Parse a sensor NDVI CSV: Date + NDVI columns, dedup by mean.
+    Uses identical parsing logic as parse_ndvi (main tab) so both tabs
+    always read dates the same way regardless of date format in the file.
+    """
     try:
         raw = uploaded_file.read()
         uploaded_file.seek(0)
         df = pd.read_csv(StringIO(raw.decode('utf-8', errors='replace')))
         df.columns = [c.strip() for c in df.columns]
-        date_col = next((c for c in df.columns if c.lower() in ['date','dates','time','datetime']), None)
-        ndvi_col = next((c for c in df.columns if c.lower() in ['ndvi','ndvi_value','value','index','evi']), None)
+        date_col = next((c for c in df.columns
+                         if c.lower() in ['date','dates','time','datetime']), None)
+        ndvi_col = next((c for c in df.columns
+                         if c.lower() in ['ndvi','ndvi_value','value','index','evi']), None)
         if not date_col or not ndvi_col:
             return None, f"Need columns: Date + NDVI (found: {list(df.columns)})"
-        df = df.rename(columns={date_col:'Date', ndvi_col:'NDVI'})
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+        doy_col = df['doy'] if 'doy' in df.columns else None
+        df = df.rename(columns={date_col: 'Date', ndvi_col: 'NDVI'})
+        df['Date'] = _parse_date_robust(df['Date'].astype(str), doy_series=doy_col)
         df['NDVI'] = pd.to_numeric(df['NDVI'], errors='coerce')
-        df = df.dropna(subset=['Date'])[['Date','NDVI']].sort_values('Date').reset_index(drop=True)
+        df = (df.dropna(subset=['Date', 'NDVI'])[['Date', 'NDVI']]
+                .sort_values('Date').reset_index(drop=True))
         if df['Date'].duplicated().any():
-            df = df.groupby('Date', as_index=False)['NDVI'].mean().sort_values('Date').reset_index(drop=True)
+            df = (df.groupby('Date', as_index=False)['NDVI'].mean()
+                    .sort_values('Date').reset_index(drop=True))
         if len(df) == 0:
-            return None, "No valid rows after parsing"
+            return None, "No valid rows after parsing. Check date format."
         return df, None
     except Exception as e:
         return None, str(e)
