@@ -1,4 +1,4 @@
-# 🌲 Universal Indian Forest Phenology Assessment — v2.3
+# 🌲 Universal Indian Forest Phenology Assessment
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white" />
@@ -21,7 +21,7 @@ A **fully data-driven Streamlit application** for extracting and predicting phen
 **Start of Season (SOS)**, **Peak of Season (POS)**, and **End of Season (EOS)** — across all Indian
 forest types. Upload your NDVI time series and meteorological data; every threshold, feature, and
 model coefficient is derived entirely from your data — no hardcoded presets, no forest-type
-selection required. Now includes a built-in **🤖 AI Assistant** powered by Google Gemini (free tier)
+selection required. Includes a built-in **🤖 AI Assistant** powered by Google Gemini (free tier)
 and a **🛰️ Multi-Sensor Comparison** tab for Landsat, Sentinel-2, and MODIS.
 
 ---
@@ -34,24 +34,11 @@ and a **🛰️ Multi-Sensor Comparison** tab for Landsat, Sentinel-2, and MODIS
 | **Phenological events** | SOS · POS · EOS · LOS (Length of Season) |
 | **NDVI input** | Any CSV with `Date` + `NDVI` columns (MODIS MOD13Q1, Sentinel-2, Landsat, or custom) |
 | **Meteorological input** | NASA POWER daily export or custom CSV (headers auto-detected) |
-| **Prediction engine** | Ridge · LOESS · Polynomial (deg 2/3) · Gaussian Process — **all fitted simultaneously**, best auto-selected per event by LOO R²  |
+| **Prediction engine** | Ridge · LOESS · Polynomial (deg 2/3) · Gaussian Process — **all fitted simultaneously**, best auto-selected per event by LOO R² |
 | **Feature selection** | Pearson \|r\| ≥ 0.40 filter → collinearity removal → forward LOO R² selection |
 | **Minimum data** | 3 complete growing seasons (≥ 5 recommended for reliable statistics) |
 | **AI Assistant** | Google Gemini (free tier) — ask questions about your results in plain language |
 | **Multi-sensor** | Compare SOS/POS/EOS across Landsat, Sentinel-2, and MODIS with inter-sensor agreement stats |
-
----
-
-## What's New in v2.3
-
-| Feature | Detail |
-|---|---|
-| **5-day interpolation grid** | Interpolation always uses a 5-day grid regardless of input cadence (MODIS 16-day, Sentinel 10-day, etc.) so that the Savitzky-Golay smoother receives evenly-spaced input |
-| **Cross-year EOS fix** | Season-boundary logic now properly handles windows that wrap around the calendar year (e.g. Jun → May). EOS is no longer truncated at Dec 31 — it can extend into the following year up to the next season's trough |
-| **Auto-split NDVI plot** | If NDVI data spans more than 8 years, the time-series plot is automatically split into ≤ 8-year panels for readability (split threshold configurable in sidebar) |
-| **🤖 AI Assistant tab** | New tab powered by Google Gemini free tier — context-aware answers about your phenology results, model performance, and data quality |
-| **🛰️ Sensor Compare tab** | Upload 1–3 per-sensor NDVI CSVs to compare phenology across Landsat, Sentinel-2, and MODIS with Bias, RMSE, and Pearson r agreement stats |
-| **8 tabs total** | Data Quality → Season Extraction → Model Results → Climate Drivers → Predict → User Guide → AI Assistant → Sensor Compare |
 
 ---
 
@@ -83,7 +70,7 @@ and a **🛰️ Multi-Sensor Comparison** tab for Landsat, Sentinel-2, and MODIS
 - Confidence level per event: HIGH (R² > 0.6) · MEDIUM · LOW
 
 ### 🎯 Tab 4 — Climate Drivers
-- Feature correlation bar chart + Pearson r heatmap (data-ranked, p-value annotated with * / **)
+- Feature correlation bar chart + Pearson r heatmap (data-ranked, p-value annotated with \* / \*\*)
 - Full correlation table per event — Pearson r, Spearman ρ, Composite score
 - Year-by-year NDVI + Meteorology overlay plots
 - Climate Driver Sensitivity Analysis — days shifted per 1σ change in each variable
@@ -210,8 +197,8 @@ The app **automatically derives**: `GDD_5`, `GDD_10`, `GDD_cum`, `DTR` (diurnal 
 ## Local Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/file_ai_agent.git
-cd file_ai_agent
+git clone https://github.com/shreejisharma/Indian-forest-phenology.git
+cd Indian-forest-phenology
 pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels google-generativeai
 streamlit run Universal_Indian_Forest_Phenology_Assessment.py
 ```
@@ -268,7 +255,7 @@ The 🤖 AI Assistant tab requires a free Google Gemini API key.
 ## Repository Structure
 
 ```
-file_ai_agent/
+Indian-forest-phenology/
 ├── Universal_Indian_Forest_Phenology_Assessment.py   ← main application
 ├── ai_assistant_gemini_free.py                       ← Gemini AI tab module
 ├── .streamlit/
@@ -299,8 +286,8 @@ With n = 3, LOO for LOESS trains on 2 points and predicts the 3rd. If the 3rd po
 ## Citation
 
 ```
-Sharma, S. (2025). Universal Indian Forest Phenology Assessment v2.3 [Software].
-GitHub. https://github.com/YOUR_USERNAME/file_ai_agent
+Sharma, S. (2025). Universal Indian Forest Phenology Assessment [Software].
+GitHub. https://github.com/shreejisharma/Indian-forest-phenology
 ```
 
 ---
