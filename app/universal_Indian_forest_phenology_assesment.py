@@ -1,27 +1,28 @@
 """
-Universal Indian Forest Phenology Assessment  v2.3  (Restyled UI)
+Universal Indian Forest Phenology Assessment
 ====================================================
-Changes from v2.0:
+A fully data-driven Streamlit application for extracting and predicting
+phenological events (SOS, POS, EOS) across all Indian forest types.
+
+Key capabilities:
   1. SPLIT PLOT  — if NDVI data spans > 8 years the time-series plot is
      automatically split into ≤8-year chunks for readability.
-  2. CROSS-YEAR EOS FIX — the season-boundary logic now properly handles
-     windows that wrap around the calendar year (e.g. Jun → May).
-     EOS is no longer truncated at Dec 31; it is allowed to extend into
-     the following year up to the next season's trough.
+  2. CROSS-YEAR EOS — the season-boundary logic properly handles windows
+     that wrap around the calendar year (e.g. Jun → May).
+     EOS is not truncated at Dec 31; it extends into the following year
+     up to the next season's trough.
   3. 5-DAY INTERPOLATION GRID — interpolation is always done on a 5-day
      grid regardless of the raw NDVI cadence (MODIS 16-day, Sentinel 10-day,
      etc.) so that the Savitzky-Golay smoother receives evenly-spaced input.
-
-AI ASSISTANT ADDED (v2.1 + AI):
-  - New "🤖 AI Assistant" tab powered by Google Gemini (free tier)
-  - Place ai_assistant_gemini_free.py next to this file
-  - Add GEMINI_API_KEY to .streamlit/secrets.toml
+  4. AI ASSISTANT — "🤖 AI Assistant" tab powered by Google Gemini (free tier).
+     Place ai_assistant_gemini_free.py next to this file and add
+     GEMINI_API_KEY to .streamlit/secrets.toml
 
 Requirements:
     pip install streamlit pandas numpy scipy scikit-learn matplotlib statsmodels google-generativeai
 
 Run:
-    streamlit run Universal_Indian_Forest_Phenology_Assessment_v2_1_with_AI.py
+    streamlit run Universal_Indian_Forest_Phenology_Assessment.py
 """
 
 import streamlit as st
@@ -111,7 +112,7 @@ def _loess_predict_fallback(x_train, y_train, x_new, frac=0.75):
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="🌲 Indian Forest Phenology Assessment  v2.3",
+    page_title="🌲 Indian Forest Phenology Assessment",
     page_icon="🌲",
     layout="wide"
 )
@@ -973,7 +974,7 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
     """
     Extract phenology events from NDVI time series.
 
-    Key fixes (v2.1):
+    Key capabilities:
     - Interpolation always uses INTERP_STEP_DAYS (5-day) grid
     - EOS is allowed to extend across the calendar year boundary
     - Cross-year season window handled correctly in _is_peak_in_window
@@ -1103,9 +1104,9 @@ def extract_phenology(ndvi_df, cfg, sos_threshold_pct, eos_threshold_pct):
         # ── helper to extract one season cycle ────────────────
         def _extract_cycle(cycle_raw, cycle_t, ndvi_min, pos_idx_hint=None, eos_upper=None):
             """
-            Improved cycle extraction (v2.2):
+            Cycle extraction logic:
 
-            Key improvements over v2.1:
+            Key design decisions:
             ─────────────────────────────────────────────────────────────
             1. BASE NDVI  — use the lower of (trough value, P10 of cycle)
                so that noise spikes at the trough don't inflate the base
@@ -3925,7 +3926,7 @@ Daily climate data. Download free from
 <br><i>⚠️ Use continuous <b>daily</b> records — not NDVI-cadence sampled files.</i>
 </div>
 <div style="margin-top:14px">
-<b>v2.1 + AI improvements:</b><br>
+<b>Key capabilities:</b><br>
 <span class="feature-item">🕐 5-day interpolation grid (always)</span>
 <span class="feature-item">📆 Cross-year EOS correctly handled</span>
 <span class="feature-item">📊 Auto-split plot for long datasets</span>
@@ -5044,21 +5045,21 @@ Daily climate data. Download free from
     # TAB 6 — USER GUIDE
     # ══════════════════════════════════════════════════════════
     with tab6:
-        st.markdown('<p class="section-title">User Guide — v2.1 + AI</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-title">User Guide</p>', unsafe_allow_html=True)
         st.markdown(f"""
 This tool analyses forest vegetation phenology from NDVI + climate data.
 No forest-type configuration required — fully data-driven.
 
 ---
 
-### 🆕 What's new in v2.1 + AI
+### 🌿 Core Capabilities
 
 | Feature | Detail |
 |---|---|
-| **5-day grid** | Interpolation always uses a {INTERP_STEP_DAYS}-day grid |
-| **8 tabs** | Data Quality → Season Extraction → Model Results → Climate Drivers → Predict → User Guide → AI → Sensor Compare |
+| **5-day grid** | Interpolation always uses a {INTERP_STEP_DAYS}-day grid regardless of input cadence |
+| **8 tabs** | Data Quality → Season Extraction → Model Results → Climate Drivers → Predict → User Guide → AI Assistant → Sensor Compare |
 | **Cross-year EOS** | End-of-season dates can extend into the next calendar year |
-| **Split NDVI plot** | Datasets spanning >8 years split into ≤8-year panels |
+| **Split NDVI plot** | Datasets spanning >8 years split into ≤8-year panels for readability |
 | **AI Assistant tab** | Ask any question about your results — powered by Google Gemini (free) |
 
 ---
@@ -5075,7 +5076,7 @@ No forest-type configuration required — fully data-driven.
 ### 📘 Key Terms
 
 **SOS / POS / EOS / LOS** — Start, Peak, End, Length of Season.
-**DOY** — Day of Year (1=Jan 1, 365=Dec 31).
+**DOY** — Day of Year (1 = Jan 1, 365 = Dec 31).
 **LOO R²** — Leave-One-Out R²: honest out-of-sample accuracy.
 **Amplitude** — Peak NDVI minus baseline NDVI per season.
 
@@ -5083,23 +5084,14 @@ No forest-type configuration required — fully data-driven.
 
 ### 🤖 Prediction Engine (Auto-Best)
 
-All models fitted simultaneously per event:
+All models are fitted simultaneously per event and the best is selected automatically:
 
 | Model | When it wins |
 |---|---|
-| **Ridge** | Small datasets (n<6); stable, interpretable |
-| **LOESS** | Nonlinear with a single driver |
+| **Ridge** | Small datasets (n < 6); stable, interpretable |
+| **LOESS** | Nonlinear response with a single driver |
 | **Polynomial (deg 2/3)** | Unimodal / curved responses |
-| **Gaussian Process** | Complex nonlinear patterns; needs n≥5 |
-
----
-
-### 📘 Key Terms
-
-**SOS / POS / EOS / LOS** — Start, Peak, End, Length of Season.
-**DOY** — Day of Year (1=Jan 1, 365=Dec 31).
-**LOO R²** — Leave-One-Out R²: honest out-of-sample accuracy.
-**Amplitude** — Peak NDVI minus baseline NDVI per season.
+| **Gaussian Process** | Complex nonlinear patterns; needs n ≥ 5 |
 
 ---
 
@@ -5113,8 +5105,9 @@ All models fitted simultaneously per event:
 ---
 
 ### 🔗 Links
-- **GitHub:** [Universal_Indian_Forest_Phenology_Assessment.py](https://github.com/shreejisharma/Indian-forest-phenology)
-- **Run locally:** `streamlit run Universal_Indian_Forest_Phenology_Assessment_v2.py`
+- **🌐 Live App:** [indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app](https://indian-forest-phenology-pnlas9tfyhyoft2vmglxpm.streamlit.app/)
+- **💻 GitHub:** [Universal_Indian_Forest_Phenology_Assessment.py](https://github.com/shreejisharma/Indian-forest-phenology)
+- **▶️ Run locally:** `streamlit run Universal_Indian_Forest_Phenology_Assessment.py`
         """)
 
     # ══════════════════════════════════════════════════════════
