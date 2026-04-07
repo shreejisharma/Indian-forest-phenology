@@ -413,6 +413,20 @@ SNAPSHOT_FEATURES = {'GDD_cum', 'GDD_CUM', 'CPPT', 'CT2M'}
 # ─── FIXED INTERPOLATION STEP (5 days always) ────────────────
 INTERP_STEP_DAYS = 5   # Force 5-day grid regardless of input cadence
 
+# ─── SURFACE PRESSURE EXCLUSION ──────────────────────────────
+# Surface atmospheric pressure (PS, SLP) shows spuriously high
+# correlations with SOS and POS (|r| up to 0.94) because monsoon
+# onset simultaneously lowers pressure AND delivers the moisture
+# that triggers leaf emergence. Pressure is a CONFOUNDING PROXY
+# for monsoon arrival — not a direct physiological driver of
+# bud-break or canopy green-up (Pompe et al. 2025; White et al. 1997).
+# It is therefore excluded from SOS and POS regression equations.
+# EOS is governed by different multi-factor senescence processes
+# where pressure may have minor legitimate associations, so it is
+# allowed to enter EOS models but flagged in the UI.
+PS_CONFOUNDER_COLS = {'PS', 'SLP', 'PRESSURE', 'PS_CORR'}
+PS_EXCLUDED_EVENTS = {'SOS', 'POS'}   # excluded from these events only
+
 
 # ═══════════════════════════════════════════════════════════════
 # DATA-ADAPTIVE UTILITIES
@@ -1905,9 +1919,21 @@ class UniversalPredictor:
             sub = train_df[train_df['Event'] == event].copy()
             self.n_seasons[event] = len(sub)
             if len(sub) < 2: continue
-            X   = sub[feat_cols].fillna(sub[feat_cols].median())
+            # ── Surface pressure exclusion ─────────────────────────
+            # PS / SLP are confounding proxies for monsoon onset and
+            # must NOT enter SOS or POS regression equations.
+            # They co-vary with monsoon arrival but have no direct
+            # physiological mechanism for triggering leaf emergence.
+            if event in PS_EXCLUDED_EVENTS:
+                allowed_cols = [c for c in feat_cols
+                                if c.upper() not in PS_CONFOUNDER_COLS]
+            else:
+                allowed_cols = feat_cols
+            X   = sub[allowed_cols].fillna(sub[allowed_cols].median())
             y   = sub['Target_DOY']
-            self.corr_tables[event] = get_all_correlations(X, y)
+            # Store full correlations (including PS) for display/transparency
+            X_full = sub[feat_cols].fillna(sub[feat_cols].median())
+            self.corr_tables[event] = get_all_correlations(X_full, y)
             result = fit_all_models(X, y, preferred_key=model_key,
                                     user_max_features=user_max_features)
             self._fits[event]  = result
@@ -4606,6 +4632,30 @@ Daily climate data. Download free from
                 f'With n≤3, Pearson r is mathematically constrained and cannot be interpreted causally.'
                 f'</div>', unsafe_allow_html=True)
         st.markdown('<p class="section-title">Full Correlation Table</p>', unsafe_allow_html=True)
+        # ── Surface Pressure confounder notice ───────────────────
+        ps_notice_shown = False
+        if predictor_ss is not None:
+            for ev in ['SOS', 'POS']:
+                ct = predictor_ss.corr_tables.get(ev)
+                if ct is not None and len(ct):
+                    ps_rows = ct[ct['Feature'].str.upper().isin(PS_CONFOUNDER_COLS)]
+                    if len(ps_rows) > 0:
+                        ps_notice_shown = True
+                        break
+        if ps_notice_shown:
+            st.markdown(
+                '<div class="banner-warn">'
+                '⚠️ <b>Surface Pressure (PS / SLP) — Confounding Variable Notice</b><br>'
+                'Surface atmospheric pressure shows a high statistical correlation with SOS and POS '
+                '(|r| can exceed 0.90) because the Indian Summer Monsoon simultaneously lowers pressure '
+                '<i>and</i> delivers the moisture that triggers leaf emergence. '
+                'Pressure is therefore a <b>confounding proxy for monsoon onset</b>, '
+                'not a direct physiological cause of plant green-up (Pompe et al. 2025; White et al. 1997). '
+                'It has been <b>automatically excluded from SOS and POS regression models</b> '
+                'in this app. It still appears in the correlation table below for scientific transparency, '
+                'but its high |r| value should not be interpreted as causal.'
+                '</div>',
+                unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         for col_st, ev in zip([c1, c2, c3], ['SOS', 'POS', 'EOS']):
             with col_st:
@@ -4617,6 +4667,15 @@ Daily climate data. Download free from
                                'Spearman_rho' if 'Spearman_rho' in ct.columns else '|r|',
                                'Composite']].copy()
                     disp = disp.rename(columns={'Pearson_r':'Pearson r','Spearman_rho':'Spearman ρ'})
+                    # Mark PS confounders with a flag
+                    def _flag_feature(f):
+                        if f.upper() in PS_CONFOUNDER_COLS:
+                            if ev in PS_EXCLUDED_EVENTS:
+                                return f"{f}  ⚠️ excluded (confounder)"
+                            else:
+                                return f"{f}  ℹ️ flagged"
+                        return f
+                    disp['Feature'] = disp['Feature'].apply(_flag_feature)
                     sty  = disp.style.background_gradient(subset=['Pearson r'], cmap='RdYlGn', vmin=-1, vmax=1)
                     if 'Spearman ρ' in disp.columns:
                         sty = sty.background_gradient(subset=['Spearman ρ'], cmap='RdYlGn', vmin=-1, vmax=1)
@@ -5064,7 +5123,22 @@ No forest-type configuration required — fully data-driven.
 
 ---
 
-### 🤖 AI Assistant Setup
+### 🚫 Surface Pressure Exclusion (Scientific Note)
+
+Surface atmospheric pressure (`PS`, `SLP`) is **automatically excluded from SOS and POS models**.
+
+| Why it appears correlated | Why it is excluded |
+|---|---|
+| Monsoon onset lowers pressure AND triggers green-up | Pressure has no direct physiological mechanism for bud-break |
+| Statistical |r| can reach 0.90–0.94 for SOS | The real cause is soil moisture + temperature, not pressure |
+| Confounds any regression model that includes it | Including it produces high R² but scientifically invalid equations |
+
+> **Rule:** A regression feature must be both statistically significant **and** ecologically interpretable.
+> PS fails the second test for SOS and POS. It is still shown in the correlation table for transparency.
+
+---
+
+
 
 1. Go to **aistudio.google.com** and sign in with Google
 2. Click **Get API Key** → Create API key → copy it
